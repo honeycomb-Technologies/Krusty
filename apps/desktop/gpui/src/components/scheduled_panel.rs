@@ -554,7 +554,7 @@ fn schedule_editor(
                 ))
                 .child(editor_input(
                     "schedule-editor-crew",
-                    "Crew slug",
+                    "Worker slug",
                     &inputs.crew_slug,
                     false,
                     false,

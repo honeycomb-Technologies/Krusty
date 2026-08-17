@@ -59,6 +59,7 @@ impl HiveRunOutcome {
         if matches!(event, LoopEvent::AwaitingInput { .. }) && !self.awaiting_input {
             self.awaiting_input = true;
             notify_hive_awaiting_input(
+                state.db_path.as_ref(),
                 &state.push_service,
                 &state.apns_service,
                 user_id,
@@ -72,6 +73,7 @@ impl HiveRunOutcome {
         {
             if self.notified_tool_approvals.insert(id.clone()) {
                 notify_hive_tool_approval(
+                    state.db_path.as_ref(),
                     &state.push_service,
                     &state.apns_service,
                     user_id,

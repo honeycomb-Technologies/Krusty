@@ -89,7 +89,7 @@
             {
               "name": "HiveWidget",
               "displayName": "Hive Status",
-              "description": "Daily updates and status from your Hive agent",
+              "description": "Daily updates and status from your Hive Workers",
               "supportedFamilies": [
                 "systemSmall",
                 "systemMedium",

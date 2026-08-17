@@ -47,6 +47,8 @@ fn test_memory(id: &str, memory_type: MemoryType, title: &str, content: &str) ->
         supersedes_id: None,
         last_accessed_at: None,
         access_count: 0,
+        acl_scope: crate::storage::MemoryAclScope::Owner,
+        conversation_id: None,
     }
 }
 

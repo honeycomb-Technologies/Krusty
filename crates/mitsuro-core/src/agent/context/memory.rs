@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
 use crate::agent::context_ledger::ContextLedger;
 use crate::ai::types::ModelMessage;
 use crate::storage::{
@@ -66,10 +68,15 @@ pub(super) fn build_memory_context(
             .filter(|memory| memory.memory_type == *memory_type)
             .filter_map(|memory| {
                 let score = memory_relevance_score(memory, &query_terms);
-                (score > 0).then_some((score, memory))
+                (score > 0.0).then_some((score, memory))
             })
             .collect::<Vec<_>>();
-        typed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        typed.sort_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         typed.truncate(MAX_MEMORIES_PER_TYPE);
         if typed.is_empty() {
             continue;
@@ -120,9 +127,9 @@ pub(super) fn build_memory_context(
     bounded
 }
 
-fn memory_relevance_score(memory: &AgentMemory, query_terms: &BTreeSet<String>) -> usize {
+fn memory_relevance_score(memory: &AgentMemory, query_terms: &BTreeSet<String>) -> f32 {
     if query_terms.is_empty() {
-        return 0;
+        return 0.0;
     }
 
     let title_terms = tokenize(&memory.title);
@@ -133,15 +140,32 @@ fn memory_relevance_score(memory: &AgentMemory, query_terms: &BTreeSet<String>) 
         .collect::<Vec<_>>();
     if matches.is_empty() || (matches.len() == 1 && is_generic_relevance_term(matches[0].as_str()))
     {
-        return 0;
+        return 0.0;
     }
 
-    matches.iter().fold(0, |score, term| {
+    let overlap = matches.iter().fold(0.0_f32, |score, term| {
         score
-            + usize::from(content_terms.contains(*term))
-            + 4 * usize::from(title_terms.contains(*term))
-            + usize::from(term.chars().count() >= 8)
-    })
+            + f32::from(content_terms.contains(*term))
+            + 4.0 * f32::from(title_terms.contains(*term))
+            + f32::from(term.chars().count() >= 8)
+    });
+    if overlap <= 0.0 {
+        return 0.0;
+    }
+    let recency = recency_multiplier(&memory.updated_at);
+    let confidence = (memory.confidence as f32).clamp(0.05, 1.0);
+    overlap * recency * (0.5 + 0.5 * confidence)
+}
+
+fn recency_multiplier(updated_at: &str) -> f32 {
+    let Some(updated) = DateTime::parse_from_rfc3339(updated_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+    else {
+        return 0.75;
+    };
+    let age_days = (Utc::now() - updated).num_days().max(0) as f32;
+    (1.0 - (age_days / 60.0) * 0.5).clamp(0.5, 1.0)
 }
 
 fn relevance_terms(conversation: &[ModelMessage]) -> BTreeSet<String> {

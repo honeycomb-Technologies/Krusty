@@ -6,7 +6,7 @@
 //! archive so a Worker's history and documents are never destroyed.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_core::ai::models::ModelKey as CoreModelKey;
 use mitsuro_core::storage::{
-    is_valid_crew_slug, Database, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocumentKind,
-    HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore, NewHiveWorker, SessionType,
-    WorkspaceMode, MAX_HIVE_PROFILE_DOCUMENT_BYTES,
+    is_valid_crew_slug, Database, HiveDelivery, HiveDeliveryStatus, HiveDeliveryStore, HiveWorker,
+    HiveWorkerAutonomy, HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus,
+    HiveWorkerStore, NewHiveWorker, SessionType, WorkspaceMode, MAX_HIVE_PROFILE_DOCUMENT_BYTES,
 };
 use mitsuro_core::tools::registry::PermissionMode;
 use mitsuro_core::SessionManager;
@@ -63,6 +63,38 @@ pub(super) struct HiveWorkerDetailResponse {
     pub(super) worker: HiveWorkerSummary,
     pub(super) identity: Option<String>,
     pub(super) soul: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ListWorkerDeliveriesQuery {
+    pub(super) status: Option<String>,
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct HiveWorkerDelivery {
+    pub(super) id: String,
+    pub(super) kind: String,
+    pub(super) from_worker_id: Option<String>,
+    pub(super) to_worker_id: String,
+    pub(super) group_id: Option<String>,
+    pub(super) body: String,
+    pub(super) priority: String,
+    pub(super) status: String,
+    pub(super) attempt_count: u32,
+    pub(super) max_attempts: u32,
+    pub(super) available_at: String,
+    pub(super) delivered_at: Option<String>,
+    pub(super) acked_at: Option<String>,
+    pub(super) last_error: Option<String>,
+    pub(super) run_id: Option<String>,
+    pub(super) created_at: String,
+    pub(super) updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct HiveWorkerDeliveriesResponse {
+    pub(super) deliveries: Vec<HiveWorkerDelivery>,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +419,57 @@ pub(super) async fn ensure_worker_dm(
         created: true,
         agent_state: "idle".to_string(),
     }))
+}
+
+pub(super) async fn list_worker_deliveries(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<ListWorkerDeliveriesQuery>,
+) -> Result<Json<HiveWorkerDeliveriesResponse>, AppError> {
+    let store = open_worker_store(&state)?;
+    let worker = load_owned_worker(&store, &id, user.as_ref())?;
+    let status = match query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => Some(HiveDeliveryStatus::parse(value).ok_or_else(|| {
+            AppError::BadRequest(format!("unsupported delivery status: {value}"))
+        })?),
+        None => None,
+    };
+    let deliveries = HiveDeliveryStore::new(Database::new(&state.db_path)?).list_for_worker(
+        &worker.id,
+        status,
+        query.limit.unwrap_or(50),
+    )?;
+    Ok(Json(HiveWorkerDeliveriesResponse {
+        deliveries: deliveries.into_iter().map(summarize_delivery).collect(),
+    }))
+}
+
+fn summarize_delivery(delivery: HiveDelivery) -> HiveWorkerDelivery {
+    HiveWorkerDelivery {
+        id: delivery.id,
+        kind: delivery.kind.as_str().to_string(),
+        from_worker_id: delivery.from_worker_id,
+        to_worker_id: delivery.to_worker_id,
+        group_id: delivery.group_id,
+        body: delivery.body,
+        priority: delivery.priority.as_str().to_string(),
+        status: delivery.status.as_str().to_string(),
+        attempt_count: delivery.attempt_count,
+        max_attempts: delivery.max_attempts,
+        available_at: delivery.available_at,
+        delivered_at: delivery.delivered_at,
+        acked_at: delivery.acked_at,
+        last_error: delivery.last_error,
+        run_id: delivery.run_id,
+        created_at: delivery.created_at,
+        updated_at: delivery.updated_at,
+    }
 }
 
 async fn set_worker_status(

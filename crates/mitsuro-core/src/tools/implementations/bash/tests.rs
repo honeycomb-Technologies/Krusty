@@ -406,7 +406,6 @@ async fn foreground_bash_reports_real_file_state_deltas() {
     std::fs::create_dir(&state_dir).expect("state dir");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
-        sandbox_root: Some(working_dir.clone()),
         db_path: Some(state_dir.join("mitsuro.db")),
         ..Default::default()
     };
@@ -437,8 +436,36 @@ async fn foreground_bash_reports_real_file_state_deltas() {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_bubblewrap_user_namespaces_work() -> bool {
+    if !std::path::Path::new("/usr/bin/bwrap").is_file() {
+        return false;
+    }
+    std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--",
+            "true",
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
+    if !linux_bubblewrap_user_namespaces_work() {
+        eprintln!(
+            "skipping delegated shell sandbox test: bubblewrap user namespaces are unavailable"
+        );
+        return;
+    }
+
     let parent = tempfile::tempdir().expect("temp parent");
     let working_dir = parent.path().join("assigned");
     let outside = parent.path().join("outside.txt");
@@ -493,7 +520,6 @@ async fn foreground_bash_never_claims_equal_directory_or_symlink_is_unchanged() 
     symlink("target", working_dir.join("link")).expect("symlink");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
-        sandbox_root: Some(working_dir.clone()),
         db_path: Some(state_dir.join("mitsuro.db")),
         ..Default::default()
     };
@@ -518,7 +544,6 @@ async fn truncated_output_keeps_recoverable_full_log() {
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
         session_id: Some("test-session".to_string()),
-        sandbox_root: Some(working_dir.clone()),
         ..Default::default()
     };
     let command = "i=1; while [ $i -le 5000 ]; do printf 'line-%s\\n' \"$i\"; i=$((i+1)); done";

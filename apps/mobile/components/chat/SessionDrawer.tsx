@@ -984,7 +984,7 @@ export function SessionDrawer({
     const projectLabel = options?.showProject ? dirDisplayName(directory) : null;
     const primaryMeta = isHive
       ? [
-          options?.hiveSummary?.runtime?.crew_slug || "Hive Agent",
+          options?.hiveSummary?.runtime?.crew_slug || "Hive Worker",
           modelLabel ?? sessionProviderLabel(session),
         ].join(" · ")
       : [projectLabel, branch, modelLabel].filter(Boolean).join(" · ");
@@ -1178,7 +1178,7 @@ export function SessionDrawer({
               style={[styles.sessionModel, { color: t.mutedForeground }]}
             >
               {[primaryMeta, activityLabel].filter(Boolean).join(" · ") ||
-                (isHive ? "Hive Agent" : session.session_type === "chat" ? "Agent" : "Code task")}
+                (isHive ? "Hive Worker" : session.session_type === "chat" ? "Agent" : "Code task")}
             </Text>
             {hasActivity && activity.additions > 0 ? (
               <Text style={[styles.changeStat, { color: t.success }]}>+{formatThreadMetric(activity.additions)}</Text>
@@ -1195,7 +1195,7 @@ export function SessionDrawer({
                 style={[styles.sessionModel, { color: t.mutedForeground }]}
               >
                 {primaryMeta ||
-                  (isHive ? "Hive Agent" : session.session_type === "chat" ? "Agent" : "Code task")}
+                  (isHive ? "Hive Worker" : session.session_type === "chat" ? "Agent" : "Code task")}
               </Text>
               <Text
                 style={[styles.sessionTime, { color: t.mutedForeground }]}

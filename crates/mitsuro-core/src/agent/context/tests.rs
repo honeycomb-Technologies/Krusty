@@ -12,7 +12,8 @@ use super::reports::build_hive_knowledge_context;
 use super::workspace::{build_environment_context, summarize_git_status};
 use super::{
     bound_dynamic_context_messages, build_plan_context, build_project_context,
-    build_skills_context, inject_context, MAX_DYNAMIC_CONTEXT_BYTES,
+    build_skills_context, inject_context, inject_context_with_hive_profile_and_group,
+    MAX_DYNAMIC_CONTEXT_BYTES,
 };
 
 use crate::agent::DelegatedRunStage;
@@ -1038,6 +1039,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         Some("alice"),
         None,
         "hive-alice",
+        None,
         &conversation,
     );
     let bob = build_hive_knowledge_context(
@@ -1046,6 +1048,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         Some("bob"),
         None,
         "hive-bob",
+        None,
         &conversation,
     );
     let local = build_hive_knowledge_context(
@@ -1054,6 +1057,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         None,
         None,
         "hive-local",
+        None,
         &conversation,
     );
 
@@ -1158,6 +1162,7 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
         None,
         None,
         "hive-primary",
+        None,
         &conversation,
     );
     let reviewer = build_hive_knowledge_context(
@@ -1166,6 +1171,7 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
         None,
         Some("reviewer"),
         "hive-reviewer",
+        None,
         &conversation,
     );
 
@@ -1884,7 +1890,7 @@ fn group_room_section_carries_roster_timeline_and_posting_contract() {
     let bounded = build_group_room_section(
         &db_path,
         &HiveGroupRunContext {
-            group_id: group.id.clone(),
+            group_id: group.id,
             group_turn_id: "turn-1".into(),
             run_id: "run-1".into(),
             worker_id: builder.id,
@@ -1909,4 +1915,125 @@ fn group_room_section_carries_roster_timeline_and_posting_contract() {
         },
     )
     .is_none());
+}
+
+#[test]
+fn group_member_run_isolates_worker_private_memories() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    let db_path = repo.join("mitsuro.db");
+    let project = repo.to_string_lossy().to_string();
+    let db = Database::new(&db_path).unwrap();
+    db.conn()
+        .execute_batch(
+            "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+             VALUES ('group-run-a', 'Group run A', '2026-08-16T00:00:00.000000Z',
+                     '2026-08-16T00:00:00.000000Z', 'hive');",
+        )
+        .unwrap();
+
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let researcher = worker_store
+        .create(&NewHiveWorker::new("researcher"))
+        .unwrap();
+    let builder = worker_store.create(&NewHiveWorker::new("builder")).unwrap();
+    let group_store = HiveGroupStore::new(Database::new(&db_path).unwrap());
+    let group = group_store
+        .create(&NewHiveGroup {
+            title: "Release Room".into(),
+            member_worker_ids: vec![researcher.id.clone(), builder.id],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    for (canonical_key, title, content, namespace, namespace_id) in [
+        (
+            "shared-style",
+            "Shared style",
+            "shared-memory-marker",
+            MemoryNamespace::Shared,
+            None,
+        ),
+        (
+            "researcher-private",
+            "Researcher private",
+            "researcher-private-marker",
+            MemoryNamespace::Crew,
+            Some("researcher"),
+        ),
+        (
+            "builder-private",
+            "Builder private",
+            "builder-private-marker",
+            MemoryNamespace::Crew,
+            Some("builder"),
+        ),
+    ] {
+        let mut input =
+            CanonicalMemoryInput::new(MemoryType::Project, canonical_key, title, content);
+        input.project_dir = Some(project.clone());
+        input.namespace = namespace;
+        input.namespace_id = namespace_id.map(str::to_string);
+        memory_store.save_canonical(&input).unwrap();
+    }
+
+    let mut group_shared = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "group-shared",
+        "Group shared",
+        "group-shared-marker",
+    );
+    group_shared.project_dir = Some(project);
+    group_shared.acl_scope = crate::storage::MemoryAclScope::Group;
+    group_shared.conversation_id = Some(group.id.clone());
+    memory_store.save_canonical(&group_shared).unwrap();
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Recall the correct working style.".to_string(),
+        }],
+    }];
+    let group_run = HiveGroupRunContext {
+        group_id: group.id,
+        group_turn_id: "turn-1".into(),
+        run_id: "run-a".into(),
+        worker_id: researcher.id,
+        max_member_messages_per_turn: 1,
+        context_window_messages: 24,
+    };
+    let injected = inject_context_with_hive_profile_and_group(
+        &conversation,
+        &db_path,
+        "group-run-a",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("hive"),
+        None,
+        None,
+        None,
+        Some(&group_run),
+    );
+    let context = injected
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    assert!(context.contains("[GROUP ROOM - Release Room]"));
+    assert!(context.contains("shared-memory-marker"));
+    assert!(context.contains("researcher-private-marker"));
+    assert!(context.contains("group-shared-marker"));
+    assert!(
+        !context.contains("builder-private-marker"),
+        "a group member run must not inherit another Worker's private memories"
+    );
 }

@@ -226,7 +226,7 @@ mod tests {
             // Unresolved-only mentions fall back to everyone.
             ("@nobody around?", all.clone()),
             // Emails never mention.
-            ("mail bob@researcher.dev instead", all.clone()),
+            ("mail bob@researcher.dev instead", all),
             // Mid-sentence mention after punctuation resolves.
             ("cc: @reviewer, thanks", vec!["w-reviewer".into()]),
         ];

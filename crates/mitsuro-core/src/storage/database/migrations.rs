@@ -3944,6 +3944,257 @@ impl Database {
             group_tx.commit()?;
         }
 
+        // Migration 65: Durable Worker-to-Worker delivery ledger.
+        //
+        // hive_deliveries generalizes hive_control_outbox (dedupe key, status,
+        // attempts, available_at) into one row per message-per-recipient. The
+        // daemon pump claims due rows and delivers by enqueueing a run on the
+        // recipient Worker's DM lane or by steering its active run. hive_runs
+        // gains kind 'worker_message' for those wake runs.
+        if current_version < 65 {
+            info!("Running migration 65: Hive delivery ledger");
+
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 65: checking for hive_runs")?;
+            if runs_table_exists {
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 65: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [GROUP_KINDS, DELIVERY_KINDS],
+                    )
+                    .context("Migration 65: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 65: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_message") || !runs_sql.contains("kind IN"),
+                    "Migration 65 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let delivery_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive delivery migration lock")?;
+            delivery_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_deliveries (
+                        id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL DEFAULT 'worker_message'
+                            CHECK (kind IN ('worker_message')),
+                        from_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        to_worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id),
+                        group_id TEXT
+                            REFERENCES hive_groups(id) ON DELETE SET NULL,
+                        body TEXT NOT NULL,
+                        priority TEXT NOT NULL DEFAULT 'normal'
+                            CHECK (priority IN ('normal', 'high')),
+                        dedupe_key TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'delivering', 'delivered', 'acked', 'dead_letter'
+                            )),
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        max_attempts INTEGER NOT NULL DEFAULT 5
+                            CHECK (max_attempts > 0),
+                        available_at TEXT NOT NULL,
+                        delivered_at TEXT,
+                        acked_at TEXT,
+                        last_error TEXT,
+                        run_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE (dedupe_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_due
+                        ON hive_deliveries(status, available_at)
+                        WHERE status IN ('pending', 'delivering');
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_to_worker
+                        ON hive_deliveries(to_worker_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_from_worker
+                        ON hive_deliveries(from_worker_id, created_at)
+                        WHERE from_worker_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_run
+                        ON hive_deliveries(run_id)
+                        WHERE run_id IS NOT NULL;
+                    "#,
+                )
+                .context("Migration 65: create hive_deliveries")?;
+            delivery_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (65)",
+                [],
+            )?;
+            delivery_tx.commit()?;
+        }
+
+        // Migration 66: Memory ACL scopes and conversation isolation.
+        //
+        // Worker-private facts stay on acl_scope='worker' so a group member
+        // run cannot inherit another Worker's crew namespace. conversation_id
+        // is the opt-in key for group-shared and conversation-private rows.
+        if current_version < 66 {
+            info!("Running migration 66: Hive memory ACL scopes");
+            let memory_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring memory ACL migration lock")?;
+            if Self::table_exists(&memory_tx, "agent_memories") {
+                if !Self::column_exists(&memory_tx, "agent_memories", "acl_scope") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN acl_scope TEXT NOT NULL DEFAULT 'owner';",
+                        )
+                        .context("Migration 66: add agent_memories.acl_scope")?;
+                }
+                if !Self::column_exists(&memory_tx, "agent_memories", "conversation_id") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN conversation_id TEXT;",
+                        )
+                        .context("Migration 66: add agent_memories.conversation_id")?;
+                }
+                memory_tx.execute(
+                    "UPDATE agent_memories SET acl_scope = 'worker'
+                     WHERE namespace = 'crew' AND (acl_scope IS NULL OR acl_scope = 'owner')",
+                    [],
+                )?;
+                memory_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_memories_acl
+                        ON agent_memories(status, user_id, namespace, namespace_id, acl_scope, conversation_id);",
+                )?;
+            }
+            memory_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (66)",
+                [],
+            )?;
+            memory_tx.commit()?;
+        }
+
+        // Migration 67: Always-on Worker heartbeat run kind.
+        //
+        // hive_runs.kind gains worker_heartbeat so the pump can wake an
+        // AlwaysOn Worker's DM on its interval without colliding with
+        // scheduled or worker_message rows.
+        if current_version < 67 {
+            info!("Running migration 67: Hive worker heartbeat run kind");
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 67: checking for hive_runs")?;
+            if runs_table_exists {
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                const HEARTBEAT_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 67: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [DELIVERY_KINDS, HEARTBEAT_KINDS],
+                    )
+                    .context("Migration 67: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 67: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_heartbeat") || !runs_sql.contains("kind IN"),
+                    "Migration 67 could not extend the hive_runs kind CHECK"
+                );
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (67)",
+                [],
+            )?;
+        }
+
+        // Migration 68: Calendar schedules may target a Group room.
+        //
+        // hive_schedules.group_id is optional and exclusive with worker_id.
+        // Occurrences enqueue a group turn through the same delivery path
+        // as a user room message.
+        if current_version < 68 {
+            info!("Running migration 68: Hive schedule group targeting");
+            let schedules_exist: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_schedules'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 68: checking for hive_schedules")?;
+            if schedules_exist {
+                let has_group_id: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM pragma_table_info('hive_schedules')
+                             WHERE name = 'group_id'
+                         )",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .context("Migration 68: checking hive_schedules.group_id")?;
+                if !has_group_id {
+                    self.conn
+                        .execute_batch(
+                            "ALTER TABLE hive_schedules ADD COLUMN group_id TEXT
+                                 REFERENCES hive_groups(id) ON DELETE SET NULL;
+                             CREATE INDEX IF NOT EXISTS idx_hive_schedules_group
+                                 ON hive_schedules(group_id) WHERE group_id IS NOT NULL;",
+                        )
+                        .context("Migration 68: adding hive_schedules.group_id")?;
+                }
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (68)",
+                [],
+            )?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4066,7 +4317,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 64);
+        assert_eq!(database.get_schema_version(), 68);
         database
             .conn()
             .execute(
@@ -4147,7 +4398,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 64);
+        assert_eq!(database.get_schema_version(), 68);
         let create_sql: String = database
             .conn()
             .query_row(

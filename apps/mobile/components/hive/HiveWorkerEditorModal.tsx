@@ -16,6 +16,12 @@ import type {
   UpdateHiveWorkerRequest,
 } from "@mitsuro/api";
 import { useThemeContext } from "../../hooks/useTheme";
+import {
+  useHiveWorkerDeliveries,
+  wakeReasonLabel,
+  wakeStatusLabel,
+} from "./hooks/useHiveWorkerDeliveries";
+import { formatRelativeTime } from "./utils";
 import { HIVE_WORKER_COLORS } from "./workerAppearance";
 
 const AUTONOMY_OPTIONS: Array<{ value: HiveWorkerAutonomy; label: string }> = [
@@ -114,6 +120,11 @@ export function HiveWorkerEditorModal({
     () => models.find((candidate) => candidate.id === modelId) ?? null,
     [modelId, models],
   );
+  const wakes = useHiveWorkerDeliveries({
+    workerId: worker?.id ?? null,
+    enabled: visible && !isCreate && Boolean(worker?.id),
+    limit: 8,
+  });
 
   const handleSave = async () => {
     if (!canSave) {
@@ -303,6 +314,57 @@ export function HiveWorkerEditorModal({
             {choiceRow(AUTONOMY_OPTIONS, autonomy, setAutonomy)}
 
             {!isCreate && worker ? (
+              <View style={[styles.wakeBlock, { borderTopColor: t.border }]}>
+                <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
+                  Why this Worker woke
+                </Text>
+                <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
+                  Durable deliveries and peer messages that claimed this lane.
+                </Text>
+                {wakes.error ? (
+                  <Text style={[styles.fieldHint, { color: t.error }]}>{wakes.error}</Text>
+                ) : null}
+                {wakes.isLoading && wakes.items.length === 0 ? (
+                  <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
+                    Loading wake history...
+                  </Text>
+                ) : null}
+                {!wakes.isLoading && wakes.items.length === 0 ? (
+                  <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
+                    No wakes recorded yet. Peer messages, heartbeats, and schedule
+                    targets will appear here.
+                  </Text>
+                ) : null}
+                {wakes.items.map((item) => (
+                  <View
+                    key={item.id}
+                    style={[styles.wakeRow, { borderColor: t.border, backgroundColor: t.card }]}
+                  >
+                    <View style={styles.wakeHeader}>
+                      <Text style={[styles.wakeKind, { color: t.foreground }]} numberOfLines={1}>
+                        {wakeReasonLabel(item)}
+                        {item.priority === "high" ? " · interrupt" : ""}
+                      </Text>
+                      <Text style={[styles.wakeMeta, { color: t.mutedForeground }]}>
+                        {wakeStatusLabel(item.status)} · {formatRelativeTime(item.created_at)}
+                      </Text>
+                    </View>
+                    {item.body.trim().length > 0 ? (
+                      <Text style={[styles.wakeBody, { color: t.mutedForeground }]} numberOfLines={2}>
+                        {item.body.trim()}
+                      </Text>
+                    ) : null}
+                    {item.last_error ? (
+                      <Text style={[styles.wakeBody, { color: t.error }]} numberOfLines={2}>
+                        {item.last_error}
+                      </Text>
+                    ) : null}
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {!isCreate && worker ? (
               <View style={[styles.lifecycle, { borderTopColor: t.border }]}>
                 <Pressable
                   onPress={() => {
@@ -466,6 +528,36 @@ const styles = StyleSheet.create({
   choiceText: {
     fontSize: 12,
     fontWeight: "600",
+  },
+  wakeBlock: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 8,
+  },
+  wakeRow: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  wakeHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  wakeKind: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  wakeMeta: {
+    fontSize: 11,
+  },
+  wakeBody: {
+    fontSize: 12,
+    lineHeight: 16,
   },
   lifecycle: {
     marginTop: 14,

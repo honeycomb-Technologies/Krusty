@@ -16,6 +16,10 @@ pub enum HiveRunKind {
     /// One member run of a Hive group turn, executing on the member Worker's
     /// own controller lane.
     GroupTurn,
+    /// A Worker-to-Worker delivery that woke the recipient's private DM lane.
+    WorkerMessage,
+    /// Periodic wake for an always-on Worker on its private DM lane.
+    WorkerHeartbeat,
 }
 
 impl HiveRunKind {
@@ -26,6 +30,8 @@ impl HiveRunKind {
             Self::ControllerChild => "controller_child",
             Self::LegacyResume => "legacy_resume",
             Self::GroupTurn => "group_turn",
+            Self::WorkerMessage => "worker_message",
+            Self::WorkerHeartbeat => "worker_heartbeat",
         }
     }
 
@@ -36,8 +42,21 @@ impl HiveRunKind {
             "controller_child" => Some(Self::ControllerChild),
             "legacy_resume" => Some(Self::LegacyResume),
             "group_turn" => Some(Self::GroupTurn),
+            "worker_message" => Some(Self::WorkerMessage),
+            "worker_heartbeat" => Some(Self::WorkerHeartbeat),
             _ => None,
         }
+    }
+
+    /// Group turns, peer deliveries, and heartbeats are idempotent enough to
+    /// requeue after a crashed `running` lease. User-facing dispatch and
+    /// calendar occurrences stay in `recovery_required` so side effects are
+    /// not silently replayed.
+    pub fn replays_after_expired_running(self) -> bool {
+        matches!(
+            self,
+            Self::GroupTurn | Self::WorkerMessage | Self::WorkerHeartbeat
+        )
     }
 }
 

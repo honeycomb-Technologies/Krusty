@@ -893,7 +893,7 @@ fn live_goal_detail(
                             div()
                                 .text_xs()
                                 .text_color(colors.text_tertiary)
-                                .child("Crew"),
+                                .child("Worker"),
                         )
                         .child(
                             div()
@@ -1216,7 +1216,7 @@ fn dispatch_editor(
                 ))
                 .child(work_input(
                     "hive-dispatch-crew",
-                    "Crew · optional",
+                    "Worker · optional",
                     &inputs.crew_slug,
                     false,
                     false,

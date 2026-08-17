@@ -12,6 +12,7 @@ use super::super::hive_profiles::MAX_HIVE_PROFILE_DOCUMENT_BYTES;
 use super::model::{
     display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
     HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, NewHiveWorker,
+    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
 };
 
 pub(crate) const WORKER_COLUMNS: &str = "id, user_id, slug, display_name, avatar_color, model, model_key_json, model_catalog_revision, permission_mode, autonomy, heartbeat_interval_secs, status, dm_session_id, memory_namespace_id, created_at, updated_at";
@@ -44,6 +45,10 @@ impl HiveWorkerStore {
         if let Some(interval) = input.heartbeat_interval_secs {
             anyhow::ensure!(interval > 0, "heartbeat interval must be positive");
         }
+        let heartbeat_interval_secs = match (input.autonomy, input.heartbeat_interval_secs) {
+            (HiveWorkerAutonomy::AlwaysOn, None) => Some(DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS),
+            (_, interval) => interval,
+        };
 
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -76,7 +81,7 @@ impl HiveWorkerStore {
                     input.model_catalog_revision,
                     input.permission_mode.as_str(),
                     input.autonomy.as_str(),
-                    input.heartbeat_interval_secs,
+                    heartbeat_interval_secs,
                     input.dm_session_id,
                     memory_namespace_id,
                     now,
@@ -118,6 +123,27 @@ impl HiveWorkerStore {
             .query_row(&sql, params![user_id, slug], map_worker)
             .optional()
             .context("reading Hive worker by slug")
+    }
+
+    /// Fetch any Worker with this slug for exactly this owner, including
+    /// archived rows, so callers can distinguish "never existed" from
+    /// "archived".
+    pub fn get_by_slug_any_status(
+        &self,
+        user_id: Option<&str>,
+        slug: &str,
+    ) -> Result<Option<HiveWorker>> {
+        let sql = format!(
+            "SELECT {WORKER_COLUMNS} FROM hive_workers
+             WHERE {OWNER_PREDICATE} AND slug = ?2
+             ORDER BY CASE status WHEN 'archived' THEN 1 ELSE 0 END, updated_at DESC
+             LIMIT 1"
+        );
+        self.db
+            .conn()
+            .query_row(&sql, params![user_id, slug], map_worker)
+            .optional()
+            .context("reading Hive worker by slug including archived")
     }
 
     pub fn list_for_owner(
@@ -201,6 +227,10 @@ impl HiveWorkerStore {
         if let Some(interval) = heartbeat_interval_secs {
             anyhow::ensure!(interval > 0, "heartbeat interval must be positive");
         }
+        let heartbeat_interval_secs = match (autonomy, heartbeat_interval_secs) {
+            (HiveWorkerAutonomy::AlwaysOn, None) => Some(DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS),
+            (_, interval) => interval,
+        };
         let changed = self.db.conn().execute(
             "UPDATE hive_workers
              SET autonomy = ?2, heartbeat_interval_secs = ?3, updated_at = ?4
@@ -322,6 +352,30 @@ impl HiveWorkerStore {
     pub(super) fn conn(&self) -> &rusqlite::Connection {
         self.db.conn()
     }
+}
+
+pub fn load_worker_with_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<HiveWorker>> {
+    let sql = format!("SELECT {WORKER_COLUMNS} FROM hive_workers WHERE id = ?1");
+    conn.query_row(&sql, [id], map_worker)
+        .optional()
+        .context("reading Hive worker")
+}
+
+pub fn resolve_worker_for_crew_slug_with_conn(
+    conn: &rusqlite::Connection,
+    user_id: Option<&str>,
+    crew_slug: &str,
+) -> Result<Option<HiveWorker>> {
+    let sql = format!(
+        "SELECT {WORKER_COLUMNS} FROM hive_workers
+         WHERE {OWNER_PREDICATE} AND status <> 'archived'
+           AND (slug = ?2 OR memory_namespace_id = ?2)
+         ORDER BY (slug = ?2) DESC, created_at ASC
+         LIMIT 1"
+    );
+    conn.query_row(&sql, params![user_id, crew_slug], map_worker)
+        .optional()
+        .context("resolving Hive worker for crew slug")
 }
 
 fn validate_model_identity(model: Option<&str>, model_key: Option<&ModelKey>) -> Result<()> {

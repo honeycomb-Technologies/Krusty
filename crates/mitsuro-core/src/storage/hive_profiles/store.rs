@@ -30,7 +30,7 @@ pub enum HiveProfileStoreError {
         "Hive profile content exceeds the {MAX_HIVE_PROFILE_DOCUMENT_BYTES}-byte document limit"
     )]
     ContentTooLarge,
-    #[error("invalid Hive agent slug: {0}")]
+    #[error("invalid Hive worker slug: {0}")]
     InvalidCrewSlug(String),
     #[error("Hive profile revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: i64, actual: i64 },
@@ -40,7 +40,7 @@ pub enum HiveProfileStoreError {
     ProfileNotFound(String),
     #[error("invalid stored Hive profile document kind: {0}")]
     InvalidStoredDocumentKind(String),
-    #[error("invalid stored Hive agent document kind: {0}")]
+    #[error("invalid stored Hive worker document kind: {0}")]
     InvalidStoredCrewDocumentKind(String),
     #[error("legacy autonomous homes may only be imported into the local Hive profile")]
     LegacyImportRequiresLocalOwner,

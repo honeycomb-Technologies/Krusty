@@ -159,7 +159,7 @@ function buildScheduledItems(runs: HiveCurrentRunSummary[]): ScheduledRunItem[] 
         detailParts.push(`branch ${run.target_branch}`);
       }
       if (run.runtime?.crew_slug) {
-        detailParts.push(`${run.runtime.crew_slug} agent`);
+        detailParts.push(`${run.runtime.crew_slug} Worker`);
       }
 
       return [

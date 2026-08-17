@@ -11,6 +11,7 @@ import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import type { SessionResponse } from '@mitsuro/api';
+import { HIVE_PRIMARY_NAV_ITEMS } from './hiveDrawerItems';
 import type { HiveTopLevelView } from '../hive/types';
 
 interface DirEntry { name: string; path: string }
@@ -200,7 +201,7 @@ export function SessionList({
         });
 
   const renderHiveViewItem = (
-    view: Extract<HiveTopLevelView, 'crew' | 'groups'>,
+    view: HiveTopLevelView,
     title: string,
     detail: string,
   ) => {
@@ -225,8 +226,9 @@ export function SessionList({
         {onSelectHiveView && activeTab === 2 && (
           <>
             <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Hive</Text>
-            {renderHiveViewItem('crew', 'Workers', 'Durable identities with private DMs')}
-            {renderHiveViewItem('groups', 'Groups', 'Rooms where Workers collaborate')}
+            {HIVE_PRIMARY_NAV_ITEMS.map((item) =>
+              renderHiveViewItem(item.id, item.label, item.detail),
+            )}
           </>
         )}
         <Text style={[styles.sectionLabel, onSelectHiveView && activeTab === 2 ? styles.codeSection : undefined, { color: t.mutedForeground }]}>Conversations</Text>

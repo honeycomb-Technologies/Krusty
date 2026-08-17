@@ -923,6 +923,7 @@ export interface HiveSchedule {
 	model_key?: ModelKey | null;
 	model_catalog_revision?: string | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire: HiveMisfireConfig;
 	overlap_policy: HiveScheduleOverlapPolicy;
 	retry: HiveRetryPolicy;
@@ -956,6 +957,7 @@ export interface HiveScheduleWriteRequest {
 	model?: string | null;
 	model_key?: ModelKey | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire?: HiveMisfireConfig;
 	overlap_policy?: HiveScheduleOverlapPolicy;
 	retry?: HiveRetryPolicy;
@@ -1360,6 +1362,39 @@ export interface HiveWorkerDmResponse {
 	permission_mode: string;
 	created: boolean;
 	agent_state: string;
+}
+
+export type HiveDeliveryStatus =
+	| "pending"
+	| "delivering"
+	| "delivered"
+	| "acked"
+	| "dead_letter";
+
+export type HiveDeliveryPriority = "normal" | "high";
+
+export interface HiveWorkerDelivery {
+	id: string;
+	kind: string;
+	from_worker_id?: string | null;
+	to_worker_id: string;
+	group_id?: string | null;
+	body: string;
+	priority: HiveDeliveryPriority;
+	status: HiveDeliveryStatus;
+	attempt_count: number;
+	max_attempts: number;
+	available_at: string;
+	delivered_at?: string | null;
+	acked_at?: string | null;
+	last_error?: string | null;
+	run_id?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface HiveWorkerDeliveriesResponse {
+	deliveries: HiveWorkerDelivery[];
 }
 
 export type HiveGroupExecutionMode = "workbench" | "roundtable" | "direct";

@@ -33,7 +33,7 @@ impl AgentIdentity {
     ) -> Self {
         let task_name = task_name.into();
         let role = role.into();
-        let creature_name = format!("Hive Agent {:02}", ordinal + 1);
+        let creature_name = format!("Hive Worker {:02}", ordinal + 1);
         let parent_path = parent_path.trim_end_matches('/');
         let path_component = canonical_component(&task_name, ordinal);
 
@@ -91,10 +91,10 @@ mod tests {
         let restored = AgentIdentity::child("id", "/root", "Honey audit", "reviewer", 0);
         assert_eq!(first, restored);
         assert_eq!(first.task_name, "Honey audit");
-        assert_eq!(first.creature_name, "Hive Agent 01");
+        assert_eq!(first.creature_name, "Hive Worker 01");
         assert_eq!(
             first.display_name(),
-            "Hive Agent 01 · Honey audit [reviewer]"
+            "Hive Worker 01 · Honey audit [reviewer]"
         );
     }
 
@@ -116,8 +116,8 @@ mod tests {
     fn later_generations_remain_unique_and_stable() {
         let first = AgentIdentity::child("a", "/root", "task", "builder", 0);
         let thirteenth = AgentIdentity::child("b", "/root", "task", "builder", 12);
-        assert_eq!(first.creature_name, "Hive Agent 01");
-        assert_eq!(thirteenth.creature_name, "Hive Agent 13");
+        assert_eq!(first.creature_name, "Hive Worker 01");
+        assert_eq!(thirteenth.creature_name, "Hive Worker 13");
         assert_ne!(first.canonical_path, thirteenth.canonical_path);
     }
 }

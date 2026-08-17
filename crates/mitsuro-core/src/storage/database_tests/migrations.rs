@@ -117,7 +117,7 @@ fn test_session_list_metadata_migration() {
 
     assert!(columns.contains(&"pinned_at".to_string()));
     assert!(columns.contains(&"archived_at".to_string()));
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -225,7 +225,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -287,7 +287,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     let claimed: String = db
         .conn()
         .query_row(
@@ -317,7 +317,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -372,7 +372,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -426,7 +426,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -535,7 +535,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 63");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 
     let count_workers = |predicate: &str| -> i64 {
         db.conn()
@@ -667,7 +667,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
         .execute("DELETE FROM schema_version WHERE version >= 63", [])
         .expect("rewind migration marker");
     db.run_migrations().expect("reapply migration 63");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
     assert_eq!(count_workers("1 = 1"), 5, "idempotent backfill");
     let assistant_id_after: String = db
         .conn()
@@ -761,7 +761,7 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 64");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
 
     let table_exists = |table: &str| -> bool {
         db.conn()
@@ -819,7 +819,166 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     assert!(invalid_mode.is_err(), "execution mode CHECK must hold");
 
     db.run_migrations().expect("migration 64 is idempotent");
-    assert_eq!(db.get_schema_version(), 64);
+    assert_eq!(db.get_schema_version(), 68);
+}
+
+#[test]
+fn migration_65_upgrades_schema_64_with_delivery_ledger() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-64-deliveries.db");
+    let db = crate::storage::database::Database::new(&path).expect("create current database");
+    db.conn()
+        .execute_batch(
+            r#"
+            DROP TABLE hive_deliveries;
+            DELETE FROM schema_version WHERE version >= 65;
+            "#,
+        )
+        .expect("rewind delivery ledger migration");
+    drop(db);
+
+    let db = crate::storage::database::Database::new(&path).expect("apply migration 65");
+    assert_eq!(db.get_schema_version(), 68);
+
+    let exists: bool = db
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_deliveries')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read table existence");
+    assert!(exists, "missing hive_deliveries");
+
+    let runs_sql: String = db
+        .conn()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read hive_runs sql");
+    assert!(
+        runs_sql.contains("worker_message") || !runs_sql.contains("kind IN"),
+        "hive_runs kind CHECK must accept worker_message"
+    );
+
+    db.run_migrations().expect("migration 65 is idempotent");
+    assert_eq!(db.get_schema_version(), 68);
+}
+
+#[test]
+fn migration_66_upgrades_schema_65_with_memory_acl_scopes() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-65-memory-acl.db");
+    let db = crate::storage::database::Database::new(&path).expect("create current database");
+    db.conn()
+        .execute_batch(
+            r#"
+            INSERT INTO agent_memories (
+                id, memory_type, title, content, namespace, namespace_id,
+                status, source, confidence, sensitivity, pinned, access_count
+            ) VALUES (
+                'crew-1', 'project', 'Private', 'crew-private-marker',
+                'crew', 'researcher', 'active', 'agent', 1.0, 'normal', 0, 0
+            );
+            INSERT INTO agent_memories (
+                id, memory_type, title, content, namespace,
+                status, source, confidence, sensitivity, pinned, access_count
+            ) VALUES (
+                'shared-1', 'project', 'Shared', 'shared-memory-marker',
+                'shared', 'active', 'agent', 1.0, 'normal', 0, 0
+            );
+            DROP INDEX IF EXISTS idx_agent_memories_acl;
+            ALTER TABLE agent_memories DROP COLUMN acl_scope;
+            ALTER TABLE agent_memories DROP COLUMN conversation_id;
+            DELETE FROM schema_version WHERE version >= 66;
+            "#,
+        )
+        .expect("rewind memory ACL migration");
+    drop(db);
+
+    let db = crate::storage::database::Database::new(&path).expect("apply migration 66");
+    assert_eq!(db.get_schema_version(), 68);
+
+    let columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(agent_memories)")
+        .expect("prepare memory columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query memory columns")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(columns.contains(&"acl_scope".to_string()));
+    assert!(columns.contains(&"conversation_id".to_string()));
+
+    let crew_scope: String = db
+        .conn()
+        .query_row(
+            "SELECT acl_scope FROM agent_memories WHERE id = 'crew-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read crew ACL");
+    assert_eq!(crew_scope, "worker");
+    let shared_scope: String = db
+        .conn()
+        .query_row(
+            "SELECT acl_scope FROM agent_memories WHERE id = 'shared-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read shared ACL");
+    assert_eq!(shared_scope, "owner");
+
+    db.run_migrations().expect("migration 66 is idempotent");
+    assert_eq!(db.get_schema_version(), 68);
+}
+
+#[test]
+fn migration_67_upgrades_schema_66_with_worker_heartbeat_kind() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-66-heartbeat.db");
+    let db = crate::storage::database::Database::new(&path).expect("create current database");
+    const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+    const HEARTBEAT_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat')";
+    db.conn()
+        .pragma_update(None, "writable_schema", "ON")
+        .expect("enable writable_schema");
+    db.conn()
+        .execute(
+            "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+             WHERE type = 'table' AND name = 'hive_runs'
+               AND instr(sql, ?1) > 0",
+            [HEARTBEAT_KINDS, DELIVERY_KINDS],
+        )
+        .expect("rewind hive_runs kind CHECK");
+    db.conn()
+        .pragma_update(None, "writable_schema", "RESET")
+        .expect("reload schema after CHECK rewind");
+    db.conn()
+        .execute("DELETE FROM schema_version WHERE version >= 67", [])
+        .expect("rewind heartbeat kind migration");
+    drop(db);
+
+    let db = crate::storage::database::Database::new(&path).expect("apply migration 67");
+    assert_eq!(db.get_schema_version(), 68);
+
+    let runs_sql: String = db
+        .conn()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read hive_runs sql");
+    assert!(
+        runs_sql.contains("worker_heartbeat") || !runs_sql.contains("kind IN"),
+        "hive_runs kind CHECK must accept worker_heartbeat"
+    );
+
+    db.run_migrations().expect("migration 67 is idempotent");
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]

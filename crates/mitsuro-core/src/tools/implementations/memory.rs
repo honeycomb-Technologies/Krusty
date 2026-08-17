@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, is_current_snapshot_title,
-    refresh_current_snapshot, AgentMemory, Database, MemoryStore, MemoryType,
+    refresh_current_snapshot, AgentMemory, CanonicalMemoryInput, Database, HiveMemoryReader,
+    HiveWorkerStore, MemoryAclScope, MemoryNamespace, MemorySource, MemoryStore, MemoryType,
 };
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
@@ -121,12 +122,27 @@ Actions:
             .as_deref()
             .map(|p| p.to_string_lossy().to_string());
         let user_id = ctx.user_id.as_deref();
+        let hive_scope = resolve_hive_tool_scope(ctx, db_path);
 
         match params.action.as_str() {
-            "save" => execute_save(&store, db_path, &params, project_dir.as_deref(), user_id),
-            "update" => execute_update(&store, db_path, &params, user_id),
-            "delete" => execute_delete(&store, db_path, &params, user_id),
-            "list" => execute_list(&store, &params, project_dir.as_deref(), user_id),
+            "save" => execute_save(
+                &store,
+                db_path,
+                &params,
+                project_dir.as_deref(),
+                user_id,
+                hive_scope.as_ref(),
+                ctx.session_id.as_deref(),
+            ),
+            "update" => execute_update(&store, db_path, &params, user_id, hive_scope.as_ref()),
+            "delete" => execute_delete(&store, db_path, &params, user_id, hive_scope.as_ref()),
+            "list" => execute_list(
+                &store,
+                &params,
+                project_dir.as_deref(),
+                user_id,
+                hive_scope.as_ref(),
+            ),
             other => ToolResult::invalid_parameters(format!(
                 "Unknown action '{}'. Valid actions: save, update, delete, list",
                 other
@@ -135,12 +151,101 @@ Actions:
     }
 }
 
+struct HiveToolScope {
+    worker_namespace_id: Option<String>,
+    conversation_id: Option<String>,
+    group_id: Option<String>,
+}
+
+impl HiveToolScope {
+    fn reader<'a>(
+        &'a self,
+        user_id: Option<&'a str>,
+        project_dir: Option<&'a str>,
+    ) -> HiveMemoryReader<'a> {
+        HiveMemoryReader {
+            user_id,
+            project_dir,
+            worker_namespace_id: self.worker_namespace_id.as_deref(),
+            conversation_id: self.conversation_id.as_deref(),
+            group_id: self.group_id.as_deref(),
+        }
+    }
+}
+
+fn resolve_hive_tool_scope(ctx: &ToolContext, db_path: &std::path::Path) -> Option<HiveToolScope> {
+    if let Some(run) = ctx.hive_group_run.as_ref() {
+        let worker_namespace_id = Database::new(db_path).ok().and_then(|db| {
+            HiveWorkerStore::new(db)
+                .get(&run.worker_id)
+                .ok()
+                .flatten()
+                .filter(|worker| worker.user_id.as_deref() == ctx.user_id.as_deref())
+                .map(|worker| worker.memory_namespace_id)
+        });
+        return Some(HiveToolScope {
+            worker_namespace_id,
+            conversation_id: ctx.session_id.clone(),
+            group_id: Some(run.group_id.clone()),
+        });
+    }
+
+    let session_id = ctx.session_id.as_deref()?;
+    if let Some(worker) = Database::new(db_path).ok().and_then(|db| {
+        HiveWorkerStore::new(db)
+            .get_by_dm_session(session_id)
+            .ok()
+            .flatten()
+            .filter(|worker| worker.user_id.as_deref() == ctx.user_id.as_deref())
+    }) {
+        return Some(HiveToolScope {
+            worker_namespace_id: Some(worker.memory_namespace_id),
+            conversation_id: Some(session_id.to_string()),
+            group_id: None,
+        });
+    }
+
+    let session_type: Option<String> = Database::new(db_path).ok().and_then(|db| {
+        db.conn()
+            .query_row(
+                "SELECT session_type FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .ok()
+    });
+    if session_type.as_deref() == Some("hive") {
+        return Some(HiveToolScope {
+            worker_namespace_id: None,
+            conversation_id: Some(session_id.to_string()),
+            group_id: None,
+        });
+    }
+    None
+}
+
+fn tool_canonical_key(title: &str) -> String {
+    let slug = title
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("tool.memory:{slug}")
+}
+
 fn execute_save(
     store: &MemoryStore,
     db_path: &std::path::Path,
     params: &Params,
     project_dir: Option<&str>,
     user_id: Option<&str>,
+    hive_scope: Option<&HiveToolScope>,
+    session_id: Option<&str>,
 ) -> ToolResult {
     let Some(type_str) = params.memory_type.as_deref() else {
         return ToolResult::invalid_parameters("'save' requires memory_type");
@@ -161,7 +266,27 @@ fn execute_save(
         return ToolResult::invalid_parameters("'save' requires non-empty content");
     };
 
-    match store.save(memory_type, title, content, project_dir, user_id) {
+    let saved = if let Some(scope) = hive_scope {
+        let mut input =
+            CanonicalMemoryInput::new(memory_type, tool_canonical_key(title), title, content);
+        input.project_dir = project_dir.map(str::to_string);
+        input.user_id = user_id.map(str::to_string);
+        input.source = MemorySource::Tool;
+        input.source_session_id = session_id.map(str::to_string);
+        if let Some(namespace_id) = scope.worker_namespace_id.as_deref() {
+            input.namespace = MemoryNamespace::Crew;
+            input.namespace_id = Some(namespace_id.to_string());
+            input.acl_scope = MemoryAclScope::Worker;
+        } else {
+            input.namespace = MemoryNamespace::Hive;
+            input.acl_scope = MemoryAclScope::Owner;
+        }
+        store.save_canonical(&input)
+    } else {
+        store.save(memory_type, title, content, project_dir, user_id)
+    };
+
+    match saved {
         Ok(memory) => {
             if let Err(err) = refresh_current_snapshot(db_path, project_dir, user_id) {
                 return ToolResult::error(format!(
@@ -187,6 +312,7 @@ fn execute_update(
     db_path: &std::path::Path,
     params: &Params,
     user_id: Option<&str>,
+    hive_scope: Option<&HiveToolScope>,
 ) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'update' requires memory_id");
@@ -210,7 +336,7 @@ fn execute_update(
     if is_current_snapshot(&existing) {
         return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
     }
-    if !can_mutate_memory(&existing, user_id) {
+    if !can_mutate_memory(&existing, user_id, hive_scope) {
         return ToolResult::error(format!(
             "failed to update memory: memory '{}' not found",
             id
@@ -246,6 +372,7 @@ fn execute_delete(
     db_path: &std::path::Path,
     params: &Params,
     user_id: Option<&str>,
+    hive_scope: Option<&HiveToolScope>,
 ) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'delete' requires memory_id");
@@ -260,7 +387,7 @@ fn execute_delete(
     if is_current_snapshot(&existing) {
         return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
     }
-    if !can_mutate_memory(&existing, user_id) {
+    if !can_mutate_memory(&existing, user_id, hive_scope) {
         return ToolResult::error(format!(
             "failed to delete memory: memory '{}' not found",
             id
@@ -288,10 +415,21 @@ fn execute_delete(
     }
 }
 
-fn can_mutate_memory(memory: &crate::storage::AgentMemory, user_id: Option<&str>) -> bool {
-    match user_id {
+fn can_mutate_memory(
+    memory: &crate::storage::AgentMemory,
+    user_id: Option<&str>,
+    hive_scope: Option<&HiveToolScope>,
+) -> bool {
+    let owner_matches = match user_id {
         Some(uid) => memory.user_id.as_deref() == Some(uid),
         None => memory.user_id.is_none(),
+    };
+    if !owner_matches {
+        return false;
+    }
+    match hive_scope {
+        Some(scope) => MemoryStore::visible_to_hive_reader(memory, &scope.reader(user_id, None)),
+        None => true,
     }
 }
 
@@ -302,16 +440,29 @@ fn execute_list(
     params: &Params,
     project_dir: Option<&str>,
     user_id: Option<&str>,
+    hive_scope: Option<&HiveToolScope>,
 ) -> ToolResult {
-    let memories = if let Some(type_str) = params.memory_type.as_deref() {
-        if let Ok(memory_type) = type_str.parse::<MemoryType>() {
-            store.list_by_type(memory_type, project_dir, user_id)
-        } else {
-            return ToolResult::invalid_parameters(format!(
-                "Invalid memory_type '{}'. Valid types: user, feedback, project, reference",
-                type_str
-            ));
+    let type_filter = if let Some(type_str) = params.memory_type.as_deref() {
+        match type_str.parse::<MemoryType>() {
+            Ok(memory_type) => Some(memory_type),
+            Err(_) => {
+                return ToolResult::invalid_parameters(format!(
+                    "Invalid memory_type '{}'. Valid types: user, feedback, project, reference",
+                    type_str
+                ))
+            }
         }
+    } else {
+        None
+    };
+    let memories = if let Some(scope) = hive_scope {
+        let mut memories = store.list_for_hive_reader(&scope.reader(user_id, project_dir));
+        if let Some(memory_type) = type_filter {
+            memories.retain(|memory| memory.memory_type == memory_type);
+        }
+        memories
+    } else if let Some(memory_type) = type_filter {
+        store.list_by_type(memory_type, project_dir, user_id)
     } else {
         store.list(project_dir, user_id)
     };
@@ -608,5 +759,91 @@ mod tests {
         let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
         assert_eq!(parsed["data"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn hive_worker_list_does_not_reveal_another_workers_private_memory() {
+        let (mut researcher_ctx, _tmp) = test_ctx();
+        let db_path = researcher_ctx.db_path.clone().expect("db path");
+        let db = Database::new(&db_path).expect("database");
+        db.conn()
+            .execute_batch(
+                "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+                 VALUES ('researcher-dm', 'Researcher', '2026-08-16T00:00:00.000000Z',
+                         '2026-08-16T00:00:00.000000Z', 'hive');
+                 INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+                 VALUES ('builder-dm', 'Builder', '2026-08-16T00:00:00.000000Z',
+                         '2026-08-16T00:00:00.000000Z', 'hive');",
+            )
+            .expect("seed hive sessions");
+        let workers = crate::storage::HiveWorkerStore::new(Database::new(&db_path).expect("db"));
+        let researcher = workers
+            .create(&crate::storage::NewHiveWorker::new("researcher"))
+            .expect("researcher");
+        let builder = workers
+            .create(&crate::storage::NewHiveWorker::new("builder"))
+            .expect("builder");
+        workers
+            .bind_dm_session(&researcher.id, Some("researcher-dm"))
+            .expect("bind researcher");
+        workers
+            .bind_dm_session(&builder.id, Some("builder-dm"))
+            .expect("bind builder");
+
+        researcher_ctx.session_id = Some("researcher-dm".into());
+        let builder_ctx = ToolContext {
+            db_path: Some(db_path),
+            session_id: Some("builder-dm".into()),
+            ..Default::default()
+        };
+
+        let save_result = MemoryTool
+            .execute(
+                json!({
+                    "action": "save",
+                    "memory_type": "project",
+                    "title": "Researcher private",
+                    "content": "researcher-private-marker"
+                }),
+                &researcher_ctx,
+            )
+            .await;
+        assert!(!save_result.is_error, "save failed: {}", save_result.output);
+
+        let researcher_list = MemoryTool
+            .execute(
+                json!({ "action": "list", "include_content": true }),
+                &researcher_ctx,
+            )
+            .await;
+        let researcher_parsed: Value = serde_json::from_str(&researcher_list.output).unwrap();
+        assert_eq!(researcher_parsed["data"]["count"], 1);
+        assert_eq!(
+            researcher_parsed["data"]["memories"][0]["content"],
+            "researcher-private-marker"
+        );
+
+        let builder_list = MemoryTool
+            .execute(
+                json!({ "action": "list", "include_content": true }),
+                &builder_ctx,
+            )
+            .await;
+        let builder_parsed: Value = serde_json::from_str(&builder_list.output).unwrap();
+        assert_eq!(builder_parsed["data"]["count"], 0);
+
+        let parsed: Value = serde_json::from_str(&save_result.output).unwrap();
+        let id = parsed["data"]["id"].as_str().unwrap().to_string();
+        let update = MemoryTool
+            .execute(
+                json!({
+                    "action": "update",
+                    "memory_id": id,
+                    "content": "builder cannot change this"
+                }),
+                &builder_ctx,
+            )
+            .await;
+        assert!(update.is_error);
     }
 }

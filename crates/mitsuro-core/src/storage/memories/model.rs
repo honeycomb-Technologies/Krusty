@@ -68,6 +68,46 @@ impl MemoryNamespace {
     }
 }
 
+/// Who may read a memory besides the owning user.
+///
+/// `Owner` is the default for Shared/Hive facts. `Worker` is private to one
+/// Worker's namespace. `Group` and `Conversation` are opt-in shared lanes
+/// keyed by `conversation_id`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryAclScope {
+    #[default]
+    Owner,
+    Worker,
+    Group,
+    Conversation,
+}
+
+impl MemoryAclScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Worker => "worker",
+            Self::Group => "group",
+            Self::Conversation => "conversation",
+        }
+    }
+}
+
+impl FromStr for MemoryAclScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "owner" => Ok(Self::Owner),
+            "worker" => Ok(Self::Worker),
+            "group" => Ok(Self::Group),
+            "conversation" => Ok(Self::Conversation),
+            _ => Err(format!("Unknown memory ACL scope: {value}")),
+        }
+    }
+}
+
 impl FromStr for MemoryNamespace {
     type Err = String;
 
@@ -265,6 +305,10 @@ pub struct AgentMemory {
     pub last_accessed_at: Option<String>,
     #[serde(default)]
     pub access_count: i64,
+    #[serde(default)]
+    pub acl_scope: MemoryAclScope,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 fn default_confidence() -> f64 {
@@ -287,6 +331,10 @@ pub struct CanonicalMemoryInput {
     pub confidence: f64,
     pub sensitivity: MemorySensitivity,
     pub pinned: bool,
+    #[serde(default)]
+    pub acl_scope: MemoryAclScope,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 impl CanonicalMemoryInput {
@@ -311,6 +359,8 @@ impl CanonicalMemoryInput {
             confidence: default_confidence(),
             sensitivity: MemorySensitivity::Normal,
             pinned: false,
+            acl_scope: MemoryAclScope::Owner,
+            conversation_id: None,
         }
     }
 }

@@ -137,24 +137,24 @@ impl HiveCrewDocumentKind {
     pub(crate) fn default_content(self, slug: &str) -> String {
         match self {
             Self::Identity => format!(
-                "# Hive Agent Identity\n\nname: {slug}\nrole: {slug}\ncoordinator: Hive"
+                "# Hive Worker Identity\n\nname: {slug}\nrole: {slug}\ncoordinator: Hive"
             ),
             Self::Soul => match slug {
                 "builder" => {
-                    "# Hive Agent Voice\n\nBuilder turns approved plans into working changes.\n- direct\n- implementation-first\n- validates before reporting".to_string()
+                    "# Hive Worker Voice\n\nBuilder turns approved plans into working changes.\n- direct\n- implementation-first\n- validates before reporting".to_string()
                 }
                 "researcher" => {
-                    "# Hive Agent Voice\n\nResearcher investigates before claiming certainty.\n- reads broadly\n- synthesizes clearly\n- preserves findings".to_string()
+                    "# Hive Worker Voice\n\nResearcher investigates before claiming certainty.\n- reads broadly\n- synthesizes clearly\n- preserves findings".to_string()
                 }
                 "reviewer" => {
-                    "# Hive Agent Voice\n\nReviewer verifies behavior and looks for regressions.\n- skeptical\n- concise\n- evidence-first".to_string()
+                    "# Hive Worker Voice\n\nReviewer verifies behavior and looks for regressions.\n- skeptical\n- concise\n- evidence-first".to_string()
                 }
                 _ => format!(
-                    "# Hive Agent Soul\n\n{slug} is a distinct working presence in Hive."
+                    "# Hive Worker Soul\n\n{slug} is a distinct working presence in Hive."
                 ),
             },
             Self::Memory => {
-                format!("# Hive Agent Memory\n\nDurable notes and constraints for {slug}.")
+                format!("# Hive Worker Memory\n\nDurable notes and constraints for {slug}.")
             }
         }
     }

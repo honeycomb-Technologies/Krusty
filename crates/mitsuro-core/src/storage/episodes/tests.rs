@@ -11,6 +11,15 @@ fn setup() -> (TempDir, Database) {
 }
 
 fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> String {
+    create_session_with_type(db, user_id, project_dir, "hive")
+}
+
+fn create_session_with_type(
+    db: &Database,
+    user_id: Option<&str>,
+    project_dir: &str,
+    session_type: &str,
+) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     if let Some(user_id) = user_id {
@@ -27,8 +36,8 @@ fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> St
             "INSERT INTO sessions (
                 id, title, created_at, updated_at, working_dir, project_dir,
                 workspace_mode, user_id, session_type
-             ) VALUES (?1, 'episode test', ?2, ?2, ?3, ?3, 'selected', ?4, 'hive')",
-            rusqlite::params![id, now, project_dir, user_id],
+             ) VALUES (?1, 'episode test', ?2, ?2, ?3, ?3, 'selected', ?4, ?5)",
+            rusqlite::params![id, now, project_dir, user_id, session_type],
         )
         .expect("session");
     id
@@ -112,4 +121,41 @@ fn record_is_idempotent_and_excludes_non_text_data() {
     assert_eq!(results[0].body, "visible memory");
     assert!(!results[0].body.contains("private"));
     assert!(!results[0].body.contains("secret"));
+}
+
+#[test]
+fn search_filters_by_session_type_and_conversation() {
+    let (_temp, db) = setup();
+    let hive = create_session_with_type(&db, None, "/work/local", "hive");
+    let chat = create_session_with_type(&db, None, "/work/local", "chat");
+    let store = EpisodeStore::new(&db);
+    let now = Utc::now().to_rfc3339();
+    for (session, text) in [
+        (&hive, "the hive scheduler uses leases"),
+        (&chat, "the chat scheduler is a different conversation"),
+    ] {
+        let content = serde_json::json!([{"type": "text", "text": text}]).to_string();
+        let message_id = create_message(&db, session, "user", &content, &now);
+        store
+            .record_message(session, message_id, "user", &content, &now)
+            .expect("episode");
+    }
+
+    let mut hive_query = EpisodeSearch::new("scheduler", None);
+    hive_query.session_type = Some("hive");
+    let hive_results = store.search(&hive_query).expect("hive search");
+    assert_eq!(hive_results.len(), 1);
+    assert_eq!(hive_results[0].session_id, hive);
+
+    let mut chat_query = EpisodeSearch::new("scheduler", None);
+    chat_query.session_type = Some("chat");
+    let chat_results = store.search(&chat_query).expect("chat search");
+    assert_eq!(chat_results.len(), 1);
+    assert_eq!(chat_results[0].session_id, chat);
+
+    let mut scoped = EpisodeSearch::new("scheduler", None);
+    scoped.session_id = Some(&chat);
+    let scoped_results = store.search(&scoped).expect("conversation search");
+    assert_eq!(scoped_results.len(), 1);
+    assert_eq!(scoped_results[0].session_id, chat);
 }

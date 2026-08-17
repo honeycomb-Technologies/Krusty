@@ -38,8 +38,10 @@ import type {
 	HiveSessionSummary,
 	HiveWorker,
 	HiveWorkerDetail,
+	HiveWorkerDeliveriesResponse,
 	HiveWorkerDmResponse,
 	HiveWorkersResponse,
+	HiveDeliveryStatus,
 	CreateHiveWorkerRequest,
 	UpdateHiveWorkerRequest,
 	HiveGroupDetail,
@@ -1488,6 +1490,18 @@ export class MitsuroClient {
 	/** Ensure the Worker's private DM session exists and return its summary. */
 	async ensureHiveWorkerDm(id: string): Promise<HiveWorkerDmResponse> {
 		return this.request(`/hive/workers/${id}/dm`, { method: "POST" });
+	}
+
+	async listHiveWorkerDeliveries(
+		id: string,
+		query?: { status?: HiveDeliveryStatus; limit?: number },
+	): Promise<HiveWorkerDeliveriesResponse> {
+		const params = new URLSearchParams();
+		if (query?.status) params.set("status", query.status);
+		if (query?.limit != null) params.set("limit", String(query.limit));
+		const encoded = params.toString();
+		const suffix = encoded ? `?${encoded}` : "";
+		return this.request(`/hive/workers/${id}/deliveries${suffix}`);
 	}
 
 	// ============================================================================

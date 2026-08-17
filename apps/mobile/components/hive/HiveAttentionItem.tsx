@@ -27,13 +27,13 @@ function kindLabel(item: HiveAttentionFeedItem): string {
     case "run_failed":
       return "Run error";
     case "run_stalled":
-      return "Attention";
+      return "Stalled";
     case "scheduled_run_started":
-      return "Schedule";
+      return "Calendar";
     case "scheduled_run_completed":
-      return "Schedule";
+      return "Calendar";
     case "delegated_task_completed":
-      return "Agent update";
+      return "Worker update";
     default:
       return "Update";
   }

@@ -188,7 +188,7 @@ pub(super) async fn update_crew_document(
     }
     let kind = HiveCrewProfileDocumentKind::parse(&kind).ok_or_else(|| {
         AppError::BadRequest(
-            "invalid Hive agent profile kind; agent memory is canonical memory, not identity"
+            "invalid Hive worker profile kind; worker memory is canonical memory, not identity"
                 .to_string(),
         )
     })?;
@@ -485,7 +485,7 @@ fn build_hive_crew_response_from_loaded_profile(
         task_store,
         delegated_store,
     )
-    .map_err(|error| AppError::Internal(format!("Failed to summarize Hive agents: {}", error)))?;
+    .map_err(|error| AppError::Internal(format!("Failed to summarize Hive Workers: {}", error)))?;
 
     Ok(HiveCrewResponse {
         members: runtime

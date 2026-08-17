@@ -251,7 +251,7 @@ fn message_seq_is_monotonic_and_append_is_idempotent() {
     let error = fixture
         .store
         .append_message(&NewHiveGroupMessage {
-            reply_to_message_id: Some(first.id.clone()),
+            reply_to_message_id: Some(first.id),
             ..NewHiveGroupMessage::user(&other.id, "cross-group reply")
         })
         .unwrap_err();

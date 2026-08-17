@@ -3058,7 +3058,7 @@ impl MitsuroApp {
                 .multi_line(true)
         });
         let hive_crew_update_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Crew slug · blank removes assignment")
+            InputState::new(window, cx).placeholder("Worker slug · blank removes assignment")
         });
         let schedule_session_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Hive session id"));
@@ -3112,7 +3112,7 @@ impl MitsuroApp {
         let schedule_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Model (blank inherits session)"));
         let schedule_crew_slug_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Crew slug (optional)"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Worker slug (optional)"));
         let schedule_priority_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Priority")
@@ -25518,13 +25518,13 @@ fn transcript_reconciliation_key(message: &DemoMessage) -> String {
     if matches!(&message.kind, DemoMessageKind::User { .. }) {
         // Optimistic user bubbles do not have the server item id yet. Their
         // exact structured content is the only safe bridge to hydration.
-        return format!("user:{:?}", &message.kind);
+        return format!("user:{:?}", message.kind);
     }
     message
         .item_id
         .as_ref()
         .map(|item_id| format!("item:{item_id}"))
-        .unwrap_or_else(|| format!("local:{:?}", &message.kind))
+        .unwrap_or_else(|| format!("local:{:?}", message.kind))
 }
 
 fn transcript_hydration_baseline(

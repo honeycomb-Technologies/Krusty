@@ -301,7 +301,7 @@ export function HivePresenceDetails({
       {showCrewRoster ? (
         <>
           <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, { color: t.foreground }]}>Hive Agents</Text>
+            <Text style={[styles.sectionTitle, { color: t.foreground }]}>Workers</Text>
             <Text style={[styles.countText, { color: t.mutedForeground }]}>
               {crew.length}
             </Text>
@@ -311,7 +311,7 @@ export function HivePresenceDetails({
             <View style={[styles.detailRow, { borderColor: t.border }]}>
               <View style={styles.detailCopy}>
                 <Text style={[styles.detailValue, { color: t.foreground }]}>
-                  No crew members are configured yet.
+                  No Workers are configured yet.
                 </Text>
               </View>
             </View>
@@ -331,7 +331,7 @@ export function HivePresenceDetails({
                     slug: member.slug,
                     kind: "identity",
                     title: `Edit ${member.slug} identity`,
-                    subtitle: "Name, role, and external presence for this Hive Agent.",
+                    subtitle: "Name, role, and external presence for this Hive Worker.",
                     initialValue: member.identity?.content ?? "",
                   });
                 }}
@@ -341,7 +341,7 @@ export function HivePresenceDetails({
                     slug: member.slug,
                     kind: "soul",
                     title: `Edit ${member.slug} soul`,
-                    subtitle: "How this Hive Agent thinks, writes, and behaves.",
+                    subtitle: "How this Hive Worker thinks, writes, and behaves.",
                     initialValue: member.soul?.content ?? "",
                   });
                 }}
@@ -351,7 +351,7 @@ export function HivePresenceDetails({
                     slug: member.slug,
                     kind: "memory",
                     title: `Edit ${member.slug} memory`,
-                    subtitle: "Durable notes and role-specific memory for this Hive Agent.",
+                    subtitle: "Durable notes and role-specific memory for this Hive Worker.",
                     initialValue: member.memory?.content ?? "",
                   });
                 }}
