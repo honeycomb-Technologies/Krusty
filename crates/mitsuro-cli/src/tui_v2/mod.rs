@@ -26,7 +26,14 @@ mod test_support;
 
 use anyhow::Result;
 
+/// How the TUI finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiOutcome {
+    Quit,
+    ApplyUpdate { version: String },
+}
+
 /// Run the opt-in TUI v2 developer preview.
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<TuiOutcome> {
     app::run().await
 }

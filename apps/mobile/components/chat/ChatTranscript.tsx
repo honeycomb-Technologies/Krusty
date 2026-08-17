@@ -1012,7 +1012,7 @@ function ChatTranscriptComponent({
             <View
               style={[styles.jumpToLatestInner, styles.ignorePointerEvents]}
             >
-              <ArrowDown size={24} color={t.foreground} strokeWidth={2.2} />
+              <ArrowDown size={24} color={t.thinking} strokeWidth={2.2} />
             </View>
           </Pressable>
         </View>

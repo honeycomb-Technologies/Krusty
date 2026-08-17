@@ -581,7 +581,7 @@ export function useSessionActions({
   );
 
   const handleDeleteSession = useCallback(
-    (id: string, onDeleted?: () => void) => {
+    (id: string, onDeleted?: () => void, onFailed?: () => void) => {
       confirmDestructiveAction("Delete Session", "Delete this session?", async () => {
         const activeEntry = (["chat", "code", "hive"] as const).find(
           (mode) => modeStores[mode].session.getState().sessionId === id,
@@ -593,18 +593,18 @@ export function useSessionActions({
         if (targetStore?.getState().isStreaming) {
           targetStore.getState().stopStreaming();
         }
-
-        const deleted = await sessionsStore.getState().deleteSession(id);
-        if (!deleted) {
-          return;
-        }
-
         if (targetStore) {
           targetStore.getState().clearSession();
           setActiveToolCallId(null);
         }
 
+        const deletedPromise = sessionsStore.getState().deleteSession(id);
         onDeleted?.();
+        const deleted = await deletedPromise;
+        if (!deleted) {
+          onFailed?.();
+          return;
+        }
 
         void sessionsStore.getState().loadSessions();
       });
@@ -633,14 +633,18 @@ export function useSessionActions({
   const handleSetSessionArchived = useCallback(
     async (id: string, archived: boolean): Promise<boolean> => {
       if (!client) return false;
+      const previous = sessionsStore.getState().sessions.find((session) =>
+        session.id === id
+      ) ?? null;
+      sessionsStore.getState().setSessionArchived(id, archived);
       try {
         const updated = await client.updateSession(id, { archived });
-        if (!archived) {
-          sessionsStore.getState().upsertSession(updated);
-        }
-        await sessionsStore.getState().loadSessions();
+        sessionsStore.getState().upsertSession(updated);
         return true;
       } catch {
+        if (previous) {
+          sessionsStore.getState().revertSession(previous);
+        }
         showActionMessage(
           archived ? "Couldn’t archive conversation" : "Couldn’t restore conversation",
           "The conversation was not changed. Please try again.",
@@ -677,11 +681,24 @@ export function useSessionActions({
   const handleSetProjectArchived = useCallback(
     async (ids: string[], archived: boolean): Promise<boolean> => {
       if (!client || ids.length === 0) return false;
+      const previous = ids
+        .map((id) => sessionsStore.getState().sessions.find((session) => session.id === id) ?? null)
+        .filter((session): session is NonNullable<typeof session> => session != null);
+      for (const id of ids) {
+        sessionsStore.getState().setSessionArchived(id, archived);
+      }
       try {
-        await Promise.all(ids.map((id) => client.updateSession(id, { archived })));
-        await sessionsStore.getState().loadSessions();
+        const updated = await Promise.all(
+          ids.map((id) => client.updateSession(id, { archived })),
+        );
+        for (const session of updated) {
+          sessionsStore.getState().upsertSession(session);
+        }
         return true;
       } catch {
+        for (const session of previous) {
+          sessionsStore.getState().revertSession(session);
+        }
         await sessionsStore.getState().loadSessions();
         showActionMessage(
           archived ? "Couldn’t archive project" : "Couldn’t restore project",
@@ -694,13 +711,14 @@ export function useSessionActions({
   );
 
   const handleDeleteProjectSessions = useCallback(
-    (projectName: string, ids: string[], onDeleted?: () => void) => {
+    (projectName: string, ids: string[], onDeleted?: () => void, onFailed?: (failedIds: string[]) => void) => {
       if (ids.length === 0) return;
       confirmDestructiveAction(
         "Delete project conversations?",
         `Delete ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} from ${projectName}? The project folder and its files will not be deleted.`,
         async () => {
-          let failed = 0;
+          onDeleted?.();
+          const failedIds: string[] = [];
           for (const id of ids) {
             const activeEntry = (["chat", "code", "hive"] as const).find(
               (mode) => modeStores[mode].session.getState().sessionId === id,
@@ -711,7 +729,7 @@ export function useSessionActions({
             }
             const deleted = await sessionsStore.getState().deleteSession(id);
             if (!deleted) {
-              failed += 1;
+              failedIds.push(id);
               continue;
             }
             if (targetStore) {
@@ -720,14 +738,13 @@ export function useSessionActions({
             }
           }
           await sessionsStore.getState().loadSessions();
-          if (failed > 0) {
+          if (failedIds.length > 0) {
+            onFailed?.(failedIds);
             showActionMessage(
               "Some conversations weren’t deleted",
-              `${failed} ${failed === 1 ? "conversation remains" : "conversations remain"}.`,
+              `${failedIds.length} ${failedIds.length === 1 ? "conversation remains" : "conversations remain"}.`,
             );
-            return;
           }
-          onDeleted?.();
         },
       );
     },

@@ -24,6 +24,24 @@ pub enum AppLifecycle {
     #[default]
     Running,
     ExitRequested,
+    ApplyUpdateRequested,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateNotice {
+    pub current_version: String,
+    pub new_version: String,
+    pub can_apply: bool,
+    pub hint: String,
+}
+
+impl UpdateNotice {
+    pub fn banner(&self) -> String {
+        format!(
+            "Update {} → {}  ·  {}",
+            self.current_version, self.new_version, self.hint
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -696,6 +714,7 @@ pub struct UiState {
     pub splash: SplashState,
     pub capability: CapabilityProfile,
     pub lifecycle: AppLifecycle,
+    pub update: Option<UpdateNotice>,
     pub agent_run: AgentRunState,
     pub sidebar_visible: bool,
     pub dock: DockUiState,
@@ -826,6 +845,7 @@ impl UiState {
             splash: SplashState::default(),
             capability,
             lifecycle: AppLifecycle::Running,
+            update: None,
             agent_run: AgentRunState::Idle,
             sidebar_visible: true,
             dock: DockUiState::default(),
@@ -839,7 +859,20 @@ impl UiState {
     }
 
     pub const fn should_exit(&self) -> bool {
-        matches!(self.lifecycle, AppLifecycle::ExitRequested)
+        matches!(
+            self.lifecycle,
+            AppLifecycle::ExitRequested | AppLifecycle::ApplyUpdateRequested
+        )
+    }
+
+    pub fn apply_update_version(&self) -> Option<String> {
+        match self.lifecycle {
+            AppLifecycle::ApplyUpdateRequested => self
+                .update
+                .as_ref()
+                .map(|notice| notice.new_version.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn take_overlay_sequence(&mut self) -> u64 {

@@ -77,9 +77,11 @@ import {
 } from "../hive/workerAppearance";
 import { AppBottomSheet } from "../sheets/AppBottomSheet";
 import {
+  applySessionListOverrides,
   archivedSessions as archivedSessionsForType,
   chronologicalSessions,
   chronologicalThreadDayGroups,
+  type SessionListOverride,
   type ChronologicalThreadDayGroup,
   type CodeProjectThreadGroup,
   type CodeThreadView,
@@ -145,7 +147,11 @@ interface SessionDrawerProps {
   onNewSession: (type: "chat" | "code") => void;
   onNewHiveSession: () => void;
   onNewSessionWithDir: (path: string) => void;
-  onDeleteSession: (id: string, onDeleted?: () => void) => void;
+  onDeleteSession: (
+    id: string,
+    onDeleted?: () => void,
+    onFailed?: () => void,
+  ) => void;
   onSetSessionPinned: (id: string, pinned: boolean) => Promise<boolean>;
   onSetSessionArchived: (id: string, archived: boolean) => Promise<boolean>;
   onSetProjectPinned: (ids: string[], pinned: boolean) => Promise<boolean>;
@@ -154,6 +160,7 @@ interface SessionDrawerProps {
     projectName: string,
     ids: string[],
     onDeleted?: () => void,
+    onFailed?: (failedIds: string[]) => void,
   ) => void;
   onOpenSettings?: () => void;
   activeMode: SessionType;
@@ -252,6 +259,10 @@ export function SessionDrawer({
   const [archiveExpandedMode, setArchiveExpandedMode] =
     useState<SessionType | null>(null);
   const [archivedThreadSessions, setArchivedThreadSessions] = useState<SessionResponse[]>([]);
+  const [sessionOverrides, setSessionOverrides] = useState<
+    Record<string, SessionListOverride>
+  >({});
+  const [optimisticSessions, setOptimisticSessions] = useState<SessionResponse[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [projectActivity, setProjectActivity] = useState<
     Record<string, ProjectActivity | null>
@@ -294,21 +305,25 @@ export function SessionDrawer({
   const pickerHeight = Math.max(300, Math.round(windowHeight * 0.58));
   const archiveExpanded = archiveExpandedMode === activeMode;
 
+  const displaySessions = useMemo(
+    () => applySessionListOverrides(sessions, sessionOverrides, optimisticSessions),
+    [optimisticSessions, sessionOverrides, sessions],
+  );
   const chatSessions = useMemo(
-    () => chronologicalSessions(sessions, "chat"),
-    [sessions],
+    () => chronologicalSessions(displaySessions, "chat"),
+    [displaySessions],
   );
   const codeGroups = useMemo(
-    () => codeProjectThreadGroups(sessions),
-    [sessions],
+    () => codeProjectThreadGroups(displaySessions),
+    [displaySessions],
   );
   const recentCodeSessions = useMemo(
-    () => chronologicalSessions(sessions, "code"),
-    [sessions],
+    () => chronologicalSessions(displaySessions, "code"),
+    [displaySessions],
   );
   const recentCodeDayGroups = useMemo(
-    () => chronologicalThreadDayGroups(sessions, "code"),
-    [sessions],
+    () => chronologicalThreadDayGroups(displaySessions, "code"),
+    [displaySessions],
   );
   const visibleArchivedSessions = useMemo(
     () => archivedSessionsForType(archivedThreadSessions, activeMode),
@@ -354,8 +369,8 @@ export function SessionDrawer({
     [hiveSessions],
   );
   const activeHiveSessions = useMemo(
-    () => chronologicalSessions(sessions, "hive"),
-    [sessions],
+    () => chronologicalSessions(displaySessions, "hive"),
+    [displaySessions],
   );
   const hiveListItems = useMemo<HiveListItem[]>(
     () => [
@@ -517,6 +532,40 @@ export function SessionDrawer({
   }, [activeMode, archiveExpanded, client, isOpen]);
 
   useEffect(() => {
+    const liveById = new Map(sessions.map((session) => [session.id, session]));
+    setSessionOverrides((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [id, override] of Object.entries(current)) {
+        const live = liveById.get(id);
+        if (override.type === "remove") {
+          if (!live) {
+            delete next[id];
+            changed = true;
+          }
+          continue;
+        }
+        if (override.archived_at) {
+          if (!live || live.archived_at) {
+            delete next[id];
+            changed = true;
+          }
+          continue;
+        }
+        if (live && !live.archived_at) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setOptimisticSessions((current) => {
+      const next = current.filter((session) => !liveById.has(session.id));
+      return next.length === current.length ? current : next;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
     if (!isOpen || activeMode !== "code" || !client) {
       return;
     }
@@ -644,7 +693,7 @@ export function SessionDrawer({
       return;
     }
     const directory = codeDirectoryToAutoExpand(
-      sessions,
+      displaySessions,
       activeSessionId,
       lastAutoExpandedCodeSessionRef.current,
     );
@@ -660,7 +709,7 @@ export function SessionDrawer({
       next.add(directory);
       return next;
     });
-  }, [activeMode, activeSessionId, sessions]);
+  }, [activeMode, activeSessionId, displaySessions]);
 
   useEffect(() => {
     if (
@@ -854,6 +903,60 @@ export function SessionDrawer({
     );
   };
 
+  const hideSessionsLocally = (ids: string[]) => {
+    setSessionOverrides((current) => {
+      const next = { ...current };
+      for (const id of ids) {
+        next[id] = { type: "remove" };
+      }
+      return next;
+    });
+    setOptimisticSessions((current) =>
+      current.filter((session) => !ids.includes(session.id)),
+    );
+    setArchivedThreadSessions((current) =>
+      current.filter((session) => !ids.includes(session.id)),
+    );
+  };
+
+  const restoreSessionsLocally = (ids: string[]) => {
+    setSessionOverrides((current) => {
+      const next = { ...current };
+      for (const id of ids) {
+        delete next[id];
+      }
+      return next;
+    });
+  };
+
+  const applyArchiveOverride = (
+    session: SessionResponse,
+    archived: boolean,
+    archivedAt: string | null,
+  ) => {
+    setSessionOverrides((current) => ({
+      ...current,
+      [session.id]: { type: "archive", archived_at: archivedAt },
+    }));
+    if (archived) {
+      setOptimisticSessions((current) =>
+        current.filter((candidate) => candidate.id !== session.id),
+      );
+      setArchivedThreadSessions((current) => [
+        { ...session, archived_at: archivedAt ?? new Date().toISOString() },
+        ...current.filter((candidate) => candidate.id !== session.id),
+      ]);
+      return;
+    }
+    setOptimisticSessions((current) => [
+      { ...session, archived_at: null },
+      ...current.filter((candidate) => candidate.id !== session.id),
+    ]);
+    setArchivedThreadSessions((current) =>
+      current.filter((candidate) => candidate.id !== session.id),
+    );
+  };
+
   const runArchiveChange = async (
     session: SessionResponse,
     archived: boolean,
@@ -861,17 +964,19 @@ export function SessionDrawer({
   ) => {
     swipeable?.close();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const previousArchived = archivedThreadSessions;
+    const previousOverrides = sessionOverrides;
+    const previousOptimistic = optimisticSessions;
+    const archivedAt = archived
+      ? session.archived_at ?? new Date().toISOString()
+      : null;
+    applyArchiveOverride(session, archived, archivedAt);
     const changed = await onSetSessionArchived(session.id, archived);
-    if (!changed) return;
-    if (archived) {
-      setArchivedThreadSessions((current) => [
-        { ...session, archived_at: new Date().toISOString() },
-        ...current.filter((candidate) => candidate.id !== session.id),
-      ]);
-    } else {
-      setArchivedThreadSessions((current) =>
-        current.filter((candidate) => candidate.id !== session.id),
-      );
+    if (!changed) {
+      setArchivedThreadSessions(previousArchived);
+      setSessionOverrides(previousOverrides);
+      setOptimisticSessions(previousOptimistic);
+      return;
     }
     if (archiveExpanded && client) {
       void client
@@ -910,10 +1015,22 @@ export function SessionDrawer({
   ) => {
     swipeable?.close();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    await onSetProjectArchived(
+    const previousArchived = archivedThreadSessions;
+    const previousOverrides = sessionOverrides;
+    const previousOptimistic = optimisticSessions;
+    const archivedAt = archived ? new Date().toISOString() : null;
+    for (const session of group.sessions) {
+      applyArchiveOverride(session, archived, archivedAt);
+    }
+    const changed = await onSetProjectArchived(
       group.sessions.map((session) => session.id),
       archived,
     );
+    if (!changed) {
+      setArchivedThreadSessions(previousArchived);
+      setSessionOverrides(previousOverrides);
+      setOptimisticSessions(previousOptimistic);
+    }
   };
 
   const swipeAction = (
@@ -1074,11 +1191,11 @@ export function SessionDrawer({
               <Trash2 size={19} color={t.onAccent} strokeWidth={2} />,
               () => {
                 methods.close();
-                onDeleteSession(session.id, () => {
-                  setArchivedThreadSessions((current) =>
-                    current.filter((candidate) => candidate.id !== session.id),
-                  );
-                });
+                onDeleteSession(
+                  session.id,
+                  () => hideSessionsLocally([session.id]),
+                  () => restoreSessionsLocally([session.id]),
+                );
               },
             )}
           </View>
@@ -1109,11 +1226,11 @@ export function SessionDrawer({
                 void runArchiveChange(session, true);
                 break;
               case "delete":
-                onDeleteSession(session.id, () => {
-                  setArchivedThreadSessions((current) =>
-                    current.filter((candidate) => candidate.id !== session.id),
-                  );
-                });
+                onDeleteSession(
+                  session.id,
+                  () => hideSessionsLocally([session.id]),
+                  () => restoreSessionsLocally([session.id]),
+                );
                 break;
             }
           }}
@@ -1597,6 +1714,8 @@ export function SessionDrawer({
                 onDeleteProjectSessions(
                   dirDisplayName(group.directory),
                   sessionIds,
+                  () => hideSessionsLocally(sessionIds),
+                  restoreSessionsLocally,
                 );
               },
             )}
@@ -1631,6 +1750,8 @@ export function SessionDrawer({
                   onDeleteProjectSessions(
                     dirDisplayName(group.directory),
                     sessionIds,
+                    () => hideSessionsLocally(sessionIds),
+                    restoreSessionsLocally,
                   );
                   break;
               }
@@ -1822,6 +1943,7 @@ export function SessionDrawer({
               if (item.kind === "archived-session") return `archived:${item.session.id}`;
               return item.kind;
             }}
+            extraData={displaySessions}
             renderItem={renderChatListItem}
             windowSize={7}
             maxToRenderPerBatch={10}
@@ -1847,6 +1969,7 @@ export function SessionDrawer({
                 if (item.kind === "archived-session") return `archived:${item.session.id}`;
                 return item.kind;
               }}
+              extraData={displaySessions}
               renderItem={renderHiveListItem}
               windowSize={7}
               maxToRenderPerBatch={10}
@@ -1867,6 +1990,7 @@ export function SessionDrawer({
               if (item.kind === "archived-session") return `archived:${item.session.id}`;
               return item.kind;
             }}
+            extraData={displaySessions}
             renderItem={renderCodeListItem}
             windowSize={7}
             maxToRenderPerBatch={12}

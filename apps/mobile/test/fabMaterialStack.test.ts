@@ -130,6 +130,36 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
   );
 });
 
+Deno.test("chat chrome icons stay on the thinking violet", async () => {
+  const accordion = await Deno.readTextFile(
+    new URL("../components/chat/AccordionControls.tsx", import.meta.url),
+  );
+  const header = await Deno.readTextFile(
+    new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url),
+  );
+  const composer = await Deno.readTextFile(
+    new URL("../components/chat/ChatBar.tsx", import.meta.url),
+  );
+
+  assert(
+    accordion.includes("const fabAccent = t.thinking") &&
+      !accordion.includes("color={t.mutedForeground}") &&
+      !accordion.includes("color={t.success}"),
+    "accordion glyphs must stay on the thinking violet instead of gray or status green",
+  );
+  assert(
+    header.includes("color={t.thinking}") &&
+      !header.includes("color={t.mutedForeground}") &&
+      !header.includes("color={active ? t.foreground : t.mutedForeground}"),
+    "header chrome icons must stay on the thinking violet",
+  );
+  assert(
+    composer.includes("color={t.thinking}") &&
+      composer.includes("const kColor = t.thinking"),
+    "composer chrome glyphs must stay on the thinking violet",
+  );
+});
+
 Deno.test("liquid glass stays on chat chrome, not drawers or sheets", async () => {
   const solidSurfaces = [
     "../components/sheets/AppBottomSheet.tsx",

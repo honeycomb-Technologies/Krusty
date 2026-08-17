@@ -126,7 +126,7 @@ function AdaptiveMaterialComponent({
       <NativeGlassView
         testID={testID}
         colorScheme={theme.scheme}
-        glassEffectStyle={tone === "subtle" ? "clear" : "regular"}
+        glassEffectStyle={tone === "strong" ? "regular" : "clear"}
         tintColor={glassTintColor}
         borderRadius={borderRadius}
         style={materialStyle}

@@ -1,11 +1,21 @@
+use super::super::channel::UpdateApplyPolicy;
+
 /// Update status
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateStatus {
     Checking,
     UpToDate,
     Available(UpdateInfo),
-    Downloading { progress: String },
-    Ready { version: String },
+    Downloading {
+        progress: String,
+        fraction: Option<f32>,
+    },
+    Installing {
+        progress: String,
+    },
+    Ready {
+        version: String,
+    },
     Error(String),
 }
 
@@ -16,4 +26,5 @@ pub struct UpdateInfo {
     pub new_version: String,
     pub release_notes: String,
     pub is_dev_mode: bool,
+    pub apply: UpdateApplyPolicy,
 }

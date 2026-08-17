@@ -7,6 +7,7 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
+  readTextFile(path: URL): Promise<string>;
 };
 
 function assertEquals<T>(actual: T, expected: T) {
@@ -120,6 +121,19 @@ Deno.test("blur fallback uses translucent glass fills, not opaque scrims", () =>
     resolveAdaptiveMaterialOverlayColor("blur", "strong", surfaces),
     "glass-pressed",
   );
+});
+
+Deno.test("liquid glass uses platform clear except for strong chrome", async () => {
+  const material = await Deno.readTextFile(
+    new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
+  );
+  if (
+    !material.includes('glassEffectStyle={tone === "strong" ? "regular" : "clear"}')
+  ) {
+    throw new Error(
+      "chat chrome must use platform clear glass, not the gray regular frost",
+    );
+  }
 });
 
 Deno.test("liquid glass stays lightly tinted per tone", () => {

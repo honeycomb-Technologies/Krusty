@@ -35,6 +35,9 @@ mod tests {
                 new_version: "new".to_string(),
                 release_notes: String::new(),
                 is_dev_mode,
+                apply: crate::updater::UpdateApplyPolicy::Unavailable {
+                    reason: "test".to_string(),
+                },
             };
             let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
 

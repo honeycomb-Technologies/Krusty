@@ -94,7 +94,7 @@ export function MobileAppHeader({
           <AdaptiveMaterial borderRadius={12} tone="regular" />
           <MessagesSquare
             size={19}
-            color={t.mutedForeground}
+            color={t.thinking}
             strokeWidth={1.9}
           />
         </Pressable>
@@ -134,7 +134,7 @@ export function MobileAppHeader({
                   <Icon
                     size={17}
                     strokeWidth={active ? 2.2 : 1.8}
-                    color={active ? t.foreground : t.mutedForeground}
+                    color={t.thinking}
                   />
                   {active ? (
                     <Text
@@ -190,7 +190,7 @@ export function MobileAppHeader({
           <AdaptiveMaterial borderRadius={12} tone="regular" />
           <Toolbox
             size={19}
-            color={t.mutedForeground}
+            color={t.thinking}
             strokeWidth={1.9}
           />
         </Pressable>

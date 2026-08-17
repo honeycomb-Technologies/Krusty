@@ -7,6 +7,8 @@ fn semver_comparison_prefers_higher_components() {
     assert!(is_newer_version("1.0.0", "0.999.999"));
     assert!(!is_newer_version("0.4.1", "0.4.1"));
     assert!(!is_newer_version("0.4.0", "0.4.1"));
+    assert!(is_newer_version("0.9.22", "0.9.22-rc.1"));
+    assert!(!is_newer_version("0.9.22-rc.1", "0.9.22"));
 }
 
 #[test]

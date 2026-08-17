@@ -16,6 +16,7 @@ pub enum SlashCommand {
     Extensions,
     PlanGoal,
     Permissions,
+    Update,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +105,11 @@ pub const DEFINITIONS: &[SlashDefinition] = &[
         aliases: &["/perm"],
         description: "Toggle permission mode",
     },
+    SlashDefinition {
+        primary: "/update",
+        aliases: &[],
+        description: "Install the available Mitsuro update",
+    },
 ];
 
 pub fn suggestions(input: &str) -> Vec<&'static SlashDefinition> {
@@ -154,6 +160,7 @@ pub fn parse(input: &str) -> SlashInput<'_> {
         "/skills" | "/plugins" | "/extensions" | "/mcp" | "/hooks" => SlashCommand::Extensions,
         "/plan" | "/goal" => SlashCommand::PlanGoal,
         "/permissions" | "/perm" => SlashCommand::Permissions,
+        "/update" => SlashCommand::Update,
         _ => {
             return SlashInput::Unknown { name, arguments };
         }
@@ -205,6 +212,7 @@ mod tests {
         let all = suggestions("/");
         assert_eq!(all.len(), DEFINITIONS.len());
         assert!(all.iter().any(|command| command.primary == "/permissions"));
+        assert!(all.iter().any(|command| command.primary == "/update"));
         assert_eq!(suggestions("/plugins")[0].primary, "/extensions");
         assert!(suggestions("/tmp/project").is_empty());
         assert!(suggestions("/model now").is_empty());

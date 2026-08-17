@@ -140,6 +140,14 @@ Deno.test("shared product accents keep graphite foundation with violet motion", 
   const webLine = await source("../components/chat/ChatBarRunningLine.tsx");
 
   assert(tokens.includes("#0e0e11"), "graphite must remain the dark foundation");
+  assert(
+    tokens.includes("rgba(14, 14, 17, 0.36)"),
+    "dark glass must tint with the graphite foundation, not a gray frost",
+  );
+  assert(
+    !tokens.includes("rgba(232, 229, 234, 0.055)"),
+    "dark glass must not use the old light-gray liquid tint",
+  );
   assert(tokens.includes("#b89a61"), "brass must remain the restrained identity accent");
   assert(tokens.includes("#75617e"), "mineral violet must remain the interactive accent");
   assert(tokens.includes("#9a82a5"), "Pulse violet must remain the thinking accent");

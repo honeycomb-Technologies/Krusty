@@ -42,13 +42,14 @@ export const colors = {
   destructive: '#5f3035',
   destructiveForeground: '#d9a4a7',
 
-  // Glass
+  // Glass — dark platform clear, not a gray frost. Tint with the graphite
+  // foundation so liquid glass stays on the same blend as the shell.
   glass: {
-    background: 'rgba(232, 229, 234, 0.055)',
-    backgroundElevated: 'rgba(232, 229, 234, 0.095)',
-    backgroundPressed: 'rgba(232, 229, 234, 0.14)',
-    border: 'rgba(232, 229, 234, 0.12)',
-    borderLight: 'rgba(232, 229, 234, 0.20)',
+    background: 'rgba(14, 14, 17, 0.36)',
+    backgroundElevated: 'rgba(14, 14, 17, 0.50)',
+    backgroundPressed: 'rgba(14, 14, 17, 0.64)',
+    border: 'rgba(154, 130, 165, 0.16)',
+    borderLight: 'rgba(154, 130, 165, 0.26)',
     blur: 20,
     blurIntense: 40,
   },
