@@ -104,6 +104,9 @@ pub struct HiveSchedule {
     /// on that Worker's DM lane instead of the creating session.
     #[serde(default)]
     pub worker_id: Option<String>,
+    /// Durable Group this schedule should wake. Exclusive with `worker_id`.
+    #[serde(default)]
+    pub group_id: Option<String>,
     pub misfire: MisfireConfig,
     pub overlap_policy: OverlapPolicy,
     pub retry: RetryPolicy,

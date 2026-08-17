@@ -4149,6 +4149,52 @@ impl Database {
             )?;
         }
 
+        // Migration 68: Calendar schedules may target a Group room.
+        //
+        // hive_schedules.group_id is optional and exclusive with worker_id.
+        // Occurrences enqueue a group turn through the same delivery path
+        // as a user room message.
+        if current_version < 68 {
+            info!("Running migration 68: Hive schedule group targeting");
+            let schedules_exist: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_schedules'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 68: checking for hive_schedules")?;
+            if schedules_exist {
+                let has_group_id: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM pragma_table_info('hive_schedules')
+                             WHERE name = 'group_id'
+                         )",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .context("Migration 68: checking hive_schedules.group_id")?;
+                if !has_group_id {
+                    self.conn
+                        .execute_batch(
+                            "ALTER TABLE hive_schedules ADD COLUMN group_id TEXT
+                                 REFERENCES hive_groups(id) ON DELETE SET NULL;
+                             CREATE INDEX IF NOT EXISTS idx_hive_schedules_group
+                                 ON hive_schedules(group_id) WHERE group_id IS NOT NULL;",
+                        )
+                        .context("Migration 68: adding hive_schedules.group_id")?;
+                }
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (68)",
+                [],
+            )?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4271,7 +4317,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 67);
+        assert_eq!(database.get_schema_version(), 68);
         database
             .conn()
             .execute(
@@ -4352,7 +4398,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 67);
+        assert_eq!(database.get_schema_version(), 68);
         let create_sql: String = database
             .conn()
             .query_row(

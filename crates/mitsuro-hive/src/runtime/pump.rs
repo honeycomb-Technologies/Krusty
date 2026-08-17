@@ -8,13 +8,13 @@ use mitsuro_core::hive::{
     HiveRunStatus, MisfireDispatch, RetryPolicy,
 };
 use mitsuro_core::storage::{
-    load_worker_with_conn, ClaimRunRequest, ClaimedHiveRun, DaemonFence, DaemonLeaseAcquire,
-    Database, HiveDaemonLeaseStore, HiveRun, HiveRunStore, HiveSchedule, HiveScheduleStore,
-    HiveWorkerStatus, OverlapPolicy, ReconciledRun, RunCompletion,
+    hive_groups, load_worker_with_conn, ClaimRunRequest, ClaimedHiveRun, DaemonFence,
+    DaemonLeaseAcquire, Database, HiveDaemonLeaseStore, HiveGroupStatus, HiveRun, HiveRunStore,
+    HiveSchedule, HiveScheduleStore, HiveWorkerStatus, OverlapPolicy, ReconciledRun, RunCompletion,
 };
 use mitsuro_hive_protocol::{
-    unix_time_millis, Actor, EventEnvelope, ExtensionEvent, HiveEvent, ProtocolVersion,
-    RuntimeEvent,
+    unix_time_millis, Actor, EventEnvelope, ExtensionEvent, GroupMessageCommand, HiveEvent,
+    ProtocolVersion, ResponsePayload, RuntimeEvent,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
@@ -864,6 +864,15 @@ fn materialize_dispatch(
     now: &str,
     events: &mut Vec<PersistedEvent>,
 ) -> Result<(), RuntimeStoreError> {
+    if schedule
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty())
+    {
+        return materialize_group_dispatch(tx, controller, schedule, dispatch, now, events);
+    }
+
     let unfinished: i64 = tx.query_row(
         "SELECT COUNT(*) FROM hive_runs WHERE schedule_id = ?1
          AND status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')",
@@ -980,6 +989,142 @@ fn materialize_dispatch(
             now,
         )?);
     }
+    Ok(())
+}
+
+fn materialize_group_dispatch(
+    tx: &Transaction<'_>,
+    controller: &ControllerRecord,
+    schedule: &HiveSchedule,
+    dispatch: MisfireDispatch,
+    now: &str,
+    events: &mut Vec<PersistedEvent>,
+) -> Result<(), RuntimeStoreError> {
+    let group_id = schedule
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .expect("group-targeted schedule requires group_id");
+    let Some(group) = hive_groups::load_group(tx, group_id).map_err(RuntimeStoreError::Internal)?
+    else {
+        materialize_occurrence(
+            tx,
+            controller,
+            schedule,
+            dispatch.scheduled_for,
+            None,
+            "skipped",
+            Some("targeted group was not found"),
+            dispatch.coalesced_count as u32,
+            now,
+            events,
+        )?;
+        return Ok(());
+    };
+    if group.status == HiveGroupStatus::Archived {
+        materialize_occurrence(
+            tx,
+            controller,
+            schedule,
+            dispatch.scheduled_for,
+            None,
+            "skipped",
+            Some("targeted group is archived"),
+            dispatch.coalesced_count as u32,
+            now,
+            events,
+        )?;
+        return Ok(());
+    }
+
+    let unfinished_runs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM hive_runs WHERE schedule_id = ?1
+         AND status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')",
+        [&schedule.id],
+        |row| row.get(0),
+    )?;
+    let unfinished_turns: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM hive_group_turns WHERE group_id = ?1 AND status = 'running'",
+        [&group.id],
+        |row| row.get(0),
+    )?;
+    let unfinished = unfinished_runs + unfinished_turns;
+    let queued_waiting: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM hive_runs WHERE schedule_id = ?1
+         AND status IN ('queued', 'sleeping', 'retry_wait', 'awaiting_input')",
+        [&schedule.id],
+        |row| row.get(0),
+    )?;
+    let (status, reason, should_queue) = match schedule.overlap_policy {
+        OverlapPolicy::Allow => ("queued", None, true),
+        OverlapPolicy::Skip if unfinished > 0 => {
+            ("skipped", Some("overlap policy skipped occurrence"), false)
+        }
+        OverlapPolicy::QueueOne if queued_waiting > 0 || unfinished_turns > 0 => (
+            "coalesced",
+            Some("a queued occurrence already exists"),
+            false,
+        ),
+        _ => ("queued", None, true),
+    };
+    if !should_queue {
+        materialize_occurrence(
+            tx,
+            controller,
+            schedule,
+            dispatch.scheduled_for,
+            None,
+            status,
+            reason,
+            dispatch.coalesced_count as u32,
+            now,
+            events,
+        )?;
+        return Ok(());
+    }
+
+    let actor = Actor {
+        user_id: group.user_id.clone(),
+        client_kind: "hive-scheduler".into(),
+    };
+    let scheduled_for = canonical_timestamp(dispatch.scheduled_for);
+    let mutation = groups::group_message(
+        tx,
+        &actor,
+        now,
+        GroupMessageCommand {
+            group_id: group.id.clone(),
+            message: schedule.objective.clone(),
+            mentions_override: None,
+        },
+        &format!("schedule:{}:{scheduled_for}", schedule.id),
+    )?;
+    let turn_id = match &mutation.response {
+        ResponsePayload::GroupTurn(turn) => turn.turn_id.clone(),
+        other => {
+            return Err(RuntimeStoreError::Internal(anyhow::anyhow!(
+                "group schedule materialize returned {other:?}"
+            )));
+        }
+    };
+    tx.execute(
+        "UPDATE hive_runs SET schedule_id = ?1 WHERE group_turn_id = ?2",
+        params![schedule.id, turn_id],
+    )?;
+    events.extend(mutation.events);
+    materialize_occurrence(
+        tx,
+        controller,
+        schedule,
+        dispatch.scheduled_for,
+        Some(&turn_id),
+        status,
+        reason,
+        dispatch.coalesced_count as u32,
+        now,
+        events,
+    )?;
     Ok(())
 }
 

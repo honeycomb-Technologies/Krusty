@@ -3,6 +3,12 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { ListRowsSkeleton } from "../ui/Skeleton";
 import { HiveAttentionItem } from "./HiveAttentionItem";
 import { useHiveAttention } from "./hooks/useHiveAttention";
+import {
+  useHiveWorkerDeliveries,
+  wakeReasonLabel,
+  wakeStatusLabel,
+} from "./hooks/useHiveWorkerDeliveries";
+import { formatRelativeTime } from "./utils";
 import type { HiveChatContext, HiveCurrentState } from "./types";
 
 interface HiveAttentionViewProps {
@@ -35,6 +41,10 @@ export function HiveAttentionView({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const attention = useHiveAttention(state.current, chat.sessionId);
+  const queued = useHiveWorkerDeliveries({ enabled: true, limit: 6 });
+  const queuedItems = queued.items.filter(
+    (item) => item.status === "pending" || item.status === "delivering",
+  );
 
   if (state.isLoading && !state.current) {
     return (
@@ -45,7 +55,8 @@ export function HiveAttentionView({
   }
 
   const { needsAction, updates } = attention.sections;
-  const hasItems = needsAction.length > 0 || updates.length > 0;
+  const hasItems =
+    needsAction.length > 0 || updates.length > 0 || queuedItems.length > 0;
 
   return (
     <View style={styles.container}>
@@ -97,6 +108,37 @@ export function HiveAttentionView({
                 onMarkRead={attention.markRead}
                 onClear={attention.clearItem}
               />
+            ))}
+          </View>
+        )}
+      </View>
+
+      <View style={styles.section}>
+        <SectionTitle title="Queued work" count={queuedItems.length} />
+        {queued.error ? (
+          <Text style={[styles.emptySection, { color: t.error }]}>{queued.error}</Text>
+        ) : queued.isLoading && queuedItems.length === 0 ? (
+          <Text style={[styles.emptySection, { color: t.mutedForeground }]}>
+            Checking Worker delivery queues...
+          </Text>
+        ) : queuedItems.length === 0 ? (
+          <Text style={[styles.emptySection, { color: t.mutedForeground }]}>
+            No Worker deliveries are waiting to wake a lane.
+          </Text>
+        ) : (
+          <View>
+            {queuedItems.map((item) => (
+              <View key={item.id} style={styles.queuedRow}>
+                <Text style={[styles.queuedTitle, { color: t.foreground }]} numberOfLines={1}>
+                  {item.workerName || item.workerSlug || "Worker"} · {wakeReasonLabel(item)}
+                </Text>
+                <Text style={[styles.queuedMeta, { color: t.mutedForeground }]} numberOfLines={2}>
+                  {wakeStatusLabel(item.status)}
+                  {item.priority === "high" ? " · interrupt" : ""} ·{" "}
+                  {formatRelativeTime(item.created_at)}
+                  {item.body.trim() ? ` · ${item.body.trim()}` : ""}
+                </Text>
+              </View>
             ))}
           </View>
         )}
@@ -188,5 +230,17 @@ const styles = StyleSheet.create({
   sectionCount: {
     fontSize: 11,
     fontWeight: "500",
+  },
+  queuedRow: {
+    paddingVertical: 8,
+    gap: 2,
+  },
+  queuedTitle: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  queuedMeta: {
+    fontSize: 12,
+    lineHeight: 16,
   },
 });

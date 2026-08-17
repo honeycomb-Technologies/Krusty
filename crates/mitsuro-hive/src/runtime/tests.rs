@@ -887,6 +887,7 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
         model_catalog_revision: None,
         crew_slug: None,
         worker_id: None,
+        group_id: None,
         misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
         overlap_policy: "queue_one".into(),
         retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
@@ -3997,6 +3998,177 @@ async fn group_roundtable_advances_rotating_speakers_to_completion() {
     runtime.shutdown().await;
 }
 
+struct GatedGroupBackend {
+    started: AtomicUsize,
+    hold: AtomicBool,
+    release: Notify,
+    inner: GroupBackend,
+}
+
+impl GatedGroupBackend {
+    fn holding() -> Self {
+        Self {
+            started: AtomicUsize::new(0),
+            hold: AtomicBool::new(true),
+            release: Notify::new(),
+            inner: GroupBackend::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for GatedGroupBackend {
+    async fn execute(&self, request: ExecutionRequest) -> ExecutionOutcome {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        if self.hold.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+        self.inner.execute(request).await
+    }
+
+    async fn control(&self, session_id: &str, control: ExecutionControl) -> anyhow::Result<()> {
+        self.inner.control(session_id, control).await
+    }
+}
+
+fn expire_all_run_leases(db_path: &std::path::Path) {
+    let db = Database::new(db_path).unwrap();
+    db.conn()
+        .execute(
+            "UPDATE hive_runs
+             SET lease_expires_at = '2020-01-01T00:00:00.000000Z'
+             WHERE lease_expires_at IS NOT NULL",
+            [],
+        )
+        .unwrap();
+}
+
+fn count_group_user_messages(db_path: &std::path::Path, group_id: &str) -> usize {
+    mitsuro_core::storage::HiveGroupStore::new(Database::new(db_path).unwrap())
+        .list_recent_messages(group_id, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.sender_kind == mitsuro_core::storage::HiveGroupSenderKind::User)
+        .count()
+}
+
+fn group_turn_member_runs(db_path: &std::path::Path, group_id: &str) -> Vec<(String, String)> {
+    let db = Database::new(db_path).unwrap();
+    let mut statement = db
+        .conn()
+        .prepare(
+            "SELECT worker_id, status
+             FROM hive_runs
+             WHERE group_id = ?1 AND kind = 'group_turn'
+             ORDER BY created_at ASC, id ASC",
+        )
+        .unwrap();
+    statement
+        .query_map([group_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn group_workbench_turn_survives_daemon_restart_without_duplicate_room_messages() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let fixture = seed_group(
+        &runtime_config.database_path,
+        &["alpha", "beta"],
+        mitsuro_core::storage::HiveGroupExecutionMode::Workbench,
+        3,
+    );
+    let gated = Arc::new(GatedGroupBackend::holding());
+    let first = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::clone(&gated) as Arc<dyn ExecutionBackend>,
+    )
+    .await
+    .unwrap();
+    let handler = first.handler();
+    let turn = group_turn_response(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "group-restart-1"),
+            Command::GroupMessage(GroupMessageCommand {
+                group_id: fixture.group_id.clone(),
+                message: "keep going after the crash".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+    );
+    assert_eq!(turn.status, "running");
+    wait_for(|| gated.started.load(Ordering::SeqCst) >= 1).await;
+    first.shutdown().await;
+
+    expire_all_run_leases(&runtime_config.database_path);
+
+    let second = start_runtime(
+        runtime_config.clone(),
+        "daemon-b",
+        Arc::new(GroupBackend::default()) as Arc<dyn ExecutionBackend>,
+    )
+    .await
+    .unwrap();
+    let db_path = runtime_config.database_path.clone();
+    let turn_id = turn.turn_id.clone();
+    wait_for(move || {
+        load_turn_status(&db_path, &turn_id).0
+            == mitsuro_core::storage::HiveGroupTurnStatus::Completed
+    })
+    .await;
+
+    assert_eq!(
+        count_group_user_messages(&runtime_config.database_path, &fixture.group_id),
+        1
+    );
+    let member_runs = group_turn_member_runs(&runtime_config.database_path, &fixture.group_id);
+    assert_eq!(member_runs.len(), 2);
+    assert!(member_runs.iter().all(|(_, status)| status == "succeeded"));
+    let worker_ids: std::collections::BTreeSet<_> = member_runs
+        .into_iter()
+        .map(|(worker_id, _)| worker_id)
+        .collect();
+    assert_eq!(
+        worker_ids,
+        fixture
+            .members
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+
+    let replay = group_turn_response(
+        &response(
+            second.handler().as_ref(),
+            context(Actor::local("test"), "group-restart-1"),
+            Command::GroupMessage(GroupMessageCommand {
+                group_id: fixture.group_id.clone(),
+                message: "keep going after the crash".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+    );
+    assert_eq!(replay.turn_id, turn.turn_id);
+    assert_eq!(
+        count_group_user_messages(&runtime_config.database_path, &fixture.group_id),
+        1
+    );
+    assert_eq!(
+        group_turn_member_runs(&runtime_config.database_path, &fixture.group_id).len(),
+        2
+    );
+    second.shutdown().await;
+}
+
 fn seed_worker_with_dm(
     db_path: &std::path::Path,
     slug: &str,
@@ -4110,6 +4282,7 @@ async fn create_schedule_rejects_archived_worker_target() {
                     model_catalog_revision: None,
                     crew_slug: None,
                     worker_id: Some(worker.id),
+                    group_id: None,
                     misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
                     overlap_policy: "queue_one".into(),
                     retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
@@ -4119,6 +4292,214 @@ async fn create_schedule_rejects_archived_worker_target() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "invalid_command");
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_schedule_rejects_archived_group_and_worker_group_together() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(FakeBackend::default()),
+    )
+    .await
+    .unwrap();
+    let handler = runtime.handler();
+    let session_id = dispatch_session_id(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "group-schedule-parent"),
+            dispatch_command(),
+        )
+        .await,
+    );
+    let fixture = seed_group(
+        &runtime_config.database_path,
+        &["ops"],
+        mitsuro_core::storage::HiveGroupExecutionMode::Workbench,
+        1,
+    );
+    let worker_id = fixture.members[0].0.clone();
+    assert!(mitsuro_core::storage::HiveGroupStore::new(
+        Database::new(&runtime_config.database_path).unwrap()
+    )
+    .set_status(
+        &fixture.group_id,
+        mitsuro_core::storage::HiveGroupStatus::Archived
+    )
+    .unwrap());
+
+    let mut definition = ScheduleDefinition {
+        title: "Should fail".into(),
+        summary: "Archived target".into(),
+        objective: "Must not bind an archived Group".into(),
+        recurrence: serde_json::to_value(RecurrenceV1::Once {
+            at: chrono::Utc::now() + chrono::Duration::days(1),
+        })
+        .unwrap(),
+        timezone: "UTC".into(),
+        dst_policy: serde_json::to_value(DstPolicy::default()).unwrap(),
+        priority: 0,
+        project_dir: None,
+        model: None,
+        model_key: None,
+        model_catalog_revision: None,
+        crew_slug: None,
+        worker_id: None,
+        group_id: Some(fixture.group_id.clone()),
+        misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
+        overlap_policy: "queue_one".into(),
+        retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
+    };
+    let archived = handler
+        .handle(
+            context(Actor::local("test"), "archived-group-schedule"),
+            Command::CreateSchedule(CreateScheduleCommand {
+                session_id: session_id.clone(),
+                definition: definition.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(archived.code, "invalid_command");
+
+    definition.group_id = Some(fixture.group_id);
+    definition.worker_id = Some(worker_id);
+    let both = handler
+        .handle(
+            context(Actor::local("test"), "worker-and-group-schedule"),
+            Command::CreateSchedule(CreateScheduleCommand {
+                session_id,
+                definition,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(both.code, "invalid_command");
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn group_targeted_schedule_materializes_a_group_turn() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(GroupBackend::default()) as Arc<dyn ExecutionBackend>,
+    )
+    .await
+    .unwrap();
+    let handler = runtime.handler();
+    let session_id = dispatch_session_id(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "group-schedule-dispatch"),
+            dispatch_command(),
+        )
+        .await,
+    );
+    let fixture = seed_group(
+        &runtime_config.database_path,
+        &["alpha", "beta"],
+        mitsuro_core::storage::HiveGroupExecutionMode::Workbench,
+        1,
+    );
+    let created = response(
+        handler.as_ref(),
+        context(Actor::local("test"), "create-group-schedule"),
+        Command::CreateSchedule(CreateScheduleCommand {
+            session_id,
+            definition: ScheduleDefinition {
+                title: "Group standup".into(),
+                summary: "Wake the room".into(),
+                objective: "Scheduled group standup".into(),
+                recurrence: serde_json::to_value(RecurrenceV1::Once {
+                    at: chrono::Utc::now() + chrono::Duration::days(1),
+                })
+                .unwrap(),
+                timezone: "UTC".into(),
+                dst_policy: serde_json::to_value(DstPolicy::default()).unwrap(),
+                priority: 0,
+                project_dir: None,
+                model: None,
+                model_key: None,
+                model_catalog_revision: None,
+                crew_slug: None,
+                worker_id: None,
+                group_id: Some(fixture.group_id.clone()),
+                misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
+                overlap_policy: "queue_one".into(),
+                retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
+            },
+        }),
+    )
+    .await;
+    let schedule_id = match created {
+        ResponsePayload::Schedule(response) => response.schedule_id,
+        other => panic!("expected schedule response, got {other:?}"),
+    };
+    wait_for(|| {
+        HiveDaemonLeaseStore::new(Database::new(&runtime_config.database_path).unwrap())
+            .get("hive-scheduler")
+            .unwrap()
+            .is_some()
+    })
+    .await;
+    let lease = HiveDaemonLeaseStore::new(Database::new(&runtime_config.database_path).unwrap())
+        .get("hive-scheduler")
+        .unwrap()
+        .unwrap();
+    let schedule = HiveScheduleStore::new(Database::new(&runtime_config.database_path).unwrap())
+        .get_schedule(&schedule_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        schedule.group_id.as_deref(),
+        Some(fixture.group_id.as_str())
+    );
+    let scheduled_for = chrono::Utc::now();
+    materialize_schedule_transaction(
+        runtime_config.database_path.clone(),
+        schedule,
+        MisfireResolution {
+            enqueue: vec![MisfireDispatch {
+                scheduled_for,
+                coalesced_count: 0,
+            }],
+            skipped: Vec::new(),
+        },
+        scheduled_for,
+        None,
+        DaemonFence {
+            lease_name: lease.lease_name,
+            owner_id: lease.owner_id,
+            fencing_token: lease.fencing_token,
+        },
+    )
+    .unwrap();
+
+    let turns = mitsuro_core::storage::HiveGroupStore::new(
+        Database::new(&runtime_config.database_path).unwrap(),
+    )
+    .list_turns(&fixture.group_id, 5)
+    .unwrap();
+    assert_eq!(turns.len(), 1);
+    let scheduled_runs: i64 = Database::new(&runtime_config.database_path)
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_runs
+             WHERE schedule_id = ?1 AND kind = 'group_turn'",
+            [&schedule_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scheduled_runs, 2);
     runtime.shutdown().await;
 }
 

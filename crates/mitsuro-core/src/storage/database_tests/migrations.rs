@@ -117,7 +117,7 @@ fn test_session_list_metadata_migration() {
 
     assert!(columns.contains(&"pinned_at".to_string()));
     assert!(columns.contains(&"archived_at".to_string()));
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -225,7 +225,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -287,7 +287,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     let claimed: String = db
         .conn()
         .query_row(
@@ -317,7 +317,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -372,7 +372,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -426,7 +426,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -535,7 +535,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 63");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 
     let count_workers = |predicate: &str| -> i64 {
         db.conn()
@@ -667,7 +667,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
         .execute("DELETE FROM schema_version WHERE version >= 63", [])
         .expect("rewind migration marker");
     db.run_migrations().expect("reapply migration 63");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
     assert_eq!(count_workers("1 = 1"), 5, "idempotent backfill");
     let assistant_id_after: String = db
         .conn()
@@ -761,7 +761,7 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 64");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 
     let table_exists = |table: &str| -> bool {
         db.conn()
@@ -819,7 +819,7 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     assert!(invalid_mode.is_err(), "execution mode CHECK must hold");
 
     db.run_migrations().expect("migration 64 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -838,7 +838,7 @@ fn migration_65_upgrades_schema_64_with_delivery_ledger() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 65");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 
     let exists: bool = db
         .conn()
@@ -864,7 +864,7 @@ fn migration_65_upgrades_schema_64_with_delivery_ledger() {
     );
 
     db.run_migrations().expect("migration 65 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -899,7 +899,7 @@ fn migration_66_upgrades_schema_65_with_memory_acl_scopes() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 66");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 
     let columns: Vec<String> = db
         .conn()
@@ -932,7 +932,7 @@ fn migration_66_upgrades_schema_65_with_memory_acl_scopes() {
     assert_eq!(shared_scope, "owner");
 
     db.run_migrations().expect("migration 66 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
@@ -962,7 +962,7 @@ fn migration_67_upgrades_schema_66_with_worker_heartbeat_kind() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 67");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 
     let runs_sql: String = db
         .conn()
@@ -978,7 +978,7 @@ fn migration_67_upgrades_schema_66_with_worker_heartbeat_kind() {
     );
 
     db.run_migrations().expect("migration 67 is idempotent");
-    assert_eq!(db.get_schema_version(), 67);
+    assert_eq!(db.get_schema_version(), 68);
 }
 
 #[test]
