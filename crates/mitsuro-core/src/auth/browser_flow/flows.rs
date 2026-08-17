@@ -39,28 +39,12 @@ impl BrowserOAuthFlow {
 
     /// Build the authorization URL with all required parameters
     fn build_auth_url(&self, verifier: &PkceVerifier, state: &str) -> Result<Url> {
-        let challenge = verifier.challenge();
-
-        let mut url = Url::parse(&self.config.authorization_url)
-            .context("Failed to parse authorization URL")?;
-
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs
-                .append_pair("response_type", "code")
-                .append_pair("client_id", &self.config.client_id)
-                .append_pair("redirect_uri", &self.callback_url())
-                .append_pair("scope", &self.config.scopes.join(" "))
-                .append_pair("state", state)
-                .append_pair("code_challenge", challenge.as_str())
-                .append_pair("code_challenge_method", challenge.method());
-
-            for (key, value) in &self.config.extra_auth_params {
-                pairs.append_pair(key, value);
-            }
-        }
-
-        Ok(url)
+        crate::auth::pkce::build_pkce_authorization_url(
+            &self.config,
+            &self.callback_url(),
+            verifier,
+            state,
+        )
     }
 
     /// Exchange authorization code for tokens
@@ -177,28 +161,12 @@ impl PasteCodeOAuthFlow {
 
     /// Build the authorization URL with PKCE challenge
     fn build_auth_url(&self, verifier: &PkceVerifier, state: &str) -> Result<Url> {
-        let challenge = verifier.challenge();
-
-        let mut url = Url::parse(&self.config.authorization_url)
-            .context("Failed to parse authorization URL")?;
-
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs
-                .append_pair("response_type", "code")
-                .append_pair("client_id", &self.config.client_id)
-                .append_pair("redirect_uri", self.redirect_uri())
-                .append_pair("scope", &self.config.scopes.join(" "))
-                .append_pair("state", state)
-                .append_pair("code_challenge", challenge.as_str())
-                .append_pair("code_challenge_method", challenge.method());
-
-            for (key, value) in &self.config.extra_auth_params {
-                pairs.append_pair(key, value);
-            }
-        }
-
-        Ok(url)
+        crate::auth::pkce::build_pkce_authorization_url(
+            &self.config,
+            self.redirect_uri(),
+            verifier,
+            state,
+        )
     }
 
     /// Get the authorization URL, verifier, and state for the paste-code flow
