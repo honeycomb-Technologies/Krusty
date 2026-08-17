@@ -25518,13 +25518,13 @@ fn transcript_reconciliation_key(message: &DemoMessage) -> String {
     if matches!(&message.kind, DemoMessageKind::User { .. }) {
         // Optimistic user bubbles do not have the server item id yet. Their
         // exact structured content is the only safe bridge to hydration.
-        return format!("user:{:?}", &message.kind);
+        return format!("user:{:?}", message.kind);
     }
     message
         .item_id
         .as_ref()
         .map(|item_id| format!("item:{item_id}"))
-        .unwrap_or_else(|| format!("local:{:?}", &message.kind))
+        .unwrap_or_else(|| format!("local:{:?}", message.kind))
 }
 
 fn transcript_hydration_baseline(
