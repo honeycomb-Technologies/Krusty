@@ -78,7 +78,9 @@ Do not retag an existing protected tag. Do not publish crates to crates.io.
 After the Release PR merges, CI tags `v{version}` and the existing binary
 release workflow attaches CLI, Hive, and desktop artifacts. Run
 `sh scripts/sync-product-version.sh` if Expo `app.json` / `package.json` drift
-from `cargo/mitsuro`.
+from `cargo/mitsuro`. Sampo may rewrite `Cargo.lock`; CI restores third-party
+pins from `main` and only rewrites workspace crate versions
+(`sh scripts/refresh-workspace-lock-versions.sh origin/main`).
 
 ## Reporting bugs
 

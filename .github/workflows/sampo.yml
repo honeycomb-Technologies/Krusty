@@ -32,21 +32,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sync Expo marketing version onto the Release PR
-        if: steps.sampo.outputs.released == 'true' && steps.sampo.outputs.published != 'true'
+      - name: Finish Release PR branch
+        if: always() && steps.sampo.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch origin release/sampo
-          git checkout release/sampo
-          sh scripts/sync-product-version.sh
-          if git diff --quiet -- apps/mobile/app.json apps/mobile/package.json; then
-            echo "Expo marketing version already matches cargo/mitsuro"
+          git fetch origin main
+          if ! git ls-remote --exit-code origin release/sampo >/dev/null; then
+            echo "No release/sampo branch to finish"
             exit 0
           fi
+          git fetch origin release/sampo
+          git checkout release/sampo
+          sh scripts/refresh-workspace-lock-versions.sh origin/main
+          sh scripts/sync-product-version.sh
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/mobile/app.json apps/mobile/package.json
-          git commit -m "chore(release): sync Expo marketing version with cargo/mitsuro"
-          git push origin release/sampo
+          if ! git diff --quiet -- Cargo.lock apps/mobile/app.json apps/mobile/package.json; then
+            git add Cargo.lock apps/mobile/app.json apps/mobile/package.json
+            git commit -m "chore(release): keep Cargo.lock pins and sync Expo version"
+            git push origin release/sampo
+          fi
+          if ! gh pr list --repo "$GITHUB_REPOSITORY" --head release/sampo --base main --state open --json number --jq 'length | tostring' | grep -qx 0; then
+            echo "Release PR already open"
+            exit 0
+          fi
+          if ! gh pr create --repo "$GITHUB_REPOSITORY" --base main --head release/sampo \
+            --title "Release (Sampo)" \
+            --body "Sampo version bump. Enable Actions pull-request creation if this step is needed next time."; then
+            echo "Could not open the Release PR with GITHUB_TOKEN."
+            echo "Enable: Settings → Actions → General → Allow GitHub Actions to create and approve pull requests."
+            exit 0
+          fi
