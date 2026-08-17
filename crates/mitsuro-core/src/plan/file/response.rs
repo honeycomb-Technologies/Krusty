@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use super::{PlanFile, PlanPhase, PlanTask, TaskStatus};
+use super::markdown::parse_checkbox_line;
+use super::{PlanFile, PlanPhase, PlanTask};
 
 static RE_CHECKBOX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)- \[[xX]\] (?:\*\*)?(?:Task\s*)?(\d+\.\d+)").expect("RE_CHECKBOX: valid regex")
@@ -128,7 +129,7 @@ impl PlanFile {
                 continue;
             }
 
-            if let Some((status, completed, task_text)) = parse_response_checkbox_line(trimmed) {
+            if let Some((status, completed, task_text)) = parse_checkbox_line(trimmed) {
                 if task_text.is_empty() {
                     continue;
                 }
@@ -217,38 +218,5 @@ impl PlanFile {
         }
 
         completed_ids
-    }
-}
-
-fn parse_response_checkbox_line(trimmed: &str) -> Option<(TaskStatus, bool, &str)> {
-    if trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") {
-        Some((
-            TaskStatus::Completed,
-            true,
-            trimmed
-                .strip_prefix("- [x]")
-                .or_else(|| trimmed.strip_prefix("- [X]"))?
-                .trim(),
-        ))
-    } else if trimmed.starts_with("- [>]") {
-        Some((
-            TaskStatus::InProgress,
-            false,
-            trimmed.strip_prefix("- [>]")?.trim(),
-        ))
-    } else if trimmed.starts_with("- [~]") {
-        Some((
-            TaskStatus::Blocked,
-            false,
-            trimmed.strip_prefix("- [~]")?.trim(),
-        ))
-    } else if trimmed.starts_with("- [ ]") {
-        Some((
-            TaskStatus::Pending,
-            false,
-            trimmed.strip_prefix("- [ ]")?.trim(),
-        ))
-    } else {
-        None
     }
 }
