@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mitsuro",
     "slug": "krusty",
-    "version": "0.9.22",
+    "version": "0.9.23",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
