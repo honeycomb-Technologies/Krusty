@@ -1890,7 +1890,7 @@ fn group_room_section_carries_roster_timeline_and_posting_contract() {
     let bounded = build_group_room_section(
         &db_path,
         &HiveGroupRunContext {
-            group_id: group.id.clone(),
+            group_id: group.id,
             group_turn_id: "turn-1".into(),
             run_id: "run-1".into(),
             worker_id: builder.id,
@@ -1941,7 +1941,7 @@ fn group_member_run_isolates_worker_private_memories() {
     let group = group_store
         .create(&NewHiveGroup {
             title: "Release Room".into(),
-            member_worker_ids: vec![researcher.id.clone(), builder.id.clone()],
+            member_worker_ids: vec![researcher.id.clone(), builder.id],
             ..NewHiveGroup::default()
         })
         .unwrap();
@@ -1984,7 +1984,7 @@ fn group_member_run_isolates_worker_private_memories() {
         "Group shared",
         "group-shared-marker",
     );
-    group_shared.project_dir = Some(project.clone());
+    group_shared.project_dir = Some(project);
     group_shared.acl_scope = crate::storage::MemoryAclScope::Group;
     group_shared.conversation_id = Some(group.id.clone());
     memory_store.save_canonical(&group_shared).unwrap();
@@ -1997,7 +1997,7 @@ fn group_member_run_isolates_worker_private_memories() {
         }],
     }];
     let group_run = HiveGroupRunContext {
-        group_id: group.id.clone(),
+        group_id: group.id,
         group_turn_id: "turn-1".into(),
         run_id: "run-a".into(),
         worker_id: researcher.id,

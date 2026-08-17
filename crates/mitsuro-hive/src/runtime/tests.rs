@@ -3783,7 +3783,7 @@ impl ExecutionBackend for GroupBackend {
         self.executions
             .lock()
             .unwrap()
-            .push((session_id.clone(), request.claim.run.id.clone()));
+            .push((session_id.clone(), request.claim.run.id));
         self.outcomes_by_session
             .lock()
             .unwrap()

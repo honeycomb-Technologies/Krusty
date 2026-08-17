@@ -206,7 +206,7 @@ Rules:
             })
         });
         match store.enqueue(&NewHiveDelivery {
-            from_worker_id: Some(sender.id.clone()),
+            from_worker_id: Some(sender.id),
             group_id,
             priority,
             dedupe_key: Some(dedupe_key),

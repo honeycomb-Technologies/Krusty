@@ -1094,7 +1094,7 @@ fn materialize_group_dispatch(
         &actor,
         now,
         GroupMessageCommand {
-            group_id: group.id.clone(),
+            group_id: group.id,
             message: schedule.objective.clone(),
             mentions_override: None,
         },

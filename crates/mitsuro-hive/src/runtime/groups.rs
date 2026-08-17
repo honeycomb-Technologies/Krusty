@@ -830,6 +830,40 @@ pub(super) fn classify_turn_outcomes(outcomes: &Value) -> HiveGroupTurnStatus {
     }
 }
 
+/// A replayed trigger append means an earlier execution of this exact
+/// request already created the turn; report that turn instead of forking.
+fn replayed_turn_response(
+    tx: &Transaction<'_>,
+    group: &HiveGroup,
+    existing_turn_id: &Option<String>,
+    message_id: &str,
+    message_seq: i64,
+) -> Result<Mutation, RuntimeStoreError> {
+    let turn = existing_turn_id
+        .as_deref()
+        .map(|turn_id| hive_groups::load_turn(tx, turn_id))
+        .transpose()
+        .map_err(RuntimeStoreError::Internal)?
+        .flatten();
+    let Some(turn) = turn else {
+        return Err(RuntimeStoreError::Conflict(
+            "this message was already delivered with a different turn record".into(),
+        ));
+    };
+    Ok(Mutation {
+        response: ResponsePayload::GroupTurn(GroupTurnResponse {
+            group_id: group.id.clone(),
+            turn_id: turn.id,
+            message_id: message_id.to_string(),
+            message_seq,
+            status: turn.status.as_str().to_string(),
+            target_worker_ids: turn.speaker_plan,
+        }),
+        resource_id: Some(group.id.clone()),
+        events: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -1298,7 +1332,7 @@ mod tests {
             targets
         );
         assert_eq!(
-            build_speaker_plan(HiveGroupExecutionMode::Direct, &targets[..1].to_vec(), 5),
+            build_speaker_plan(HiveGroupExecutionMode::Direct, &targets[..1], 5),
             vec!["a".to_string()]
         );
         assert_eq!(
@@ -1345,38 +1379,4 @@ mod tests {
         );
         assert_eq!(classify(&[]), HiveGroupTurnStatus::Failed);
     }
-}
-
-/// A replayed trigger append means an earlier execution of this exact
-/// request already created the turn; report that turn instead of forking.
-fn replayed_turn_response(
-    tx: &Transaction<'_>,
-    group: &HiveGroup,
-    existing_turn_id: &Option<String>,
-    message_id: &str,
-    message_seq: i64,
-) -> Result<Mutation, RuntimeStoreError> {
-    let turn = existing_turn_id
-        .as_deref()
-        .map(|turn_id| hive_groups::load_turn(tx, turn_id))
-        .transpose()
-        .map_err(RuntimeStoreError::Internal)?
-        .flatten();
-    let Some(turn) = turn else {
-        return Err(RuntimeStoreError::Conflict(
-            "this message was already delivered with a different turn record".into(),
-        ));
-    };
-    Ok(Mutation {
-        response: ResponsePayload::GroupTurn(GroupTurnResponse {
-            group_id: group.id.clone(),
-            turn_id: turn.id,
-            message_id: message_id.to_string(),
-            message_seq,
-            status: turn.status.as_str().to_string(),
-            target_worker_ids: turn.speaker_plan,
-        }),
-        resource_id: Some(group.id.clone()),
-        events: Vec::new(),
-    })
 }
