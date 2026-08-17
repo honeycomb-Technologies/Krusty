@@ -285,6 +285,8 @@ pub struct ScheduleDefinition {
     #[serde(default)]
     pub model_catalog_revision: Option<String>,
     pub crew_slug: Option<String>,
+    #[serde(default)]
+    pub worker_id: Option<String>,
     pub misfire: serde_json::Value,
     pub overlap_policy: String,
     pub retry: serde_json::Value,
@@ -716,6 +718,7 @@ mod tests {
                 model_key: None,
                 model_catalog_revision: None,
                 crew_slug: None,
+                worker_id: None,
                 misfire: serde_json::json!({
                     "policy": "fire_once",
                     "grace_secs": 300,

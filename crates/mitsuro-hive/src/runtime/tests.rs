@@ -864,6 +864,11 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
             [&session_id],
         )
         .unwrap();
+    let ops_worker = mitsuro_core::storage::HiveWorkerStore::new(
+        Database::new(&runtime_config.database_path).unwrap(),
+    )
+    .create(&mitsuro_core::storage::NewHiveWorker::new("ops"))
+    .unwrap();
 
     let definition = ScheduleDefinition {
         title: "Daily repository audit".into(),
@@ -881,6 +886,7 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
         model_key: None,
         model_catalog_revision: None,
         crew_slug: None,
+        worker_id: None,
         misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
         overlap_policy: "queue_one".into(),
         retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
@@ -946,6 +952,7 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
         Some("catalog-42")
     );
     assert_eq!(schedule.crew_slug.as_deref(), Some("ops"));
+    assert_eq!(schedule.worker_id.as_deref(), Some(ops_worker.id.as_str()));
 
     let error = handler
         .handle(
@@ -3987,5 +3994,195 @@ async fn group_roundtable_advances_rotating_speakers_to_completion() {
     let outcomes = outcomes.unwrap();
     assert_eq!(outcomes[&fixture.members[0].0]["status"], "succeeded");
     assert_eq!(outcomes[&fixture.members[1].0]["status"], "succeeded");
+    runtime.shutdown().await;
+}
+
+fn seed_worker_with_dm(
+    db_path: &std::path::Path,
+    slug: &str,
+    autonomy: mitsuro_core::storage::HiveWorkerAutonomy,
+    heartbeat_interval_secs: Option<u32>,
+) -> (String, String) {
+    let session_manager = SessionManager::new(Database::new(db_path).unwrap());
+    let dm_session_id = session_manager
+        .create_session_for_user_with_config(
+            &format!("{slug} DM"),
+            Some("test:model"),
+            Some("/work/repo"),
+            None,
+            WorkspaceMode::Neutral,
+            None,
+            None,
+            SessionType::Hive,
+        )
+        .unwrap();
+    let worker = mitsuro_core::storage::HiveWorkerStore::new(Database::new(db_path).unwrap())
+        .create(&mitsuro_core::storage::NewHiveWorker {
+            model: Some("test:model".into()),
+            dm_session_id: Some(dm_session_id.clone()),
+            autonomy,
+            heartbeat_interval_secs,
+            ..mitsuro_core::storage::NewHiveWorker::new(slug)
+        })
+        .unwrap();
+    (worker.id, dm_session_id)
+}
+
+fn count_worker_heartbeat_runs(db_path: &std::path::Path, worker_id: &str) -> i64 {
+    Database::new(db_path)
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_runs
+             WHERE worker_id = ?1 AND kind = 'worker_heartbeat'",
+            [worker_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn count_finished_worker_heartbeats(db_path: &std::path::Path, worker_id: &str) -> i64 {
+    Database::new(db_path)
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_runs
+             WHERE worker_id = ?1 AND kind = 'worker_heartbeat' AND finished_at IS NOT NULL",
+            [worker_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn create_schedule_rejects_archived_worker_target() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(FakeBackend::default()),
+    )
+    .await
+    .unwrap();
+    let handler = runtime.handler();
+    let session_id = dispatch_session_id(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "archived-schedule-parent"),
+            dispatch_command(),
+        )
+        .await,
+    );
+    let worker_store = mitsuro_core::storage::HiveWorkerStore::new(
+        Database::new(&runtime_config.database_path).unwrap(),
+    );
+    let worker = worker_store
+        .create(&mitsuro_core::storage::NewHiveWorker::new("archived-ops"))
+        .unwrap();
+    assert!(worker_store
+        .set_status(
+            &worker.id,
+            mitsuro_core::storage::HiveWorkerStatus::Archived
+        )
+        .unwrap());
+
+    let error = handler
+        .handle(
+            context(Actor::local("test"), "archived-worker-schedule"),
+            Command::CreateSchedule(CreateScheduleCommand {
+                session_id,
+                definition: ScheduleDefinition {
+                    title: "Should fail".into(),
+                    summary: "Archived target".into(),
+                    objective: "Must not bind an archived Worker".into(),
+                    recurrence: serde_json::to_value(RecurrenceV1::Once {
+                        at: chrono::Utc::now() + chrono::Duration::days(1),
+                    })
+                    .unwrap(),
+                    timezone: "UTC".into(),
+                    dst_policy: serde_json::to_value(DstPolicy::default()).unwrap(),
+                    priority: 0,
+                    project_dir: None,
+                    model: None,
+                    model_key: None,
+                    model_catalog_revision: None,
+                    crew_slug: None,
+                    worker_id: Some(worker.id),
+                    misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
+                    overlap_policy: "queue_one".into(),
+                    retry: serde_json::to_value(RetryPolicy::default()).unwrap(),
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_command");
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn always_on_worker_receives_heartbeat_and_stops_when_paused() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let (worker_id, _) = seed_worker_with_dm(
+        &runtime_config.database_path,
+        "pulse",
+        mitsuro_core::storage::HiveWorkerAutonomy::AlwaysOn,
+        Some(1),
+    );
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(FakeBackend::default()),
+    )
+    .await
+    .unwrap();
+
+    let db_path = runtime_config.database_path.clone();
+    let waiting_id = worker_id.clone();
+    wait_for(move || count_finished_worker_heartbeats(&db_path, &waiting_id) >= 1).await;
+
+    assert!(mitsuro_core::storage::HiveWorkerStore::new(
+        Database::new(&runtime_config.database_path).unwrap()
+    )
+    .set_status(&worker_id, mitsuro_core::storage::HiveWorkerStatus::Paused)
+    .unwrap());
+
+    let paused_count = count_worker_heartbeat_runs(&runtime_config.database_path, &worker_id);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        count_worker_heartbeat_runs(&runtime_config.database_path, &worker_id),
+        paused_count,
+        "paused AlwaysOn workers must not receive further heartbeats"
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn manual_worker_does_not_receive_heartbeat() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let (worker_id, _) = seed_worker_with_dm(
+        &runtime_config.database_path,
+        "manual",
+        mitsuro_core::storage::HiveWorkerAutonomy::Manual,
+        None,
+    );
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(FakeBackend::default()),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        count_worker_heartbeat_runs(&runtime_config.database_path, &worker_id),
+        0
+    );
     runtime.shutdown().await;
 }

@@ -923,6 +923,7 @@ export interface HiveSchedule {
 	model_key?: ModelKey | null;
 	model_catalog_revision?: string | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire: HiveMisfireConfig;
 	overlap_policy: HiveScheduleOverlapPolicy;
 	retry: HiveRetryPolicy;
@@ -956,6 +957,7 @@ export interface HiveScheduleWriteRequest {
 	model?: string | null;
 	model_key?: ModelKey | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire?: HiveMisfireConfig;
 	overlap_policy?: HiveScheduleOverlapPolicy;
 	retry?: HiveRetryPolicy;

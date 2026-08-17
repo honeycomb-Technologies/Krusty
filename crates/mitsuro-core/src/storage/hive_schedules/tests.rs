@@ -61,6 +61,7 @@ fn schedule() -> HiveSchedule {
         ),
         model_catalog_revision: Some("catalog-42".into()),
         crew_slug: Some("reviewer".into()),
+        worker_id: None,
         misfire: MisfireConfig::default(),
         overlap_policy: OverlapPolicy::QueueOne,
         retry: RetryPolicy {
@@ -84,6 +85,23 @@ fn schedule_round_trips_typed_recurrence_and_policies() {
     assert_eq!(loaded.timezone, "America/Los_Angeles");
     assert_eq!(loaded.model_key, schedule().model_key);
     assert_eq!(loaded.model_catalog_revision.as_deref(), Some("catalog-42"));
+    assert_eq!(loaded.worker_id, None);
+}
+
+#[test]
+fn schedule_persists_targeted_worker_id() {
+    let (store, temp) = store();
+    let db = Database::new(&temp.path().join("schedules.db")).unwrap();
+    let worker_store = crate::storage::HiveWorkerStore::new(db);
+    let worker = worker_store
+        .create(&crate::storage::NewHiveWorker::new("reviewer"))
+        .unwrap();
+    let mut targeted = schedule();
+    targeted.worker_id = Some(worker.id.clone());
+    store.insert_schedule(&targeted).unwrap();
+    let loaded = store.get_schedule("schedule-1").unwrap().unwrap();
+    assert_eq!(loaded.worker_id.as_deref(), Some(worker.id.as_str()));
+    assert_eq!(loaded.crew_slug.as_deref(), Some("reviewer"));
 }
 
 #[test]

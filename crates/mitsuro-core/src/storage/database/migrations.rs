@@ -4095,6 +4095,60 @@ impl Database {
             memory_tx.commit()?;
         }
 
+        // Migration 67: Always-on Worker heartbeat run kind.
+        //
+        // hive_runs.kind gains worker_heartbeat so the pump can wake an
+        // AlwaysOn Worker's DM on its interval without colliding with
+        // scheduled or worker_message rows.
+        if current_version < 67 {
+            info!("Running migration 67: Hive worker heartbeat run kind");
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 67: checking for hive_runs")?;
+            if runs_table_exists {
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                const HEARTBEAT_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 67: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [DELIVERY_KINDS, HEARTBEAT_KINDS],
+                    )
+                    .context("Migration 67: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 67: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_heartbeat") || !runs_sql.contains("kind IN"),
+                    "Migration 67 could not extend the hive_runs kind CHECK"
+                );
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (67)",
+                [],
+            )?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4217,7 +4271,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 66);
+        assert_eq!(database.get_schema_version(), 67);
         database
             .conn()
             .execute(
@@ -4298,7 +4352,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 66);
+        assert_eq!(database.get_schema_version(), 67);
         let create_sql: String = database
             .conn()
             .query_row(

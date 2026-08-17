@@ -15,7 +15,7 @@ use super::{
     OverlapPolicy, OwnedHiveSchedule,
 };
 
-const SCHEDULE_COLUMNS: &str = "id, controller_id, title, summary, objective, recurrence_kind, recurrence_json, timezone, gap_policy, fold_policy, next_fire_at, last_scheduled_for, status, priority, project_dir, model, model_key_json, model_catalog_revision, crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy, max_attempts, retry_base_secs, retry_max_secs, retry_jitter, revision, created_by, created_at, updated_at";
+const SCHEDULE_COLUMNS: &str = "id, controller_id, title, summary, objective, recurrence_kind, recurrence_json, timezone, gap_policy, fold_policy, next_fire_at, last_scheduled_for, status, priority, project_dir, model, model_key_json, model_catalog_revision, crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy, max_attempts, retry_base_secs, retry_max_secs, retry_jitter, revision, created_by, created_at, updated_at, worker_id";
 const OCCURRENCE_COLUMNS: &str = "id, schedule_id, scheduled_for, run_id, status, decision_reason, coalesced_count, created_at, updated_at";
 
 pub struct HiveScheduleStore {
@@ -48,11 +48,11 @@ impl HiveScheduleStore {
                 model_key_json, model_catalog_revision, crew_slug,
                 misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
                 max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
-                revision, created_by, created_at, updated_at
+                revision, created_by, created_at, updated_at, worker_id
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
-                ?25, ?26, ?27, ?28, ?29, ?30, ?31
+                ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
              )",
             params![
                 schedule.id,
@@ -86,6 +86,7 @@ impl HiveScheduleStore {
                 schedule.created_by,
                 created_at,
                 updated_at,
+                schedule.worker_id,
             ],
         )?;
         Ok(())
@@ -137,7 +138,7 @@ impl HiveScheduleStore {
             return Ok(Vec::new());
         }
         let sql =
-            "SELECT s.id, s.controller_id, s.title, s.summary, s.objective, s.recurrence_kind, s.recurrence_json, s.timezone, s.gap_policy, s.fold_policy, s.next_fire_at, s.last_scheduled_for, s.status, s.priority, s.project_dir, s.model, s.model_key_json, s.model_catalog_revision, s.crew_slug, s.misfire_policy, s.misfire_grace_secs, s.catch_up_limit, s.overlap_policy, s.max_attempts, s.retry_base_secs, s.retry_max_secs, s.retry_jitter, s.revision, s.created_by, s.created_at, s.updated_at, c.session_id
+            "SELECT s.id, s.controller_id, s.title, s.summary, s.objective, s.recurrence_kind, s.recurrence_json, s.timezone, s.gap_policy, s.fold_policy, s.next_fire_at, s.last_scheduled_for, s.status, s.priority, s.project_dir, s.model, s.model_key_json, s.model_catalog_revision, s.crew_slug, s.misfire_policy, s.misfire_grace_secs, s.catch_up_limit, s.overlap_policy, s.max_attempts, s.retry_base_secs, s.retry_max_secs, s.retry_jitter, s.revision, s.created_by, s.created_at, s.updated_at, s.worker_id, c.session_id
              FROM hive_schedules s
              INNER JOIN hive_controllers c ON c.id = s.controller_id
              WHERE ((?1 IS NULL AND c.user_id IS NULL) OR c.user_id = ?1)
@@ -152,7 +153,7 @@ impl HiveScheduleStore {
             .query_map(params![user_id, limit as i64], |row| {
                 Ok(OwnedHiveSchedule {
                     schedule: map_schedule(row)?,
-                    controller_session_id: row.get(31)?,
+                    controller_session_id: row.get(32)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -436,6 +437,7 @@ fn map_schedule(row: &Row<'_>) -> rusqlite::Result<HiveSchedule> {
         created_by: row.get(28)?,
         created_at: row.get(29)?,
         updated_at: row.get(30)?,
+        worker_id: row.get(31)?,
     })
 }
 

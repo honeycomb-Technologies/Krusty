@@ -51,6 +51,9 @@ pub enum HiveWorkerAutonomy {
     AlwaysOn,
 }
 
+/// Default always-on heartbeat when the Worker did not pick an interval.
+pub const DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS: u32 = 900;
+
 impl HiveWorkerAutonomy {
     pub fn as_str(self) -> &'static str {
         match self {

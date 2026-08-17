@@ -76,6 +76,22 @@ fn worker_create_round_trips_and_scopes_by_owner() {
 }
 
 #[test]
+fn always_on_create_defaults_heartbeat_interval() {
+    let (store, _temp) = store();
+    let worker = store
+        .create(&NewHiveWorker {
+            autonomy: HiveWorkerAutonomy::AlwaysOn,
+            ..NewHiveWorker::new("pulse")
+        })
+        .expect("create always-on worker");
+    assert_eq!(worker.autonomy, HiveWorkerAutonomy::AlwaysOn);
+    assert_eq!(
+        worker.heartbeat_interval_secs,
+        Some(crate::storage::DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS)
+    );
+}
+
+#[test]
 fn worker_slug_validation_rejects_invalid_slugs() {
     let (store, _temp) = store();
     for slug in ["", "Bad Slug", "UPPER", "slash/slug", &"x".repeat(65)] {
@@ -165,6 +181,17 @@ fn worker_profile_updates_and_status_transitions_persist() {
         )
         .is_err());
 
+    assert!(store
+        .set_autonomy(&worker.id, HiveWorkerAutonomy::AlwaysOn, None)
+        .unwrap());
+    assert_eq!(
+        store
+            .get(&worker.id)
+            .unwrap()
+            .unwrap()
+            .heartbeat_interval_secs,
+        Some(crate::storage::DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS)
+    );
     assert!(store
         .set_autonomy(&worker.id, HiveWorkerAutonomy::AlwaysOn, Some(900))
         .unwrap());

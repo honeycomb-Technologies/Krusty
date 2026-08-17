@@ -100,6 +100,10 @@ pub struct HiveSchedule {
     #[serde(default)]
     pub model_catalog_revision: Option<String>,
     pub crew_slug: Option<String>,
+    /// Durable Worker this schedule should wake. When set, occurrences run
+    /// on that Worker's DM lane instead of the creating session.
+    #[serde(default)]
+    pub worker_id: Option<String>,
     pub misfire: MisfireConfig,
     pub overlap_policy: OverlapPolicy,
     pub retry: RetryPolicy,

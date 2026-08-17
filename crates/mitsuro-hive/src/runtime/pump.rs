@@ -8,12 +8,13 @@ use mitsuro_core::hive::{
     HiveRunStatus, MisfireDispatch, RetryPolicy,
 };
 use mitsuro_core::storage::{
-    ClaimRunRequest, ClaimedHiveRun, DaemonFence, DaemonLeaseAcquire, Database,
-    HiveDaemonLeaseStore, HiveRun, HiveRunStore, HiveSchedule, HiveScheduleStore, OverlapPolicy,
-    ReconciledRun, RunCompletion,
+    load_worker_with_conn, ClaimRunRequest, ClaimedHiveRun, DaemonFence, DaemonLeaseAcquire,
+    Database, HiveDaemonLeaseStore, HiveRun, HiveRunStore, HiveSchedule, HiveScheduleStore,
+    HiveWorkerStatus, OverlapPolicy, ReconciledRun, RunCompletion,
 };
 use mitsuro_hive_protocol::{
-    unix_time_millis, EventEnvelope, ExtensionEvent, HiveEvent, ProtocolVersion, RuntimeEvent,
+    unix_time_millis, Actor, EventEnvelope, ExtensionEvent, HiveEvent, ProtocolVersion,
+    RuntimeEvent,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
@@ -29,7 +30,10 @@ use super::handler::{
     CommittedCancellation, RuntimeShared, DAEMON_LEASE_NAME, MAX_RETRY_ATTEMPTS,
     MAX_RETRY_DELAY_SECS,
 };
-use super::persistence::{append_event, ControllerRecord, PersistedEvent, RuntimeStoreError};
+use super::persistence::{
+    append_event, get_or_create_controller, require_owned_session, ControllerRecord,
+    PersistedEvent, RuntimeStoreError,
+};
 
 const MAX_DUE_OCCURRENCES: usize = 1_000;
 const EVENT_JOURNAL_EXHAUSTED_REASON: &str =
@@ -105,6 +109,10 @@ pub(crate) async fn run(shared: Arc<RuntimeShared>, mut shutdown: watch::Receive
                         if let Err(error) = deliveries::deliver_worker_messages(&shared, token).await
                         {
                             tracing::warn!(error = ?error, "Hive worker-message delivery failed");
+                        }
+                        if let Err(error) = super::heartbeat::wake_always_on_workers(&shared, token).await
+                        {
+                            tracing::warn!(error = ?error, "Hive always-on heartbeat wake failed");
                         }
                         if let Err(error) = materialize_due_schedules(&shared, token).await {
                             tracing::warn!(error = ?error, "Hive schedule materialization failed");
@@ -791,6 +799,62 @@ pub(crate) fn materialize_schedule_transaction(
     Ok(events)
 }
 
+struct ScheduleLane {
+    controller: ControllerRecord,
+    permission_mode: String,
+    worker_id: Option<String>,
+}
+
+fn resolve_schedule_lane(
+    tx: &Transaction<'_>,
+    schedule: &HiveSchedule,
+    fallback: &ControllerRecord,
+    permission_mode: &str,
+    now: &str,
+) -> Result<Result<ScheduleLane, &'static str>, RuntimeStoreError> {
+    let Some(worker_id) = schedule
+        .worker_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(Ok(ScheduleLane {
+            controller: fallback.clone(),
+            permission_mode: permission_mode.to_string(),
+            worker_id: None,
+        }));
+    };
+    let Some(worker) = load_worker_with_conn(tx, worker_id).map_err(RuntimeStoreError::Internal)?
+    else {
+        return Ok(Err("targeted Worker was not found"));
+    };
+    if worker.status == HiveWorkerStatus::Archived {
+        return Ok(Err("targeted Worker is archived"));
+    }
+    if worker.status == HiveWorkerStatus::Paused {
+        return Ok(Err("targeted Worker is paused"));
+    }
+    let Some(session_id) = worker
+        .dm_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Err("targeted Worker has no DM lane"));
+    };
+    let actor = Actor {
+        user_id: worker.user_id.clone(),
+        client_kind: "hive-scheduler".into(),
+    };
+    let session = require_owned_session(tx, &actor, session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    Ok(Ok(ScheduleLane {
+        controller,
+        permission_mode: worker.permission_mode.as_str().to_string(),
+        worker_id: Some(worker.id),
+    }))
+}
+
 fn materialize_dispatch(
     tx: &Transaction<'_>,
     controller: &ControllerRecord,
@@ -812,6 +876,24 @@ fn materialize_dispatch(
         [&schedule.id],
         |row| row.get(0),
     )?;
+    let lane = match resolve_schedule_lane(tx, schedule, controller, permission_mode, now)? {
+        Ok(lane) => lane,
+        Err(skip_reason) => {
+            materialize_occurrence(
+                tx,
+                controller,
+                schedule,
+                dispatch.scheduled_for,
+                None,
+                "skipped",
+                Some(skip_reason),
+                dispatch.coalesced_count as u32,
+                now,
+                events,
+            )?;
+            return Ok(());
+        }
+    };
     let (status, reason, should_queue) = match schedule.overlap_policy {
         OverlapPolicy::Allow => ("queued", None, true),
         OverlapPolicy::Skip if unfinished > 0 => {
@@ -828,7 +910,7 @@ fn materialize_dispatch(
         should_queue.then(|| deterministic_id("run", &schedule.id, dispatch.scheduled_for));
     materialize_occurrence(
         tx,
-        controller,
+        &lane.controller,
         schedule,
         dispatch.scheduled_for,
         run_id.as_deref(),
@@ -846,9 +928,10 @@ fn materialize_dispatch(
             "model": schedule.model,
             "model_key": schedule.model_key,
             "model_catalog_revision": schedule.model_catalog_revision,
-            "permission_mode": permission_mode,
+            "permission_mode": lane.permission_mode,
             "crew_slug": schedule.crew_slug,
             "retry": schedule.retry,
+            "worker_id": lane.worker_id,
         }))
         .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
         let concurrency_key = (schedule.overlap_policy != OverlapPolicy::Allow)
@@ -861,15 +944,15 @@ fn materialize_dispatch(
                 scheduled_for, available_at, wake_at, attempt_count, max_attempts,
                 lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
                 last_stop_reason, last_error, outcome_json, created_at, started_at,
-                finished_at, updated_at
+                finished_at, updated_at, worker_id
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'scheduled', ?6, ?7, 'queued', ?8, ?9,
                        ?10, ?10, NULL, 0, ?11, NULL, NULL, NULL, NULL, NULL,
-                       NULL, NULL, NULL, ?12, NULL, NULL, ?12)
+                       NULL, NULL, NULL, ?12, NULL, NULL, ?12, ?13)
              ON CONFLICT(id) DO NOTHING",
             params![
                 run_id,
-                controller.id,
-                controller.session_id,
+                lane.controller.id,
+                lane.controller.session_id,
                 schedule.id,
                 occurrence_id,
                 schedule.objective,
@@ -878,12 +961,13 @@ fn materialize_dispatch(
                 concurrency_key,
                 scheduled_for,
                 schedule.retry.max_attempts,
-                now
+                now,
+                lane.worker_id,
             ],
         )?;
         events.push(append_event(
             tx,
-            controller,
+            &lane.controller,
             "run_queued",
             Some(&run_id),
             Some(&schedule.id),

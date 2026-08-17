@@ -127,9 +127,10 @@ pub use hive_schedules::{
     HiveScheduleStore, OverlapPolicy, OwnedHiveSchedule,
 };
 pub use hive_workers::{
-    display_name_from_slug, load_worker_with_conn, HiveWorker, HiveWorkerAutonomy,
-    HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus,
-    HiveWorkerStore, NewHiveWorker,
+    display_name_from_slug, load_worker_with_conn, resolve_worker_for_crew_slug_with_conn,
+    HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument, HiveWorkerDocumentKind,
+    HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore, NewHiveWorker,
+    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
 };
 pub use knowledge::{
     get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,

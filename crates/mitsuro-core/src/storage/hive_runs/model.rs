@@ -18,6 +18,8 @@ pub enum HiveRunKind {
     GroupTurn,
     /// A Worker-to-Worker delivery that woke the recipient's private DM lane.
     WorkerMessage,
+    /// Periodic wake for an always-on Worker on its private DM lane.
+    WorkerHeartbeat,
 }
 
 impl HiveRunKind {
@@ -29,6 +31,7 @@ impl HiveRunKind {
             Self::LegacyResume => "legacy_resume",
             Self::GroupTurn => "group_turn",
             Self::WorkerMessage => "worker_message",
+            Self::WorkerHeartbeat => "worker_heartbeat",
         }
     }
 
@@ -40,6 +43,7 @@ impl HiveRunKind {
             "legacy_resume" => Some(Self::LegacyResume),
             "group_turn" => Some(Self::GroupTurn),
             "worker_message" => Some(Self::WorkerMessage),
+            "worker_heartbeat" => Some(Self::WorkerHeartbeat),
             _ => None,
         }
     }

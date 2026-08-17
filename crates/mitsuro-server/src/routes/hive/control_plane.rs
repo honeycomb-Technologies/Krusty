@@ -44,6 +44,8 @@ pub(super) struct ScheduleWriteRequest {
     model_key: Option<ModelKey>,
     crew_slug: Option<String>,
     #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
     misfire: MisfireConfig,
     #[serde(default = "default_overlap_policy")]
     overlap_policy: OverlapPolicy,
@@ -426,6 +428,7 @@ async fn schedule_definition(
         model_key: Some(protocol_model_key),
         model_catalog_revision: resolved_model.catalog_revision,
         crew_slug: trimmed_nonempty(request.crew_slug.as_deref()).map(ToOwned::to_owned),
+        worker_id: trimmed_nonempty(request.worker_id.as_deref()).map(ToOwned::to_owned),
         misfire,
         overlap_policy: request.overlap_policy.as_str().to_string(),
         retry,

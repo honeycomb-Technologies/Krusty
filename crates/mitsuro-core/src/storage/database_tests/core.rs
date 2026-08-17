@@ -10,7 +10,7 @@ use super::{create_test_db, seed_legacy_delegated_runs_schema};
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 66, "Expected current schema version to be 66");
+    assert_eq!(version, 67, "Expected current schema version to be 67");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 66, "Expected final schema version");
+    assert_eq!(version, 67, "Expected final schema version");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn concurrent_process_initialization_serializes_migrations() {
             .join()
             .expect("database initializer thread should not panic")
             .expect("concurrent database initialization should succeed");
-        assert_eq!(version, 66);
+        assert_eq!(version, 67);
     }
 }
 
@@ -108,15 +108,15 @@ fn privacy_migration_releases_exclusive_lock_while_first_handle_stays_open() {
     drop(seed);
 
     let first = Database::new(&db_path).expect("complete privacy migration");
-    assert_eq!(first.get_schema_version(), 66);
+    assert_eq!(first.get_schema_version(), 67);
 
     // Keep the migration-winning handle alive. A locking-mode restore without
     // a subsequent database access retains SQLite's exclusive lock and makes
     // this second independently supervised process time out.
     let second = Database::new(&db_path)
         .expect("second process should open while migration winner remains alive");
-    assert_eq!(second.get_schema_version(), 66);
-    assert_eq!(first.get_schema_version(), 66);
+    assert_eq!(second.get_schema_version(), 67);
+    assert_eq!(first.get_schema_version(), 67);
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
         .expect("release peer snapshot");
     drop(reader);
     let recovered = Database::new(&db_path).expect("retry privacy migration after peer release");
-    assert_eq!(recovered.get_schema_version(), 66);
+    assert_eq!(recovered.get_schema_version(), 67);
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 66);
+    assert_eq!(db.get_schema_version(), 67);
 
     let flush_count: i64 = db
         .conn()
@@ -295,7 +295,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 66);
+    assert_eq!(db.get_schema_version(), 67);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -374,7 +374,7 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate legacy memories");
-    assert_eq!(db.get_schema_version(), 66);
+    assert_eq!(db.get_schema_version(), 67);
 
     let fact_metadata: (String, String, f64) = db
         .conn()
@@ -571,7 +571,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     );
 
     let migrated = Database::new(&db_path).expect("apply privacy migration");
-    assert_eq!(migrated.get_schema_version(), 66);
+    assert_eq!(migrated.get_schema_version(), 67);
     let event_payloads: String = migrated
         .conn()
         .query_row(
@@ -668,7 +668,7 @@ fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
     );
 
     let recovered = Database::new(&db_path).expect("resume physical privacy cleanup");
-    assert_eq!(recovered.get_schema_version(), 66);
+    assert_eq!(recovered.get_schema_version(), 67);
     drop(recovered);
 
     for path in [
