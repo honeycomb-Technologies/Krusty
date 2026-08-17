@@ -10,9 +10,10 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - **Product name:** Mitsuro.
 - **Company name:** Honeycomb Technologies.
 - **Interactive assistant/session:** Agent. User-facing modes may be named Chat and Code.
-- **Durable autonomous system:** Hive. An individual delegated worker is a Hive Agent.
+- **Durable autonomous system:** Hive. An individual delegated worker is a Hive Worker.
+- **Hive surfaces:** Workers, Groups, Activity, Calendar, and Memory.
 - **Activity accent/state:** Pulse, only where the product design calls for that term.
-- Public product copy, screenshots, package descriptions, release notes, and repository prose should use Mitsuro, Agent, Hive, Hive Agent, and Pulse consistently.
+- Public product copy, screenshots, package descriptions, release notes, and repository prose should use Mitsuro, Agent, Hive, Hive Worker, Hive Workers, Groups, Activity, Calendar, Memory, and Pulse consistently.
 - The canonical public repository is `honeycomb-Technologies/Mitsuro`. Mobile launch URLs use `mitsuro://`.
 - Canonical identifiers include `mitsuro`, `mitsuro-*`, `mitsuro-hive`, `@mitsuro/*`, `/api/hive/*`, `session_type = "hive"`, `~/.mitsuro`, and the corresponding Expo, native, database, and deployment names.
 - Prior identifiers may appear only in dedicated, tested compatibility readers and migrations. Those boundaries read prior state and write canonical state; they are not current product language.

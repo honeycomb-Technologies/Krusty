@@ -3058,7 +3058,7 @@ impl MitsuroApp {
                 .multi_line(true)
         });
         let hive_crew_update_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Crew slug · blank removes assignment")
+            InputState::new(window, cx).placeholder("Worker slug · blank removes assignment")
         });
         let schedule_session_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Hive session id"));
@@ -3112,7 +3112,7 @@ impl MitsuroApp {
         let schedule_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Model (blank inherits session)"));
         let schedule_crew_slug_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Crew slug (optional)"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Worker slug (optional)"));
         let schedule_priority_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Priority")

@@ -96,7 +96,7 @@ export function HiveCurrentView({
                 Initialize Hive
               </Text>
               <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                Create identity, voice, heartbeat, memory, channels, and Hive Agents.
+                Create identity, voice, heartbeat, memory, channels, and Hive Workers.
               </Text>
             </View>
             <Pressable

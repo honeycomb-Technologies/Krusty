@@ -6,15 +6,35 @@ export interface HiveDrawerItem {
   detail: string;
 }
 
-export const HIVE_DRAWER_ITEMS: HiveDrawerItem[] = [
+/** Primary Hive destinations shown in the mode drawer. Internal ids stay
+ * stable for deep links; labels are the current product language. */
+export const HIVE_PRIMARY_NAV_ITEMS: HiveDrawerItem[] = [
   {
-    id: "hive",
-    label: "Hive",
-    detail: "Main thread",
+    id: "crew",
+    label: "Workers",
+    detail: "Durable identities with private DMs",
+  },
+  {
+    id: "groups",
+    label: "Groups",
+    detail: "Rooms where Workers collaborate",
+  },
+  {
+    id: "attention",
+    label: "Activity",
+    detail: "Approvals, wakes, and updates",
   },
   {
     id: "schedule",
-    label: "Schedule",
-    detail: "Agenda and calendar",
+    label: "Calendar",
+    detail: "Recurring and one-time wakes",
+  },
+  {
+    id: "memory",
+    label: "Memory",
+    detail: "Shared notes and Worker recall",
   },
 ];
+
+/** @deprecated Use HIVE_PRIMARY_NAV_ITEMS. Kept for older imports. */
+export const HIVE_DRAWER_ITEMS = HIVE_PRIMARY_NAV_ITEMS;

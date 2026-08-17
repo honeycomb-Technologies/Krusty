@@ -150,8 +150,8 @@ Deno.test("terminal report labels do not duplicate canonical live rows", () => {
 			outcome: "success",
 			delegated_run_id: "group-team",
 			agents: [
-				{ agent: "Hive Agent 01", success: true, usable_evidence: true },
-				{ agent: "Hive Agent 02", success: true, usable_evidence: true },
+				{ agent: "Hive Worker 01", success: true, usable_evidence: true },
+				{ agent: "Hive Worker 02", success: true, usable_evidence: true },
 			],
 		}),
 		{ capabilities: ["read"] },

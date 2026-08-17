@@ -149,7 +149,7 @@ export function HiveWidgetView(props: HiveWidgetProps, env: WidgetEnvironment) {
             modifiers={[foregroundStyle(statusColor), font({ size: 16 })]}
           />
           <Text modifiers={[font({ size: 15, weight: "bold" })]}>
-            Hive Agent
+            Hive Worker
           </Text>
           <Spacer />
           <Text
@@ -216,7 +216,7 @@ export function HiveWidgetView(props: HiveWidgetProps, env: WidgetEnvironment) {
           systemName="hexagon"
           modifiers={[foregroundStyle(statusColor), font({ size: 18 })]}
         />
-        <Text modifiers={[font({ size: 17, weight: "bold" })]}>Hive Agent</Text>
+        <Text modifiers={[font({ size: 17, weight: "bold" })]}>Hive Worker</Text>
         <Spacer />
         <VStack alignment="trailing">
           <Text

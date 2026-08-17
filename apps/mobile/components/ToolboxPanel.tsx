@@ -45,7 +45,7 @@ const TOOL_TABS: Record<SessionType, ToolTab[]> = {
     { label: "Changes", icon: FileCode2 },
   ],
   hive: [
-    { label: "Schedule", icon: CalendarClock },
+    { label: "Calendar", icon: CalendarClock },
   ],
 };
 

@@ -9,6 +9,7 @@ import { HiveCurrentView } from "./HiveCurrentView";
 import { HiveCrewView } from "./HiveCrewView";
 import { HiveGroupsView } from "./HiveGroupsView";
 import { HiveLogbookView } from "./HiveLogbookView";
+import { HiveMemoryView } from "./HiveMemoryView";
 import { HiveRunView } from "./HiveRunView";
 import { HiveRunsView } from "./HiveRunsView";
 import { HiveScheduleView } from "./HiveScheduleView";
@@ -17,6 +18,7 @@ import { HiveTopBar } from "./HiveTopBar";
 import { useHiveCurrent } from "./hooks/useHiveCurrent";
 import { useHiveGroups } from "./hooks/useHiveGroups";
 import { useHiveHome } from "./hooks/useHiveHome";
+import { useHiveMemories } from "./hooks/useHiveMemories";
 import { useHiveNavigation } from "./hooks/useHiveNavigation";
 import { useHiveWorkers } from "./hooks/useHiveWorkers";
 import type { HiveChatContext, HiveTopLevelView } from "./types";
@@ -58,6 +60,7 @@ export function HiveScreen({
     navigation.topLevel === "crew" || navigation.topLevel === "groups",
   );
   const groups = useHiveGroups(navigation.topLevel === "groups");
+  const memories = useHiveMemories(navigation.topLevel === "memory", workspaceDirectory);
   const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
   const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
@@ -104,14 +107,15 @@ export function HiveScreen({
   const status = current.current?.status.home_status ?? "idle";
   const topLevelTitles: Record<HiveTopLevelView, string> = {
     hive: "Hive",
-    attention: "Attention",
-    schedule: "Schedule",
+    attention: "Activity",
+    schedule: "Calendar",
     logbook: "Logbook",
     runs: "Runs",
     details: "Details",
     crew: "Workers",
     groups: "Groups",
     channels: "Channels",
+    memory: "Memory",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
   const subtitle = navigation.topLevel === "hive" ? "The hive is always alive." : undefined;
@@ -222,6 +226,9 @@ export function HiveScreen({
             <HiveGroupsView state={groups} workers={workers} />
           ) : null}
           {navigation.topLevel === "channels" ? <HiveChannelsView state={home} /> : null}
+          {navigation.topLevel === "memory" ? (
+            <HiveMemoryView workspaceDirectory={workspaceDirectory} state={memories} />
+          ) : null}
         </>
       )}
     </SafeAreaView>

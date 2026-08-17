@@ -17,7 +17,7 @@ export default function AgentActivityRoute() {
   const sessionId = param(params.sessionId);
   const groupId = param(params.groupId);
   const taskId = param(params.taskId);
-  const name = param(params.name) || "Hive Agent";
+  const name = param(params.name) || "Hive Worker";
   const openedFromParent = param(params.fromParent) === "1";
 
   return (

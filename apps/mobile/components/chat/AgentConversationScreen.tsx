@@ -380,7 +380,7 @@ export function AgentConversationScreen({
   );
 
   const messages = useMemo(() => conversationMessages(events), [events]);
-  const name = task?.task_key || fallbackName || "Hive Agent";
+  const name = task?.task_key || fallbackName || "Hive Worker";
   const state = task?.state || (isLoading ? "loading" : "unknown");
   const active = ACTIVE_TASK_STATES.has(state);
   const activeToolCallId =

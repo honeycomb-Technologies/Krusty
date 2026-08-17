@@ -15,11 +15,11 @@ pub fn summarize_channel_bindings(profile: &HiveHomeProfile) -> Vec<HiveChannelB
     if !profile.crew.is_empty() {
         bindings.push(HiveChannelBinding {
             id: "crew-handoff".to_string(),
-            label: "Agent handoff".to_string(),
+            label: "Worker handoff".to_string(),
             kind: HiveChannelKind::Crew,
             enabled: true,
             detail: format!(
-                "{} Hive agent{} can route updates back to this thread.",
+                "{} Hive Worker{} can route updates back to this thread.",
                 profile.crew.len(),
                 if profile.crew.len() == 1 { "" } else { "s" }
             ),

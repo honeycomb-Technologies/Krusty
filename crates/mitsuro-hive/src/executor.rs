@@ -373,12 +373,12 @@ impl ExecutionBackend for MitsuroExecutionBackend {
                     Ok(Ok(observed)) if observed == approved => Ok(()),
                     Ok(Ok(_)) => {
                         self.remove_approval_waiter(&key).await;
-                        anyhow::bail!("Hive agent consumed the opposite approval decision")
+                        anyhow::bail!("Hive Worker consumed the opposite approval decision")
                     }
                     Ok(Err(_)) => anyhow::bail!("Hive approval acknowledgement channel closed"),
                     Err(_) => {
                         self.remove_approval_waiter(&key).await;
-                        anyhow::bail!("Hive agent did not consume the approval before timeout")
+                        anyhow::bail!("Hive Worker did not consume the approval before timeout")
                     }
                 }
             }

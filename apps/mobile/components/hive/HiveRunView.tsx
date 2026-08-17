@@ -311,7 +311,7 @@ export function HiveRunView({
     } catch (error) {
       setCrewSlug(runtimeCrewSlug);
       setActionError(
-        error instanceof Error ? error.message : "Failed to update Hive Agent.",
+        error instanceof Error ? error.message : "Failed to update Hive Worker.",
       );
     } finally {
       setIsSavingCrew(false);
@@ -499,10 +499,10 @@ export function HiveRunView({
           </View>
 
           <View style={styles.section}>
-            <SectionTitle title="Agent" />
+            <SectionTitle title="Worker" />
             <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
               <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
-                Assign this run to Hive or a specific Hive Agent. The selected identity shapes the run&apos;s working presence and context layers.
+                Assign this run to Hive or a specific Hive Worker. The selected identity shapes the run&apos;s working presence and context layers.
               </Text>
               <View style={styles.controlBlock}>
                 <HiveCrewPicker
@@ -516,7 +516,7 @@ export function HiveRunView({
               </View>
               {isSavingCrew ? (
                 <Text style={[styles.metaText, { color: t.mutedForeground }]}>
-                  Saving agent...
+                  Saving Worker...
                 </Text>
               ) : null}
             </View>

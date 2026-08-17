@@ -25,7 +25,7 @@ function crewSummary(member: HiveCrewRuntimeMember): string {
   if (member.failed_run_count > 0) {
     parts.push(`${member.failed_run_count} failed`);
   }
-  return parts.join(" • ") || "Distinct Hive Agent";
+  return parts.join(" • ") || "Distinct Hive Worker";
 }
 
 export function HiveCrewPicker({

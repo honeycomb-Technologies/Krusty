@@ -50,7 +50,7 @@ export function HiveAttentionView({
   return (
     <View style={styles.container}>
       <View style={[styles.header, { borderBottomColor: t.border }]}>
-        <Text style={[styles.title, { color: t.foreground }]}>Attention</Text>
+        <Text style={[styles.title, { color: t.foreground }]}>Activity</Text>
         <Text style={[styles.summaryCopy, { color: t.mutedForeground }]}>
           {attention.badgeCount > 0
             ? `${attention.badgeCount} need action`
