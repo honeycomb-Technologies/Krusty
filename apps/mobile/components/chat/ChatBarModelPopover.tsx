@@ -14,6 +14,7 @@ import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
 const PILL = 56;
 const RADIUS = 18;
 const GAP = 10;
+const ROOT_HORIZONTAL_PADDING = 10;
 /**
  * The accordion responder spans the full composer width so its provider dock
  * can extend left of the FAB column. Keep the model list above that responder:
@@ -143,10 +144,11 @@ const styles = StyleSheet.create({
   // Mobile: full width under the bar. Desktop: right-aligned dock width.
   modelClip: {
     position: 'absolute',
-    // Parent ChatBar already applies the horizontal content inset. Match
-    // the input bar: content-band left edge, Agent + gap on the right.
-    left: 0,
-    right: PILL + GAP,
+    // Same band as the input pill: root padding on the left, Agent + gap
+    // on the right. Do not use 0 / PILL+GAP — that ignores root padding
+    // and pulls the list left of the composer.
+    left: ROOT_HORIZONTAL_PADDING,
+    right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
     height: 4 * PILL + 3 * GAP,
     overflow: 'hidden',
     zIndex: MODEL_POPOVER_Z_INDEX,

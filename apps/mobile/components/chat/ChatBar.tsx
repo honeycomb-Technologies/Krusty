@@ -1162,6 +1162,10 @@ function ChatBarComponent(props: ChatBarProps) {
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   // The activity line is a screen-edge indicator, independent of the composer
   // safe-area inset. Keep it flush with the bottom edge on every platform.
+  const controlsLayerWidth = Math.max(
+    PILL,
+    bandWidth - ROOT_HORIZONTAL_PADDING * 2,
+  );
   const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
 
   // Chat and Hive share a five-control stack. Code adds Build/Plan as the
@@ -1203,12 +1207,13 @@ function ChatBarComponent(props: ChatBarProps) {
   const providerDockWidth =
     providerCount * 56 + Math.max(0, providerCount - 1) * 8;
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
-  // Desktop list is a right-aligned dock. Mobile list matches the input bar
-  // inside the already-padded root: left 0, right = Agent + gap.
+  // Accordion and model list share the pre-plan composer band: root padding
+  // on the left, Agent FAB + gap on the right. That is the same right edge
+  // as the input bar.
   const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
-    : PILL + DOCK_TO_FAB_GAP;
+    : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
   return (
     <View
@@ -1437,8 +1442,8 @@ function ChatBarComponent(props: ChatBarProps) {
             styles.pointerBoxNone,
             {
               bottom: controlsLayerBottom,
-              left: 0,
-              right: 0,
+              width: controlsLayerWidth,
+              right: ROOT_HORIZONTAL_PADDING,
               zIndex: modelPickerOpen || modelRailOpen ? 40 : 20,
             },
           ]}

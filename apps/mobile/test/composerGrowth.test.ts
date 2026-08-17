@@ -241,16 +241,15 @@ Deno.test("accordion and model list share the input/Agent content band", async (
   );
 
   assert(
-    composer.includes("bottom: controlsLayerBottom,\n              left: 0,\n              right: 0,") &&
-      !composer.includes("right: ROOT_HORIZONTAL_PADDING") &&
-      !composer.includes("controlsLayerWidth"),
-    "accordion stack must fill the padded content box so pills share the Agent FAB's right edge",
+    composer.includes("width: controlsLayerWidth") &&
+      composer.includes("right: ROOT_HORIZONTAL_PADDING") &&
+      composer.includes("bandWidth - ROOT_HORIZONTAL_PADDING * 2"),
+    "accordion stack must keep the original Agent-aligned right inset, not flush to the screen edge",
   );
   assert(
-    modelPopover.includes("left: 0") &&
-      modelPopover.includes("right: PILL + GAP") &&
-      !modelPopover.includes("ROOT_HORIZONTAL_PADDING"),
-    "model list must match the input bar width inside the already-padded composer",
+    modelPopover.includes("left: ROOT_HORIZONTAL_PADDING") &&
+      modelPopover.includes("right: PILL + GAP + ROOT_HORIZONTAL_PADDING"),
+    "model list must match the input bar: root padding on the left, Agent + gap on the right",
   );
 });
 
