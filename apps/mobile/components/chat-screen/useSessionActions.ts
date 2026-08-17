@@ -593,18 +593,17 @@ export function useSessionActions({
         if (targetStore?.getState().isStreaming) {
           targetStore.getState().stopStreaming();
         }
-
-        const deleted = await sessionsStore.getState().deleteSession(id);
-        if (!deleted) {
-          return;
-        }
-
         if (targetStore) {
           targetStore.getState().clearSession();
           setActiveToolCallId(null);
         }
 
+        const deletedPromise = sessionsStore.getState().deleteSession(id);
         onDeleted?.();
+        const deleted = await deletedPromise;
+        if (!deleted) {
+          return;
+        }
 
         void sessionsStore.getState().loadSessions();
       });
@@ -633,14 +632,18 @@ export function useSessionActions({
   const handleSetSessionArchived = useCallback(
     async (id: string, archived: boolean): Promise<boolean> => {
       if (!client) return false;
+      const previous = sessionsStore.getState().sessions.find((session) =>
+        session.id === id
+      ) ?? null;
+      sessionsStore.getState().setSessionArchived(id, archived);
       try {
         const updated = await client.updateSession(id, { archived });
-        if (!archived) {
-          sessionsStore.getState().upsertSession(updated);
-        }
-        await sessionsStore.getState().loadSessions();
+        sessionsStore.getState().upsertSession(updated);
         return true;
       } catch {
+        if (previous) {
+          sessionsStore.getState().upsertSession(previous);
+        }
         showActionMessage(
           archived ? "Couldn’t archive conversation" : "Couldn’t restore conversation",
           "The conversation was not changed. Please try again.",
@@ -677,9 +680,16 @@ export function useSessionActions({
   const handleSetProjectArchived = useCallback(
     async (ids: string[], archived: boolean): Promise<boolean> => {
       if (!client || ids.length === 0) return false;
+      for (const id of ids) {
+        sessionsStore.getState().setSessionArchived(id, archived);
+      }
       try {
-        await Promise.all(ids.map((id) => client.updateSession(id, { archived })));
-        await sessionsStore.getState().loadSessions();
+        const updated = await Promise.all(
+          ids.map((id) => client.updateSession(id, { archived })),
+        );
+        for (const session of updated) {
+          sessionsStore.getState().upsertSession(session);
+        }
         return true;
       } catch {
         await sessionsStore.getState().loadSessions();

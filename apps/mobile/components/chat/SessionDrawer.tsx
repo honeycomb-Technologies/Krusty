@@ -861,17 +861,21 @@ export function SessionDrawer({
   ) => {
     swipeable?.close();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const changed = await onSetSessionArchived(session.id, archived);
-    if (!changed) return;
+    const previousArchived = archivedThreadSessions;
     if (archived) {
       setArchivedThreadSessions((current) => [
-        { ...session, archived_at: new Date().toISOString() },
+        { ...session, archived_at: session.archived_at ?? new Date().toISOString() },
         ...current.filter((candidate) => candidate.id !== session.id),
       ]);
     } else {
       setArchivedThreadSessions((current) =>
         current.filter((candidate) => candidate.id !== session.id),
       );
+    }
+    const changed = await onSetSessionArchived(session.id, archived);
+    if (!changed) {
+      setArchivedThreadSessions(previousArchived);
+      return;
     }
     if (archiveExpanded && client) {
       void client

@@ -27,6 +27,8 @@ export interface SessionsStoreState {
   loadDirectories: () => Promise<void>;
   /** Local list patch used by optimistic create/bootstrap paths. */
   upsertSession: (session: SessionListItem) => void;
+  removeSession: (id: string) => void;
+  setSessionArchived: (id: string, archived: boolean) => void;
   createSession: (title?: string, workingDir?: string, targetBranch?: string | null) => Promise<SessionListItem | null>;
   deleteSession: (id: string) => Promise<boolean>;
   selectSession: (id: string) => Promise<void>;
@@ -56,6 +58,12 @@ export function createSessionsStore(
   workspace: ReturnType<typeof createWorkspaceStore>,
 ) {
   let loadSessionsInFlight: Promise<void> | null = null;
+  let loadGeneration = 0;
+  let inFlightGeneration = 0;
+
+  const bumpListGeneration = () => {
+    loadGeneration += 1;
+  };
 
   return create<SessionsStoreState>((set, get) => ({
     sessions: [],
@@ -64,7 +72,8 @@ export function createSessionsStore(
     error: null,
 
     async loadSessions() {
-      if (loadSessionsInFlight) {
+      const generation = loadGeneration;
+      if (loadSessionsInFlight && inFlightGeneration === generation) {
         return loadSessionsInFlight;
       }
 
@@ -76,9 +85,13 @@ export function createSessionsStore(
         error: null,
       }));
 
-      loadSessionsInFlight = (async () => {
+      inFlightGeneration = generation;
+      const request = (async () => {
         try {
           const data = (await client.getSessions()) as SessionListItem[];
+          if (generation !== loadGeneration) {
+            return;
+          }
           set((s) => {
             const nextSignature = sessionsListSignature(data);
             const prevSignature = sessionsListSignature(s.sessions);
@@ -97,17 +110,22 @@ export function createSessionsStore(
             };
           });
         } catch (err) {
+          if (generation !== loadGeneration) {
+            return;
+          }
           set((s) => ({
             ...s,
             isLoading: false,
             error: err instanceof Error ? err.message : 'Failed to load sessions',
           }));
         } finally {
-          loadSessionsInFlight = null;
+          if (inFlightGeneration === generation) {
+            loadSessionsInFlight = null;
+          }
         }
       })();
-
-      return loadSessionsInFlight;
+      loadSessionsInFlight = request;
+      return request;
     },
 
     async loadDirectories() {
@@ -120,6 +138,7 @@ export function createSessionsStore(
     },
 
     upsertSession(session: SessionListItem) {
+      bumpListGeneration();
       set((s) => {
         const existingIndex = s.sessions.findIndex((item) => item.id === session.id);
         if (existingIndex === -1) {
@@ -134,6 +153,27 @@ export function createSessionsStore(
       });
     },
 
+    removeSession(id: string) {
+      bumpListGeneration();
+      set((s) => ({
+        ...s,
+        sessions: s.sessions.filter((session) => session.id !== id),
+      }));
+    },
+
+    setSessionArchived(id: string, archived: boolean) {
+      bumpListGeneration();
+      const archivedAt = archived ? new Date().toISOString() : null;
+      set((s) => ({
+        ...s,
+        sessions: s.sessions.map((session) =>
+          session.id === id
+            ? { ...session, archived_at: archived ? session.archived_at ?? archivedAt : null }
+            : session,
+        ),
+      }));
+    },
+
     async createSession(title?: string, workingDir?: string, targetBranch?: string | null) {
       set((s) => ({ ...s, isLoading: true }));
 
@@ -142,6 +182,7 @@ export function createSessionsStore(
         const data: SessionResponse = await client.createSession(title, workingDir, targetBranch, workspaceMode);
         const state = get();
 
+        bumpListGeneration();
         set((s) => ({
           ...s,
           sessions: [data as SessionListItem, ...s.sessions],
@@ -171,19 +212,21 @@ export function createSessionsStore(
     },
 
     async deleteSession(id: string) {
+      const previous = get().sessions.find((session) => session.id === id) ?? null;
+      get().removeSession(id);
+
+      const wsState = workspace.getState();
+      if (wsState.sessionId === id) {
+        wsState.clear();
+      }
+
       try {
         await client.deleteSession(id);
-        set((s) => ({
-          ...s,
-          sessions: s.sessions.filter((session) => session.id !== id),
-        }));
-
-        const wsState = workspace.getState();
-        if (wsState.sessionId === id) {
-          wsState.clear();
-        }
         return true;
       } catch (err) {
+        if (previous) {
+          get().upsertSession(previous);
+        }
         set((s) => ({
           ...s,
           error: err instanceof Error ? err.message : 'Failed to delete session',
