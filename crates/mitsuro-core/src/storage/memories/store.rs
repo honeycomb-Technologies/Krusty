@@ -5,10 +5,22 @@ use uuid::Uuid;
 use crate::storage::database::Database;
 
 use super::model::{
-    AgentMemory, AgentMemoryRevision, CanonicalMemoryInput, MemoryNamespace, MemoryRevisionEvent,
-    MemoryType,
+    AgentMemory, AgentMemoryRevision, CanonicalMemoryInput, MemoryAclScope, MemoryNamespace,
+    MemoryRevisionEvent, MemorySensitivity, MemoryType,
 };
 use super::query::{build_list_query, row_to_memory, MEMORY_SELECT_COLUMNS};
+
+/// Reader identity for Hive memory injection. Worker-private rows are
+/// visible only when `worker_namespace_id` matches; group/conversation
+/// rows require an exact conversation id.
+#[derive(Debug, Clone, Default)]
+pub struct HiveMemoryReader<'a> {
+    pub user_id: Option<&'a str>,
+    pub project_dir: Option<&'a str>,
+    pub worker_namespace_id: Option<&'a str>,
+    pub conversation_id: Option<&'a str>,
+    pub group_id: Option<&'a str>,
+}
 
 pub struct MemoryStore {
     db: Database,
@@ -46,6 +58,9 @@ impl MemoryStore {
                 supersedes_id TEXT,
                 last_accessed_at TEXT,
                 access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0),
+                acl_scope TEXT NOT NULL DEFAULT 'owner'
+                    CHECK(acl_scope IN ('owner', 'worker', 'group', 'conversation')),
+                conversation_id TEXT,
                 FOREIGN KEY(supersedes_id) REFERENCES agent_memories(id)
             );
 
@@ -56,6 +71,8 @@ impl MemoryStore {
                 ON agent_memories(status, user_id, project_dir, namespace, namespace_id);
             CREATE INDEX IF NOT EXISTS idx_agent_memories_canonical_key
                 ON agent_memories(canonical_key, status);
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_acl
+                ON agent_memories(status, user_id, namespace, namespace_id, acl_scope, conversation_id);
 
             CREATE TABLE IF NOT EXISTS agent_memory_revisions (
                 id TEXT PRIMARY KEY,
@@ -399,6 +416,22 @@ impl MemoryStore {
         self.query_memories(&sql, &bound)
     }
 
+    /// Hive prompt boundary: exact owner, no secret injection, and ACL
+    /// scopes so one Worker cannot read another Worker's private facts
+    /// even when both sit in the same group room.
+    pub fn list_for_hive_reader(&self, reader: &HiveMemoryReader<'_>) -> Vec<AgentMemory> {
+        let mut memories = self.list_for_exact_owner(reader.project_dir, reader.user_id);
+        memories.retain(|memory| memory_visible_to_hive_reader(memory, reader));
+        memories
+    }
+
+    /// Whether one already-loaded memory is visible to a Hive reader.
+    /// Used by the memory tool so a Worker cannot mutate a guessed id that
+    /// belongs to another Worker's private namespace.
+    pub fn visible_to_hive_reader(memory: &AgentMemory, reader: &HiveMemoryReader<'_>) -> bool {
+        memory_visible_to_hive_reader(memory, reader)
+    }
+
     /// List active memories of a specific type.
     pub fn list_by_type(
         &self,
@@ -553,10 +586,10 @@ pub(crate) fn save_canonical_in_transaction(
             (id, memory_type, title, content, project_dir, user_id,
              canonical_key, namespace, namespace_id, status, source,
              source_session_id, source_message_id, confidence, sensitivity,
-             pinned, supersedes_id, access_count)
+             pinned, supersedes_id, access_count, acl_scope, conversation_id)
          VALUES
             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10,
-             ?11, ?12, ?13, ?14, ?15, ?16, 0)",
+             ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18)",
         params![
             id,
             input.memory_type.as_str(),
@@ -574,6 +607,8 @@ pub(crate) fn save_canonical_in_transaction(
             input.sensitivity.as_str(),
             input.pinned,
             supersedes_id,
+            input.acl_scope.as_str(),
+            input.conversation_id,
         ],
     )?;
 
@@ -638,6 +673,8 @@ struct NormalizedCanonicalInput<'a> {
     confidence: f64,
     sensitivity: super::model::MemorySensitivity,
     pinned: bool,
+    acl_scope: MemoryAclScope,
+    conversation_id: Option<&'a str>,
 }
 
 impl<'a> NormalizedCanonicalInput<'a> {
@@ -652,12 +689,23 @@ impl<'a> NormalizedCanonicalInput<'a> {
             optional_trimmed("source_session_id", input.source_session_id.as_deref())?;
         let source_message_id =
             optional_trimmed("source_message_id", input.source_message_id.as_deref())?;
+        let conversation_id =
+            optional_trimmed("conversation_id", input.conversation_id.as_deref())?;
         if input.namespace == MemoryNamespace::Crew && namespace_id.is_none() {
             bail!("crew memories require namespace_id");
         }
         if !input.confidence.is_finite() || !(0.0..=1.0).contains(&input.confidence) {
             bail!("memory confidence must be between 0.0 and 1.0");
         }
+        // Crew rows default to Worker ACL so a group member run cannot
+        // inherit another Worker's private facts through the Owner lane.
+        let acl_scope = if input.namespace == MemoryNamespace::Crew
+            && input.acl_scope == MemoryAclScope::Owner
+        {
+            MemoryAclScope::Worker
+        } else {
+            input.acl_scope
+        };
 
         Ok(Self {
             memory_type: input.memory_type,
@@ -674,7 +722,36 @@ impl<'a> NormalizedCanonicalInput<'a> {
             confidence: input.confidence,
             sensitivity: input.sensitivity,
             pinned: input.pinned,
+            acl_scope,
+            conversation_id,
         })
+    }
+}
+
+fn memory_visible_to_hive_reader(memory: &AgentMemory, reader: &HiveMemoryReader<'_>) -> bool {
+    if memory.sensitivity == MemorySensitivity::Secret {
+        return false;
+    }
+    match memory.acl_scope {
+        MemoryAclScope::Owner => match reader.worker_namespace_id {
+            Some(_) => memory.namespace == MemoryNamespace::Shared,
+            None => {
+                memory.namespace == MemoryNamespace::Shared
+                    || memory.namespace == MemoryNamespace::Hive
+            }
+        },
+        MemoryAclScope::Worker => {
+            memory.namespace == MemoryNamespace::Crew
+                && reader.worker_namespace_id.is_some()
+                && memory.namespace_id.as_deref() == reader.worker_namespace_id
+        }
+        MemoryAclScope::Group => {
+            reader.group_id.is_some() && memory.conversation_id.as_deref() == reader.group_id
+        }
+        MemoryAclScope::Conversation => {
+            reader.conversation_id.is_some()
+                && memory.conversation_id.as_deref() == reader.conversation_id
+        }
     }
 }
 
@@ -715,6 +792,8 @@ fn canonical_matches(memory: &AgentMemory, input: &NormalizedCanonicalInput<'_>)
         && memory.confidence == input.confidence
         && memory.sensitivity == input.sensitivity
         && memory.pinned == input.pinned
+        && memory.acl_scope == input.acl_scope
+        && memory.conversation_id.as_deref() == input.conversation_id
 }
 
 fn find_active_canonical(

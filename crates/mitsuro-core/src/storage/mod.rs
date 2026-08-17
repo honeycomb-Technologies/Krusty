@@ -145,8 +145,8 @@ pub use live_activity_tokens::{
 };
 pub use memories::{
     is_compaction_flush_memory, AgentMemory, AgentMemoryRevision, CanonicalMemoryInput,
-    MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource, MemoryStatus,
-    MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+    HiveMemoryReader, MemoryAclScope, MemoryNamespace, MemoryRevisionEvent, MemorySensitivity,
+    MemorySource, MemoryStatus, MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
 };
 pub(crate) use memories::{
     load_canonical_for_provenance_from_connection, save_canonical_in_transaction,

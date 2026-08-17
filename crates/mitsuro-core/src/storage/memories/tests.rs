@@ -1,8 +1,8 @@
 use tempfile::TempDir;
 
 use super::{
-    CanonicalMemoryInput, MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource,
-    MemoryStatus, MemoryStore, MemoryType,
+    CanonicalMemoryInput, HiveMemoryReader, MemoryAclScope, MemoryNamespace, MemoryRevisionEvent,
+    MemorySensitivity, MemorySource, MemoryStatus, MemoryStore, MemoryType,
 };
 use crate::storage::Database;
 
@@ -579,4 +579,107 @@ fn canonical_validation_rejects_ambiguous_crew_and_confidence() {
     crew.confidence = 1.1;
     assert!(store.save_canonical(&crew).is_err());
     assert!(store.list(None, None).is_empty());
+}
+
+#[test]
+fn hive_reader_isolates_worker_private_and_secret_memories() {
+    let (store, _tmp) = create_store();
+    let project = Some("/repo");
+    let user = Some("alice");
+
+    let mut shared = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "shared.style",
+        "Shared style",
+        "shared-memory-marker",
+    );
+    shared.project_dir = Some("/repo".into());
+    shared.user_id = Some("alice".into());
+
+    let mut hive = shared.clone();
+    hive.canonical_key = "hive.style".into();
+    hive.title = "Hive style".into();
+    hive.content = "primary-hive-marker".into();
+    hive.namespace = MemoryNamespace::Hive;
+
+    let mut researcher = shared.clone();
+    researcher.canonical_key = "researcher.style".into();
+    researcher.title = "Researcher style".into();
+    researcher.content = "researcher-private-marker".into();
+    researcher.namespace = MemoryNamespace::Crew;
+    researcher.namespace_id = Some("researcher".into());
+
+    let mut builder = researcher.clone();
+    builder.canonical_key = "builder.style".into();
+    builder.title = "Builder style".into();
+    builder.content = "builder-private-marker".into();
+    builder.namespace_id = Some("builder".into());
+
+    let mut secret = researcher.clone();
+    secret.canonical_key = "researcher.secret".into();
+    secret.title = "Researcher secret".into();
+    secret.content = "researcher-secret-marker".into();
+    secret.sensitivity = MemorySensitivity::Secret;
+
+    let mut group = shared.clone();
+    group.canonical_key = "group.note".into();
+    group.title = "Group note".into();
+    group.content = "group-shared-marker".into();
+    group.acl_scope = MemoryAclScope::Group;
+    group.conversation_id = Some("group-1".into());
+
+    store.save_canonical(&shared).unwrap();
+    store.save_canonical(&hive).unwrap();
+    let researcher_memory = store.save_canonical(&researcher).unwrap();
+    store.save_canonical(&builder).unwrap();
+    store.save_canonical(&secret).unwrap();
+    store.save_canonical(&group).unwrap();
+
+    assert_eq!(researcher_memory.acl_scope, MemoryAclScope::Worker);
+
+    let researcher_reader = HiveMemoryReader {
+        user_id: user,
+        project_dir: project,
+        worker_namespace_id: Some("researcher"),
+        conversation_id: Some("session-a"),
+        group_id: Some("group-1"),
+    };
+    let researcher_visible = store.list_for_hive_reader(&researcher_reader);
+    let researcher_contents: Vec<_> = researcher_visible
+        .iter()
+        .map(|memory| memory.content.as_str())
+        .collect();
+    assert!(researcher_contents.contains(&"shared-memory-marker"));
+    assert!(researcher_contents.contains(&"researcher-private-marker"));
+    assert!(researcher_contents.contains(&"group-shared-marker"));
+    assert!(!researcher_contents.contains(&"primary-hive-marker"));
+    assert!(!researcher_contents.contains(&"builder-private-marker"));
+    assert!(!researcher_contents.contains(&"researcher-secret-marker"));
+
+    let primary_reader = HiveMemoryReader {
+        user_id: user,
+        project_dir: project,
+        worker_namespace_id: None,
+        conversation_id: Some("companion"),
+        group_id: None,
+    };
+    let primary_visible = store.list_for_hive_reader(&primary_reader);
+    let primary_contents: Vec<_> = primary_visible
+        .iter()
+        .map(|memory| memory.content.as_str())
+        .collect();
+    assert!(primary_contents.contains(&"shared-memory-marker"));
+    assert!(primary_contents.contains(&"primary-hive-marker"));
+    assert!(!primary_contents.contains(&"researcher-private-marker"));
+    assert!(!primary_contents.contains(&"builder-private-marker"));
+    assert!(!primary_contents.contains(&"group-shared-marker"));
+
+    assert!(MemoryStore::visible_to_hive_reader(
+        &researcher_memory,
+        &researcher_reader
+    ));
+    assert!(!MemoryStore::visible_to_hive_reader(
+        &researcher_memory,
+        &primary_reader
+    ));
 }

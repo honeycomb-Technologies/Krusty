@@ -72,6 +72,28 @@ pub(super) fn load_worker_persona(
     })
 }
 
+/// Resolve a Worker's memory namespace for a group member run that may not
+/// be executing on that Worker's DM session.
+pub(super) fn load_worker_memory_namespace(
+    db_path: &Path,
+    worker_id: &str,
+    user_id: Option<&str>,
+) -> Option<String> {
+    let db = open_context_database(db_path, "loading Hive worker memory namespace")?;
+    let store = HiveWorkerStore::new(db);
+    let worker = match store.get(worker_id) {
+        Ok(worker) => worker?,
+        Err(error) => {
+            warn!(worker_id, error = %error, "Failed to resolve Hive worker for group memory scope");
+            return None;
+        }
+    };
+    if worker.user_id.as_deref() != user_id {
+        return None;
+    }
+    Some(worker.memory_namespace_id)
+}
+
 fn build_worker_persona_sections(
     worker: &HiveWorker,
     documents: &[HiveWorkerDocument],

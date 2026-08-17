@@ -4054,6 +4054,47 @@ impl Database {
             delivery_tx.commit()?;
         }
 
+        // Migration 66: Memory ACL scopes and conversation isolation.
+        //
+        // Worker-private facts stay on acl_scope='worker' so a group member
+        // run cannot inherit another Worker's crew namespace. conversation_id
+        // is the opt-in key for group-shared and conversation-private rows.
+        if current_version < 66 {
+            info!("Running migration 66: Hive memory ACL scopes");
+            let memory_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring memory ACL migration lock")?;
+            if Self::table_exists(&memory_tx, "agent_memories") {
+                if !Self::column_exists(&memory_tx, "agent_memories", "acl_scope") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN acl_scope TEXT NOT NULL DEFAULT 'owner';",
+                        )
+                        .context("Migration 66: add agent_memories.acl_scope")?;
+                }
+                if !Self::column_exists(&memory_tx, "agent_memories", "conversation_id") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN conversation_id TEXT;",
+                        )
+                        .context("Migration 66: add agent_memories.conversation_id")?;
+                }
+                memory_tx.execute(
+                    "UPDATE agent_memories SET acl_scope = 'worker'
+                     WHERE namespace = 'crew' AND (acl_scope IS NULL OR acl_scope = 'owner')",
+                    [],
+                )?;
+                memory_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_memories_acl
+                        ON agent_memories(status, user_id, namespace, namespace_id, acl_scope, conversation_id);",
+                )?;
+            }
+            memory_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (66)",
+                [],
+            )?;
+            memory_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4176,7 +4217,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 65);
+        assert_eq!(database.get_schema_version(), 66);
         database
             .conn()
             .execute(
@@ -4257,7 +4298,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 65);
+        assert_eq!(database.get_schema_version(), 66);
         let create_sql: String = database
             .conn()
             .query_row(

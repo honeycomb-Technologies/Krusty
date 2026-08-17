@@ -7,7 +7,7 @@ use crate::agent::context_ledger::ContextLedger;
 use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
-    MemoryNamespace, MemoryStore, Report, ReportStore, TaskStatus,
+    HiveMemoryReader, MemoryStore, Report, ReportStore, TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
@@ -89,6 +89,7 @@ pub(super) fn build_hive_knowledge_context(
     user_id: Option<&str>,
     hive_memory_namespace: Option<&str>,
     session_id: &str,
+    group_id: Option<&str>,
     conversation: &[ModelMessage],
 ) -> String {
     // The materialized snapshot is owner/project scoped rather than crew or
@@ -109,23 +110,16 @@ pub(super) fn build_hive_knowledge_context(
     let mut memories =
         if let Some(memory_db) = open_context_database(db_path, "building hive memory context") {
             let memory_store = MemoryStore::new(memory_db);
-            memory_store.list_for_exact_owner(project_dir, user_id)
+            memory_store.list_for_hive_reader(&HiveMemoryReader {
+                user_id,
+                project_dir,
+                worker_namespace_id: hive_memory_namespace,
+                conversation_id: Some(session_id),
+                group_id,
+            })
         } else {
             Vec::new()
         };
-    // A named presence (legacy crew slug or a Worker's memory namespace) sees
-    // Shared plus exactly its own namespace; the primary companion sees
-    // Shared plus the Hive namespace.
-    memories.retain(|memory| match hive_memory_namespace {
-        Some(namespace_id) => {
-            memory.namespace == MemoryNamespace::Shared
-                || (memory.namespace == MemoryNamespace::Crew
-                    && memory.namespace_id.as_deref() == Some(namespace_id))
-        }
-        None => {
-            memory.namespace == MemoryNamespace::Shared || memory.namespace == MemoryNamespace::Hive
-        }
-    });
     if let Some(project_dir) = project_dir {
         memories.sort_by(|left, right| {
             let left_project_match = left.project_dir.as_deref() == Some(project_dir);

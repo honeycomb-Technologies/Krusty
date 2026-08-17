@@ -122,9 +122,16 @@ pub fn inject_context_with_hive_profile_and_group(
     } else {
         None
     };
+    let group_worker_namespace = if is_hive {
+        hive_group_run
+            .and_then(|run| hive::load_worker_memory_namespace(db_path, &run.worker_id, user_id))
+    } else {
+        None
+    };
     let hive_memory_namespace = worker_persona
         .as_ref()
         .map(|persona| persona.memory_namespace_id.as_str())
+        .or(group_worker_namespace.as_deref())
         .or(hive_crew_slug);
     let worker_persona_sections = worker_persona
         .as_ref()
@@ -155,6 +162,7 @@ pub fn inject_context_with_hive_profile_and_group(
             user_id,
             hive_memory_namespace,
             session_id,
+            hive_group_run.map(|run| run.group_id.as_str()),
             conversation,
         )
     } else {
