@@ -522,7 +522,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-6".into(),
-                name: Some("Rename Mako to Hive and Mitsuro".into()),
+                name: Some("Rename Hive product language".into()),
                 preview: Some("Branding sweep".into()),
                 cwd: Some("~/Work/Mitsuro".into()),
                 created_at: Some(1_722_530_000),
@@ -703,9 +703,9 @@ pub fn demo_threads() -> Vec<DemoThread> {
             backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-16".into(),
-                name: Some("Investigate Honey Krusty Update".into()),
+                name: Some("Investigate Honey Mitsuro Update".into()),
                 preview: Some("Release notes".into()),
-                cwd: Some("~/Work/krusty".into()),
+                cwd: Some("~/Work/Mitsuro".into()),
                 created_at: Some(1_722_493_000),
                 updated_at: Some(1_722_493_100),
                 model_provider: Some("fixture".into()),
@@ -739,7 +739,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-18".into(),
-                name: Some("currently using krusty, and for sol".into()),
+                name: Some("currently using Mitsuro, and for sol".into()),
                 preview: Some("Sol tooling".into()),
                 cwd: Some("~/Work/sol".into()),
                 created_at: Some(1_722_491_000),
@@ -775,9 +775,9 @@ pub fn demo_threads() -> Vec<DemoThread> {
             backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-20".into(),
-                name: Some("Krusty Work".into()),
+                name: Some("Mitsuro Work".into()),
                 preview: Some("Core tasks".into()),
-                cwd: Some("~/Work/krusty".into()),
+                cwd: Some("~/Work/Mitsuro".into()),
                 created_at: Some(1_722_489_000),
                 updated_at: Some(1_722_489_100),
                 model_provider: Some("fixture".into()),
