@@ -1,6 +1,7 @@
 [package]
 name = "mitsuro"
 version = "0.9.22"
+publish = false
 edition = "2021"
 description = "Mitsuro AI coding runtime and compatibility CLI"
 default-run = "mitsuro"

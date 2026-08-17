@@ -59,6 +59,27 @@ Use Mitsuro for the harness and Hive for durable autonomous work in code,
 documentation, tests, packages, routes, storage, and release artifacts. Keep
 any prior-identity reader isolated to a tested compatibility boundary.
 
+## Writing changesets
+
+Mitsuro uses [Sampo](https://github.com/bruits/sampo) for version bumps,
+changelogs, and `v{version}` tags. Add a changeset on any PR that changes
+user-visible CLI, Honey, Hive, mobile, or desktop behavior:
+
+```bash
+sampo add -p cargo/mitsuro -b patch -t Added -m "Short user-facing description."
+```
+
+Use `minor` for backwards-compatible features and `major` for breaking changes.
+`cargo/mitsuro` is fixed to the other 0.9.x product crates. Use
+`cargo/mitsuro-hive` for Hive daemon/protocol-only work. Pending files live in
+`.sampo/changesets/`.
+
+Do not retag an existing protected tag. Do not publish crates to crates.io.
+After the Release PR merges, CI tags `v{version}` and the existing binary
+release workflow attaches CLI, Hive, and desktop artifacts. Run
+`sh scripts/sync-product-version.sh` if Expo `app.json` / `package.json` drift
+from `cargo/mitsuro`.
+
 ## Reporting bugs
 
 Please include:
