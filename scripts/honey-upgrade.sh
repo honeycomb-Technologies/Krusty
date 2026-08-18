@@ -47,4 +47,9 @@ if [ -x "$HOME/.local/bin/.mitsuro-current/mitsuro" ]; then
   "$HOME/.local/bin/.mitsuro-current/mitsuro" --version
   echo "Executable: $(readlink -f "$HOME/.local/bin/.mitsuro-current/mitsuro")"
 fi
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$script_dir/honey-atlas-repair.sh" ]; then
+  echo "Pointing serve at the Atlas sidecar"
+  sh "$script_dir/honey-atlas-repair.sh" "$tag"
+fi
 echo "Honey ${tag} is live only if /health passed and the executable is this release."

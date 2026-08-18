@@ -50,6 +50,10 @@ target/atlas/agent-browser install
 ```
 
 `MITSURO_AGENT_BROWSER_PATH` can point Honey at an operator-managed binary.
+The shipped user unit sets that to
+`~/.local/bin/.mitsuro-current/agent-browser`. If a live Honey host returns
+`API 503` for Browser, run `sh scripts/honey-atlas-repair.sh` instead of
+rebuilding from source.
 
 ## Natural-language agent runs
 
