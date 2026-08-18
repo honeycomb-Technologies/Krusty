@@ -75,12 +75,12 @@ Use `minor` for backwards-compatible features and `major` for breaking changes.
 `.sampo/changesets/`.
 
 Do not retag an existing protected tag. Do not publish crates to crates.io.
-After the Release PR merges, CI tags `v{version}` and the existing binary
-release workflow attaches CLI, Hive, and desktop artifacts. Run
-`sh scripts/sync-product-version.sh` if Expo `app.json` / `package.json` drift
-from `cargo/mitsuro`. Sampo may rewrite `Cargo.lock`; CI restores third-party
-pins from `main` and only rewrites workspace crate versions
-(`sh scripts/refresh-workspace-lock-versions.sh origin/main`).
+The cut path is [docs/operations/release.md](docs/operations/release.md):
+Version (Sampo) tags, Release binaries uploads archives, Honey installs only
+after `sh scripts/release-status.sh` shows the linux archive. Run
+`sh scripts/sync-product-version.sh` if Expo drifts from `cargo/mitsuro`.
+Sampo may rewrite `Cargo.lock`; restore pins with
+`sh scripts/refresh-workspace-lock-versions.sh origin/main`.
 
 ## Reporting bugs
 

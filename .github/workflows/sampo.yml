@@ -1,4 +1,4 @@
-name: Sampo Release
+name: Version (Sampo)
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   sampo:
@@ -59,9 +60,23 @@ jobs:
             exit 0
           fi
           if ! gh pr create --repo "$GITHUB_REPOSITORY" --base main --head release/sampo \
-            --title "Release (Sampo)" \
-            --body "Sampo version bump. Enable Actions pull-request creation if this step is needed next time."; then
-            echo "Could not open the Release PR with GITHUB_TOKEN."
-            echo "Enable: Settings → Actions → General → Allow GitHub Actions to create and approve pull requests."
-            exit 0
+            --title "Version (Sampo)" \
+            --body "Sampo version bump, lockfile pins, and Expo sync. Merging tags and starts Release binaries."; then
+            echo "Could not open the Version PR with GITHUB_TOKEN." >&2
+            echo "Enable: Settings → Actions → General → Allow GitHub Actions to create and approve pull requests." >&2
+            echo "Or open https://github.com/${GITHUB_REPOSITORY}/compare/main...release/sampo" >&2
+            exit 1
           fi
+
+      - name: Start binary release for the new v* tag
+        if: steps.sampo.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/mitsuro-cli/Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "Could not read cargo/mitsuro version" >&2
+            exit 1
+          fi
+          sh scripts/start-binary-release.sh "v${version}"

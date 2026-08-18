@@ -2,6 +2,11 @@ name: Client Quality Gates
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: "Commit or tag to check out"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -12,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -51,6 +58,8 @@ jobs:
         working-directory: apps/mobile
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:

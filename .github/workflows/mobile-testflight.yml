@@ -1,12 +1,8 @@
 name: Mobile → TestFlight
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/mobile/**'
-      - 'packages/**'
-      - '.github/workflows/mobile-testflight.yml'
+  release:
+    types: [published]
   workflow_dispatch:
 
 concurrency:
@@ -30,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
