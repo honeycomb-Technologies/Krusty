@@ -489,7 +489,7 @@ async fn create_session(
     let Some(_) = discover_agent_browser() else {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Browser runtime is not installed; run scripts/install-atlas-runtime.sh",
+            missing_runtime_message(),
         ));
     };
 
@@ -1040,45 +1040,60 @@ fn browser_capability() -> BrowserCapability {
         live_stream: executable.is_some(),
         semantic_actions: executable.is_some(),
         agent_chat: executable.is_some(),
-        reason: executable
-            .is_none()
-            .then(|| "Run scripts/install-atlas-runtime.sh".to_string()),
+        reason: executable.is_none().then(missing_runtime_message),
     }
 }
 
+fn missing_runtime_message() -> String {
+    "Browser runtime is not installed. Honey: the linux archive ships agent-browser beside mitsuro; run scripts/honey-atlas-repair.sh or set MITSURO_AGENT_BROWSER_PATH. Source checkouts: sh scripts/install-atlas-runtime.sh".to_string()
+}
+
 fn discover_agent_browser() -> Option<PathBuf> {
+    first_existing_file(agent_browser_candidates())
+}
+
+fn agent_browser_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     if let Some(path) = env::var_os("MITSURO_AGENT_BROWSER_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Some(path);
-        }
+        candidates.push(path);
     }
     if let Ok(current) = env::current_exe() {
-        let directory = current.parent().unwrap_or_else(|| FsPath::new("."));
-        for candidate in [
-            directory.join(binary_name()),
-            directory.join("libexec/mitsuro").join(binary_name()),
-        ] {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
+        candidates.extend(sibling_agent_browser_paths(&current));
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.extend(managed_install_agent_browser_paths(&home));
     }
     let workspace = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for candidate in [
-        workspace.join("target/atlas").join(binary_name()),
+    candidates.push(workspace.join("target/atlas").join(binary_name()));
+    candidates.push(
         workspace
             .join("tools/atlas/node_modules/agent-browser/bin")
             .join(package_binary_name()),
-    ] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    );
+    if let Some(paths) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&paths).map(|path| path.join(binary_name())));
     }
-    env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths)
-            .map(|path| path.join(binary_name()))
-            .find(|path| path.is_file())
-    })
+    candidates
+}
+
+fn sibling_agent_browser_paths(current_exe: &FsPath) -> Vec<PathBuf> {
+    let directory = current_exe.parent().unwrap_or_else(|| FsPath::new("."));
+    vec![
+        directory.join(binary_name()),
+        directory.join("libexec/mitsuro").join(binary_name()),
+    ]
+}
+
+fn managed_install_agent_browser_paths(home: &FsPath) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/bin/.mitsuro-current").join(binary_name()),
+        home.join(".local/bin").join(binary_name()),
+        home.join(".local/lib/mitsuro").join(binary_name()),
+    ]
+}
+
+fn first_existing_file(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(|path| path.is_file())
 }
 
 fn binary_name() -> &'static str {
@@ -1258,6 +1273,47 @@ mod tests {
         assert_eq!(
             find_stream_port(&json!({"data":{"port":43123}})),
             Some(43123)
+        );
+    }
+
+    #[test]
+    fn first_existing_file_skips_missing_candidates() {
+        let dir = std::env::temp_dir().join(format!(
+            "mitsuro-atlas-discover-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing");
+        let present = dir.join("agent-browser");
+        std::fs::write(&present, b"ok").unwrap();
+        assert_eq!(
+            first_existing_file([missing, present.clone()]),
+            Some(present)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn managed_install_paths_include_current_release_sidecar() {
+        let home = FsPath::new("/home/honey");
+        let paths = managed_install_agent_browser_paths(home);
+        assert!(paths
+            .iter()
+            .any(|path| { path.ends_with(".local/bin/.mitsuro-current/agent-browser") }));
+        assert!(paths
+            .iter()
+            .any(|path| path.ends_with(".local/lib/mitsuro/agent-browser")));
+    }
+
+    #[test]
+    fn sibling_discovery_looks_beside_the_running_binary() {
+        let paths = sibling_agent_browser_paths(FsPath::new(
+            "/home/honey/.local/bin/.mitsuro-releases/v0.9.23/mitsuro",
+        ));
+        assert_eq!(
+            paths[0],
+            PathBuf::from("/home/honey/.local/bin/.mitsuro-releases/v0.9.23/agent-browser")
         );
     }
 }

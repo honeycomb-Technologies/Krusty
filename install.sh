@@ -916,6 +916,7 @@ prepare_activation_snapshot() {
     snapshot_activation_path current "$CURRENT_LINK" || return 1
     snapshot_activation_path mitsuro "$INSTALL_DIR/$BINARY" || return 1
     snapshot_activation_path hive "$INSTALL_DIR/$DAEMON_BINARY" || return 1
+    snapshot_activation_path atlas "$INSTALL_DIR/agent-browser" || return 1
     snapshot_activation_path compat-cli "$INSTALL_DIR/$COMPAT_BINARY" || return 1
     snapshot_activation_path compat-hive "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" || return 1
     if [ "$MANAGE_SYSTEMD" = true ]; then
@@ -936,6 +937,7 @@ restore_activation_snapshot() {
     restore_activation_path current "$CURRENT_LINK" || restore_failed=true
     restore_activation_path mitsuro "$INSTALL_DIR/$BINARY" || restore_failed=true
     restore_activation_path hive "$INSTALL_DIR/$DAEMON_BINARY" || restore_failed=true
+    restore_activation_path atlas "$INSTALL_DIR/agent-browser" || restore_failed=true
     restore_activation_path compat-cli "$INSTALL_DIR/$COMPAT_BINARY" || restore_failed=true
     restore_activation_path compat-hive "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" || restore_failed=true
     if [ "$MANAGE_SYSTEMD" = true ]; then
@@ -2164,6 +2166,13 @@ activate_unix_release() {
         { fail_activation "$COMPAT_BINARY compatibility link publication failed"; return 1; }
     activation_checkpoint after-compat-cli-link || \
         { fail_activation "fixture after compatibility CLI link"; return 1; }
+    if [ -f "$RELEASE_DIR/agent-browser" ] || [ -f "$CURRENT_LINK/agent-browser" ]; then
+        install_managed_link ".mitsuro-current/agent-browser" \
+            "$INSTALL_DIR/agent-browser" "$MIGRATING_LEGACY" || \
+            { fail_activation "agent-browser link publication failed"; return 1; }
+        activation_checkpoint after-atlas-link || \
+            { fail_activation "fixture after agent-browser link"; return 1; }
+    fi
     if [ -f "$RELEASE_DIR/$COMPAT_DAEMON_BINARY" ] || \
         [ -f "$CURRENT_LINK/$COMPAT_DAEMON_BINARY" ] || \
         [ -e "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ] || \
@@ -2737,6 +2746,9 @@ run_self_test() (
         chmod 0755 "$self_payload/$COMPAT_BINARY"
         if [ "$self_kind" = complete ]; then
             mkdir "$self_payload/systemd"
+            printf '#!/bin/sh\nprintf "%%s\\n" "atlas-%s"\n' \
+                "$self_value" > "$self_payload/agent-browser"
+            chmod 0755 "$self_payload/agent-browser"
             printf '#!/bin/sh\nprintf "%%s\\n" "hive-%s"\n' \
                 "$self_value" > "$self_payload/$DAEMON_BINARY"
             chmod 0755 "$self_payload/$DAEMON_BINARY"
@@ -2774,6 +2786,7 @@ run_self_test() (
         [ ! -e "$INSTALL_DIR/.mitsuro-current" ] && [ ! -L "$INSTALL_DIR/.mitsuro-current" ]
         [ -f "$INSTALL_DIR/mitsuro" ] && [ ! -L "$INSTALL_DIR/mitsuro" ]
         [ "$("$INSTALL_DIR/mitsuro")" = direct ]
+        [ ! -e "$INSTALL_DIR/agent-browser" ] && [ ! -L "$INSTALL_DIR/agent-browser" ]
         [ ! -e "$INSTALL_DIR/$COMPAT_BINARY" ] && [ ! -L "$INSTALL_DIR/$COMPAT_BINARY" ]
         [ ! -e "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ] && \
             [ ! -L "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ]
@@ -3019,6 +3032,7 @@ run_self_test() (
         after-mitsuro-link \
         after-hive-link \
         after-compat-cli-link \
+        after-atlas-link \
         after-compat-hive-link \
         after-mitsuro-hive.socket-link \
         after-mitsuro-hive.service-link \
@@ -3047,6 +3061,8 @@ run_self_test() (
     [ "$(readlink "$INSTALL_DIR/.mitsuro-current")" = ".mitsuro-releases/$v1_release_id" ]
     [ "$("$INSTALL_DIR/mitsuro")" = one ]
     [ "$("$INSTALL_DIR/$COMPAT_BINARY")" = one ]
+    [ "$(readlink "$INSTALL_DIR/agent-browser")" = ".mitsuro-current/agent-browser" ]
+    [ "$("$INSTALL_DIR/agent-browser")" = atlas-one ]
     [ "$("$INSTALL_DIR/$COMPAT_DAEMON_BINARY")" = hive-one ]
     regular_file_with_mode "$INSTALL_DIR/.mitsuro-systemd-managed" 600
     v1_marker_contents=$(sed -n '1p' "$INSTALL_DIR/.mitsuro-systemd-managed")
