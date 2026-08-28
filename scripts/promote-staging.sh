@@ -10,7 +10,9 @@ cd "$root"
 staging=${1:-codex/release-staging-20260801}
 repo=${GITHUB_REPOSITORY:-honeycomb-Technologies/Mitsuro}
 
-git fetch origin main "$staging"
+git fetch origin \
+  "refs/heads/main:refs/remotes/origin/main" \
+  "refs/heads/$staging:refs/remotes/origin/$staging"
 ahead=$(git rev-list --count "origin/main..origin/${staging}")
 behind=$(git rev-list --count "origin/${staging}..origin/main")
 echo "staging ${staging} is ${ahead} commit(s) ahead of main, ${behind} behind"

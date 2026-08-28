@@ -340,9 +340,9 @@ The mobile app lives in `apps/mobile` and is built with Expo and EAS (Expo Appli
 
 ### TestFlight deployment
 
-The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It triggers on pushes to `main` when files change under `apps/mobile/**`, `packages/**`, or `.github/workflows/mobile-testflight.yml`. The workflow can also be triggered manually via `workflow_dispatch`; choose `main` in the GitHub UI/CLI because Mitsuro's default branch and release governance are anchored on `main`, not on the legacy `dev` branch.
+The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It starts when a GitHub Release is published and can also be triggered manually with `workflow_dispatch`. A manual release retry should select the exact protected release tag, such as `v0.10.0`, so every checkout and the submitted build remain bound to the released commit rather than a later `main` tip.
 
-Push path filters are intentionally narrow so Rust-only, docs-only, and desktop-only changes do not start a TestFlight build. Manual `workflow_dispatch` runs do not get the same path-filter protection, so use manual dispatch only for an intentional TestFlight validation on `main`, after reviewing the diff and approvals.
+Manual dispatch has no path-filter shortcut: use it only for an intentional TestFlight build after reviewing the selected tag and passing the protected `testflight` environment approval. A GitHub Release created by another workflow may not recursively start this workflow, so verify that a run actually exists and dispatch the exact tag when it does not.
 
 The job targets the GitHub Actions `testflight` environment (`environment: testflight`). Keep that environment configured with human approval/reviewer protection so EAS build and App Store Connect secrets are not exposed and the build is not submitted until the approval gate is satisfied.
 
@@ -355,6 +355,8 @@ The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progr
 5. Submit the resulting build to TestFlight with `eas submit`
 
 The App Store Connect app ID (`6761496828`) is configured in `eas.json`. Apple credentials are stored as GitHub secrets.
+
+For a visible native or rendering change, a successful EAS build and upload are not the release gate. Wait for App Store Connect processing and tester availability, install the exact marketing version and build number from TestFlight on a physical phone, then exercise cold launch, background/foreground, rapid Chat/Code/Hive switching, keyboard focus, and the changed interaction. Skia FAB changes additionally require repeated first-open, open/close, swipe-close, and every pill path while checking for aborts, blank or stuck glass, lost touches, hangs, and unbounded memory growth. Record the source commit, EAS build and submission IDs, App Store version/build, tester group, installation, and device result separately.
 
 For safe no-TestFlight validation of docs/tooling changes, inspect the workflow definition and repository metadata only (for example, `gh workflow view mobile-testflight.yml --repo honeycomb-Technologies/Mitsuro`, `scripts/check-default-branch-preflight.sh`, and `git diff --check`). Do not validate this path by pushing mobile changes to `main`, running `gh workflow run mobile-testflight.yml`, or submitting a build unless a release attempt has been explicitly approved.
 

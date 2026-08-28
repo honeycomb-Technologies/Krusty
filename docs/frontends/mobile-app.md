@@ -166,10 +166,10 @@ All widgets use a shared `AccessoryBackground` component for consistent styling 
 The app uses **EAS Build** (Expo Application Services) with three profiles defined in `eas.json`:
 
 - **development** -- Builds a development client with `distribution: internal` and iOS simulator support enabled. Used for local testing with `expo start`.
-- **preview** -- Internal distribution build without simulator support. Used for TestFlight or internal testing on real devices.
-- **production** -- Release build with `autoIncrement: true` on iOS, which automatically bumps the build number. Submits to the App Store via the `submit.production` configuration with the Apple app ID.
+- **preview** -- Ad-hoc internal distribution build without simulator support. Used for direct internal testing on registered real devices, not TestFlight.
+- **production** -- App Store distribution build with `autoIncrement: true` on iOS, which automatically bumps the remote build number. This is the profile submitted to TestFlight through the `submit.production` configuration.
 
-The bundle identifier is `io.mitsuro.mobile` on both iOS and Android. The EAS project ID ties builds to the Expo dashboard.
+The existing App Store and Play identities remain on their compatibility bundle/package identifier, `io.krusty.mobile`, while product copy and deep links are Mitsuro-first. The EAS project ID ties builds to the Expo dashboard.
 
 The Metro bundler configuration in `metro.config.js` is customized for the monorepo. It adds watch folders for `packages/api`, `packages/state`, and `packages/ui`, and maps `@mitsuro/*` imports to the source directories of those packages. This allows the mobile app to import from shared packages without requiring them to be pre-built.
 
