@@ -128,7 +128,7 @@ legacy Tauri/Expo shell.
 
 **3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `mitsuro` Cargo package version, verifies all five canonical platform archive checksum manifests and the Windows compatibility pair against their archives, renders `.github/homebrew/mitsuro.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists those six exact archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
 
-The publish job fails closed unless GitHub reports the release tag as protected (`github.ref_protected == true`). The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
+The workflow fails before builds unless a tag push is protected, or a manual retry is dispatched from protected `main`, and the exact tag commit is contained in `main`. Every checkout and reusable quality gate is pinned to that authorized commit SHA, and the publish job rechecks the tag identity before creating assets. The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
 
 ## Distribution channels
 

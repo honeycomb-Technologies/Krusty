@@ -22,13 +22,76 @@ permissions:
   contents: read
 
 jobs:
+  release-authority:
+    name: Verify release authority
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag_commit: ${{ steps.authority.outputs.tag_commit }}
+    steps:
+      - name: Require a protected main-derived release tag
+        id: authority
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v0.9.23, got: ${tag:-<empty>}" >&2
+            exit 1
+          fi
+
+          case "$EVENT_NAME" in
+            push)
+              if [[ "$REF_TYPE" != tag || "$REF_NAME" != "$tag" || "$REF" != "refs/tags/$tag" || "$REF_PROTECTED" != true ]]; then
+                echo "Tag pushes must originate from the exact protected release tag." >&2
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              if [[ "$REF" != refs/heads/main || "$REF_PROTECTED" != true ]]; then
+                echo "Manual release dispatch must run from protected main." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported release event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          tag_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$tag" --jq .sha)
+          main_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          comparison=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag}...main")
+          base_commit=$(jq -r .base_commit.sha <<<"$comparison")
+          head_commit=$(jq -r .head_commit.sha <<<"$comparison")
+          merge_base=$(jq -r .merge_base_commit.sha <<<"$comparison")
+
+          if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ || ! "$main_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release authority returned a malformed commit identity." >&2
+            exit 1
+          fi
+          if [[ "$base_commit" != "$tag_commit" || "$merge_base" != "$tag_commit" || "$head_commit" != "$main_commit" ]]; then
+            echo "Release tag $tag is not contained in protected main." >&2
+            exit 1
+          fi
+
+          echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+
   canonical-identity:
     name: Canonical Identity
+    needs: release-authority
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          ref: ${{ needs.release-authority.outputs.tag_commit }}
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Check canonical names and exact compatibility exceptions
@@ -38,14 +101,14 @@ jobs:
 
   client-quality:
     name: Client Quality Gates
-    needs: canonical-identity
+    needs: [release-authority, canonical-identity]
     uses: ./.github/workflows/client-quality.yml
     with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+      ref: ${{ needs.release-authority.outputs.tag_commit }}
 
   build:
     name: Build ${{ matrix.target }}
-    needs: client-quality
+    needs: [release-authority, client-quality]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          ref: ${{ needs.release-authority.outputs.tag_commit }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -163,12 +226,12 @@ jobs:
 
   desktop-linux:
     name: Build Native GPUI Desktop Linux Bundles
-    needs: client-quality
+    needs: [release-authority, client-quality]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          ref: ${{ needs.release-authority.outputs.tag_commit }}
 
       - name: Install desktop bundling dependencies
         run: |
@@ -206,36 +269,28 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, desktop-linux]
+    needs: [release-authority, build, desktop-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Require a protected v* release tag
+      - name: Reconfirm the authorized release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          REF_PROTECTED: ${{ github.ref_protected }}
+          EXPECTED_TAG_COMMIT: ${{ needs.release-authority.outputs.tag_commit }}
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG:-}"
-          if [[ ! "$tag" =~ ^v[0-9] ]]; then
-            echo "Release tag must look like v0.9.23, got: ${tag:-<empty>}" >&2
-            exit 1
-          fi
-          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null; then
-            echo "Release tag ${tag} does not exist." >&2
-            exit 1
-          fi
-          if [[ "$EVENT_NAME" == "push" && "$REF_PROTECTED" != "true" ]]; then
-            echo "Release tags must be protected before publishing artifacts." >&2
+          current_tag_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$tag" --jq .sha)
+          if [[ "$current_tag_commit" != "$EXPECTED_TAG_COMMIT" ]]; then
+            echo "Release tag authority changed after the build gate." >&2
             exit 1
           fi
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          ref: ${{ needs.release-authority.outputs.tag_commit }}
 
       - name: Download all artifacts
         env:

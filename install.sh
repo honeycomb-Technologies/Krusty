@@ -191,6 +191,15 @@ get_latest_version() {
         grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
+valid_release_tag() {
+    candidate=$1
+    case "$candidate" in
+        ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+    esac
+    printf '%s\n' "$candidate" | \
+        grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
 sha256_file() {
     checksum_path=$1
     if command -v sha256sum >/dev/null 2>&1; then
@@ -2536,6 +2545,20 @@ run_self_test() (
         rm -rf "$self_root"
     }
     trap self_cleanup 0 HUP INT TERM
+    for self_valid_tag in v0.9.23 v1.2.3-rc.1 v1.2.3+build.4; do
+        valid_release_tag "$self_valid_tag"
+    done
+    for self_invalid_tag in v0.9 v1.2.3/../../attacker v1.2.3_bad; do
+        if valid_release_tag "$self_invalid_tag"; then
+            fail "Self-test accepted invalid release tag: $self_invalid_tag"
+            exit 1
+        fi
+    done
+    self_multiline_tag=$(printf 'v1.2.3\nattacker')
+    if valid_release_tag "$self_multiline_tag"; then
+        fail "Self-test accepted a multiline release tag."
+        exit 1
+    fi
     HOME="$self_root/home"
     export HOME
     XDG_RUNTIME_DIR="$HOME/runtime"
@@ -3626,6 +3649,10 @@ install() {
     if [ -z "$VERSION" ]; then
         fail "Could not determine latest version."
         exit 1
+    fi
+    if ! valid_release_tag "$VERSION"; then
+        fail "Release tag must look like v0.9.23, got: $VERSION"
+        exit 2
     fi
 
     echo "Installing Mitsuro $VERSION for $PLATFORM..."

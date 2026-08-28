@@ -5,6 +5,15 @@
 # Usage: sh scripts/release-status.sh [v0.9.23]
 set -eu
 
+valid_release_tag() {
+  candidate=$1
+  case "$candidate" in
+    ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+  esac
+  printf '%s\n' "$candidate" | \
+    grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 repo="honeycomb-Technologies/Mitsuro"
 cli_toml="$root/crates/mitsuro-cli/Cargo.toml"
@@ -17,6 +26,10 @@ if [ -z "$tag" ]; then
     echo "Could not read cargo/mitsuro version" >&2
     exit 1
   fi
+fi
+if ! valid_release_tag "$tag"; then
+  echo "Tag must look like v0.9.23, got: $tag" >&2
+  exit 2
 fi
 
 echo "cargo/mitsuro: ${cargo_version:-unknown}"
