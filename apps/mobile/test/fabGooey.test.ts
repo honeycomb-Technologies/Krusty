@@ -73,12 +73,15 @@ Deno.test("Agent accordion pours a Skia silhouette, then crystallizes glass in s
   assert(
     policy.includes("export const FAB_GOOEY_ENABLED = true")
       && policy.includes("if (activity <= 0.008)")
+      && policy.includes("float alpha = u_color.a * edge")
+      && policy.includes("return half4(u_color.rgb * alpha, alpha)")
+      && !policy.includes("return half4(u_color.rgb, u_color.a * edge)")
       && native.includes("if (!FAB_GOOEY_ENABLED) return")
       && core.includes("Skia.RuntimeEffect.Make(GOOEY_SKSL)")
       && core.includes("<Shader source={gooeyEffect}")
       && !core.includes("AdaptiveMaterial")
       && !core.includes("GlassView"),
-    "gooey must be an enabled RuntimeEffect silhouette, not a glass view",
+    "gooey must be an enabled, premultiplied RuntimeEffect silhouette, not a glass view",
   );
 });
 

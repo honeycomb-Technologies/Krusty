@@ -84,7 +84,10 @@ half4 main(float2 xy) {
   if (u_count > 5.5) { field = mergePill(field, p, cx, halfPill, 5.0, u_p5); }
 
   float edge = 1.0 - smoothstep(-0.85, 0.85, field);
-  return half4(u_color.rgb, u_color.a * edge);
+  float alpha = u_color.a * edge;
+  // Skia shaders return premultiplied colors. Straight RGB leaks through the
+  // transparent Android canvas as a tinted rectangle and duplicate halos.
+  return half4(u_color.rgb * alpha, alpha);
 }
 `;
 
