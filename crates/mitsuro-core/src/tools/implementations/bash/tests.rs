@@ -568,8 +568,10 @@ async fn worker_goal_shell_hides_sensitive_env_host_files_processes_and_routes()
         "outside=hidden; test -r {outside} && outside=visible; \
          etc=hidden; test -r /etc/passwd && etc=visible; \
          process=hidden; test -e /proc/{host_pid} && process=visible; \
-         route=isolated; awk 'NR > 1 {{ route=\"routed\" }} END {{ print route }}' \
-           route=isolated /proc/net/route > route.txt; route=$(cat route.txt); \
+         route=isolated; route_header=1; \
+         while IFS= read -r _route_line; do \
+           if [ \"$route_header\" = 1 ]; then route_header=0; else route=routed; break; fi; \
+         done < /proc/net/route; \
          printf '%s|%s|%s|%s|%s|%s' \
            \"${{MITSURO_TEST_SECRET-unset}}\" \"${{JAVA_HOME-unset}}\" \
            \"$outside\" \"$etc\" \"$process\" \"$route\""
