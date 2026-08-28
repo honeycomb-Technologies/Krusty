@@ -77,6 +77,13 @@ Deno.test("platform identity is Mitsuro without breaking compatibility IDs", asy
     expo.splash?.backgroundColor === "#0e0e11",
     "native splash must use Graphite Brass foundation",
   );
+  const splashPlugin = expo.plugins.find(
+    (plugin: unknown) => Array.isArray(plugin) && plugin[0] === "expo-splash-screen",
+  );
+  assert(
+    splashPlugin?.[1]?.android?.image === "./assets/splash-icon.png",
+    "Android splash must generate the drawable referenced by its native launch theme",
+  );
 });
 
 Deno.test("splash is a vector six-side simultaneous trace", async () => {
