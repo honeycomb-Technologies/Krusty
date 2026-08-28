@@ -229,7 +229,13 @@ export const MessageBubble = memo(function MessageBubble({
               <Pressable
                 onLongPress={handleCopy}
                 delayLongPress={250}
-                style={styles.userMessage}
+                style={[
+                  styles.userMessage,
+                  {
+                    borderColor: t.userMessage,
+                    backgroundColor: t.background,
+                  },
+                ]}
               >
                 <MarkdownContent content={message.content} isUser />
               </Pressable>
@@ -522,7 +528,12 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   userMessage: {
-    paddingVertical: 2,
+    alignSelf: "flex-end",
+    maxWidth: "100%",
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderRadius: 12,
   },
   attachmentStrip: {
     flexDirection: "row",
