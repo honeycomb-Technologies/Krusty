@@ -39,7 +39,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
-import { AccordionControls } from './AccordionControls';
+import { AccordionControls, pourCloseDurationMs } from './AccordionControls';
 import { ChatBarActionButton } from './ChatBarActionButton';
 import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
@@ -682,9 +682,19 @@ function ChatBarComponent(props: ChatBarProps) {
     // mobile-web compositor. Retain the already-bounded controls after first
     // use; their closed animation disables interaction and paints opacity 0.
     if (Platform.OS === 'web') return;
-    const timer = setTimeout(() => setAccordionVisible(false), 420);
+    const pillCount = (sessionType ?? 'code') === 'code' ? 6 : 5;
+    const timer = setTimeout(
+      () => setAccordionVisible(false),
+      pourCloseDurationMs(pillCount),
+    );
     return () => clearTimeout(timer);
-  }, [accordionOpen, accordionVisible]);
+  }, [accordionOpen, accordionVisible, sessionType]);
+
+  const handleAccordionCloseComplete = useCallback(() => {
+    if (Platform.OS === 'web') return;
+    if (accordionOpenLocalRef.current) return;
+    setAccordionVisible(false);
+  }, []);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !inputFocused || disabled || isRecording) return;
@@ -1325,7 +1335,9 @@ function ChatBarComponent(props: ChatBarProps) {
         </View>
       )}
 
-      {/* L-shape: [input bar] + [K column] */}
+      {/* L-shape: [input bar] + spacer. Agent lives in AccordionControls
+          with the compact pills. Skia paints the pour silhouette; glass
+          crystallizes in each 56pt slot. Never GlassContainer. */}
       <View style={styles.lRow}>
         {/* Input bar */}
         <View
@@ -1416,51 +1428,51 @@ function ChatBarComponent(props: ChatBarProps) {
           </View>
         </View>
 
-        {showComposerChrome ? (
-          <View style={styles.kCol}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={
-                accordionOpen ? 'Close agent controls' : 'Open agent controls'
-              }
-              accessibilityState={{ expanded: accordionOpen }}
-              onPress={toggleAccordion}
-              style={[
-                styles.kWrap,
-                {
-                  borderColor: kBorder,
-                  borderRadius: RADIUS,
-                },
-              ]}
-            >
-              <AdaptiveMaterial
-                borderRadius={RADIUS}
-                tone="regular"
-              />
-              <View style={styles.kInner}>
-                <MitsuroMark size={26} color={kColor} strokeWidth={62} />
-              </View>
-            </Pressable>
-          </View>
-        ) : null}
+        {showComposerChrome ? <View style={styles.kCol} /> : null}
       </View>
 
-      {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
-          56px Agent column (WebKit clips overflow from that narrow column). */}
-      {showComposerChrome && accordionVisible ? (
+      {showComposerChrome ? (
         <View
           style={[
             styles.controlsLayer,
             styles.pointerBoxNone,
             {
-              bottom: controlsLayerBottom,
+              // Sit on the input/Agent row, not the meta/home-indicator band.
+              bottom: inputRowBottom,
               width: controlsLayerWidth,
               right: ROOT_HORIZONTAL_PADDING,
-              zIndex: modelPickerOpen || modelRailOpen ? 40 : 20,
+              zIndex: modelPickerOpen || modelRailOpen ? 40 : 22,
             },
           ]}
         >
           <AccordionControls
+            agent={
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={
+                  accordionOpen ? 'Close agent controls' : 'Open agent controls'
+                }
+                accessibilityState={{ expanded: accordionOpen }}
+                onPress={toggleAccordion}
+                style={[
+                  styles.kWrap,
+                  {
+                    borderColor: kBorder,
+                    borderRadius: RADIUS,
+                  },
+                ]}
+              >
+                <AdaptiveMaterial
+                  borderRadius={RADIUS}
+                  tone="regular"
+                  interactive
+                />
+                <View style={styles.kInner}>
+                  <MitsuroMark size={26} color={kColor} strokeWidth={62} />
+                </View>
+              </Pressable>
+            }
+            pillsMounted={accordionVisible}
             thinkingLevel={thinkingLevel}
             onThinkingChange={onThinkingChange}
             permissionMode={permissionMode}
@@ -1492,6 +1504,7 @@ function ChatBarComponent(props: ChatBarProps) {
             modelInfo={selectedModelInfo}
             isOpen={accordionOpen}
             onToggle={toggleAccordion}
+            onCloseComplete={handleAccordionCloseComplete}
             sessionType={sessionType}
           />
         </View>
@@ -1645,7 +1658,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     overflow: 'visible',
     position: 'relative',
-    zIndex: 15,
+    zIndex: 22,
   },
   controlsLayer: {
     position: 'absolute',

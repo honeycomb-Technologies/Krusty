@@ -49,7 +49,7 @@ Deno.test("uses blur for iOS API fallback and web", () => {
   );
 });
 
-Deno.test("uses a solid surface for accessibility and unsupported platforms", () => {
+Deno.test("uses a solid surface when transparency is reduced", () => {
   assertEquals(
     resolveAdaptiveMaterialMode({
       platform: "ios",
@@ -62,11 +62,23 @@ Deno.test("uses a solid surface for accessibility and unsupported platforms", ()
   assertEquals(
     resolveAdaptiveMaterialMode({
       platform: "android",
-      reduceTransparency: false,
+      reduceTransparency: true,
       glassApiAvailable: false,
       liquidGlassAvailable: false,
     }),
     "solid",
+  );
+});
+
+Deno.test("uses Material blur on Android when transparency is allowed", () => {
+  assertEquals(
+    resolveAdaptiveMaterialMode({
+      platform: "android",
+      reduceTransparency: false,
+      glassApiAvailable: false,
+      liquidGlassAvailable: false,
+    }),
+    "blur",
   );
 });
 
@@ -123,7 +135,7 @@ Deno.test("blur fallback uses translucent glass fills, not opaque scrims", () =>
   );
 });
 
-Deno.test("liquid glass uses platform clear except for strong chrome", async () => {
+Deno.test("liquid glass preserves tone, lifecycle, and FAB interaction policy", async () => {
   const material = await Deno.readTextFile(
     new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
   );
@@ -132,6 +144,16 @@ Deno.test("liquid glass uses platform clear except for strong chrome", async () 
   ) {
     throw new Error(
       "chat chrome must use platform clear glass, not the gray regular frost",
+    );
+  }
+  if (!material.includes("if (!active) return null")) {
+    throw new Error(
+      "inactive AdaptiveMaterial must unmount the GlassView instead of hiding it",
+    );
+  }
+  if (!material.includes("isInteractive={interactive}")) {
+    throw new Error(
+      "FAB glass must be able to use the iOS interactive press/glint",
     );
   }
 });

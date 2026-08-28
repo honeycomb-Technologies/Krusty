@@ -45,6 +45,13 @@ interface AdaptiveMaterialProps {
   borderRadius?: number;
   fallbackColor?: string;
   testID?: string;
+  /**
+   * Glass is presence, not camouflage. A closed or not-yet-arrived control
+   * must not keep a GlassView in the tree — scale/opacity cannot hide it.
+   */
+  active?: boolean;
+  /** iOS 26 press/glint. FABs only — do not put this on large chrome. */
+  interactive?: boolean;
 }
 
 /**
@@ -60,6 +67,8 @@ function AdaptiveMaterialComponent({
   borderRadius,
   fallbackColor,
   testID,
+  active = true,
+  interactive = false,
 }: AdaptiveMaterialProps) {
   const { theme } = useThemeContext();
   const reduceTransparency = useReduceTransparency();
@@ -119,6 +128,8 @@ function AdaptiveMaterialComponent({
     };
   }, [webBlurReady]);
 
+  if (!active) return null;
+
   if (materialMode === "liquid-glass") {
     // The GlassView is the surface. Never stack a scrim over the native
     // effect; the tone tint is the only readability layer it needs.
@@ -128,6 +139,7 @@ function AdaptiveMaterialComponent({
         colorScheme={theme.scheme}
         glassEffectStyle={tone === "strong" ? "regular" : "clear"}
         tintColor={glassTintColor}
+        isInteractive={interactive}
         borderRadius={borderRadius}
         style={materialStyle}
       />
@@ -142,6 +154,9 @@ function AdaptiveMaterialComponent({
           tint={theme.scheme === "dark"
             ? "systemChromeMaterialDark"
             : "systemChromeMaterialLight"}
+          // Android has no UIGlassContainerEffect. Use Material chrome tints
+          // here; dimezis backdrop blur stays off unless a BlurTarget is wired.
+          blurMethod={platform === "android" ? "none" : undefined}
           style={StyleSheet.absoluteFill}
         />
         {overlayColor === undefined ? null : (
