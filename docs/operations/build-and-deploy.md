@@ -346,7 +346,7 @@ Manual dispatch has no path-filter shortcut: use it only for an intentional Test
 
 The job targets the GitHub Actions `testflight` environment (`environment: testflight`). Keep that environment configured with human approval/reviewer protection so EAS build and App Store Connect secrets are not exposed and the build is not submitted until the approval gate is satisfied.
 
-The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progress: true`) so that a new push cancels any in-flight build rather than queueing up stale builds. It first calls the same reusable client-quality workflow used by CI and releases. The TestFlight build job cannot start until the API contract tests, shared-state type-check/tests, mobile TypeScript check, and Expo web export pass. The build and submission steps are:
+The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progress: true`) so that a newer TestFlight run cancels any in-flight build rather than queueing up stale builds. It first calls the same reusable client-quality workflow used by CI and releases. The TestFlight build job cannot start until the API contract tests, shared-state type-check/tests, mobile TypeScript check, and Expo web export pass. The build and submission steps are:
 
 1. Check out the repo and install Bun
 2. Install dependencies with `bun install --frozen-lockfile`
