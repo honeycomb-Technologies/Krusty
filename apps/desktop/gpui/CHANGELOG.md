@@ -6,4 +6,3 @@
 
 - Bumped due to fixed dependency group policy
 - Updated dependencies: mitsuro-desktop-backend@0.9.23
-

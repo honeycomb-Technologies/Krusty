@@ -13,4 +13,3 @@
 ### Patch changes
 
 - Updated dependencies: mitsuro-core@0.9.23, mitsuro-server@0.9.23
-
