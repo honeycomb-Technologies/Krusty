@@ -39,7 +39,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
-import { AccordionControls } from './AccordionControls';
+import { AccordionControls, pourCloseDurationMs } from './AccordionControls';
 import { ChatBarActionButton } from './ChatBarActionButton';
 import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
@@ -57,8 +57,8 @@ import { MitsuroMark } from '../brand';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
 import Svg, { Path, Polygon } from 'react-native-svg';
-import type { ThinkingLevel, ModelInfo, SessionType } from '@mitsuro/api';
-import type { PermissionMode } from '@mitsuro/state';
+import type { ThinkingLevel, ModelInfo, ModelKey, SessionType } from '@mitsuro/api';
+import { modelKeysEqual, type PermissionMode } from '@mitsuro/state';
 
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from '../../platform/speech';
 
@@ -87,8 +87,9 @@ interface ChatBarProps {
   onFastModeToggle?: () => void;
   mode: 'build' | 'plan';
   onModeToggle: () => void;
-  onModelSelect: (modelId: string) => void;
+  onModelSelect: (model: ModelInfo) => void;
   model: string | null;
+  modelKey?: ModelKey | null;
   models: ModelInfo[];
   sessionType?: SessionType;
   workspaceDirectory?: string | null;
@@ -531,7 +532,7 @@ function ChatBarComponent(props: ChatBarProps) {
     thinkingLevel, onThinkingChange,
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
-    mode, onModeToggle, onModelSelect, model, models,
+    mode, onModeToggle, onModelSelect, model, modelKey, models,
     sessionType, workspaceDirectory, targetBranch, tokenCount, onOverlayOpenChange,
     contentMaxWidth, minimalControls = false,
   } = props;
@@ -681,9 +682,19 @@ function ChatBarComponent(props: ChatBarProps) {
     // mobile-web compositor. Retain the already-bounded controls after first
     // use; their closed animation disables interaction and paints opacity 0.
     if (Platform.OS === 'web') return;
-    const timer = setTimeout(() => setAccordionVisible(false), 420);
+    const pillCount = (sessionType ?? 'code') === 'code' ? 6 : 5;
+    const timer = setTimeout(
+      () => setAccordionVisible(false),
+      pourCloseDurationMs(pillCount),
+    );
     return () => clearTimeout(timer);
-  }, [accordionOpen, accordionVisible]);
+  }, [accordionOpen, accordionVisible, sessionType]);
+
+  const handleAccordionCloseComplete = useCallback(() => {
+    if (Platform.OS === 'web') return;
+    if (accordionOpenLocalRef.current) return;
+    setAccordionVisible(false);
+  }, []);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !inputFocused || disabled || isRecording) return;
@@ -795,12 +806,12 @@ function ChatBarComponent(props: ChatBarProps) {
         <ProviderLogo
           providerId={provider.id}
           label={provider.label}
-          color={t.foreground}
+          color={t.thinking}
           size={24}
         />
       ),
     })),
-    [t.foreground, visualProviderFilters],
+    [t.thinking, visualProviderFilters],
   );
   const filteredModels = useMemo(
     () => selectedProviderFilter
@@ -810,20 +821,23 @@ function ChatBarComponent(props: ChatBarProps) {
       : sortedModels,
     [selectedProviderFilter, sortedModels],
   );
+  const selectedModelInfo = useMemo(
+    () =>
+      (modelKey
+        ? models.find(candidate => modelKeysEqual(candidate.key ?? null, modelKey))
+        : models.find(candidate => candidate.id === model)) ?? null,
+    [model, modelKey, models],
+  );
   const currentModelLabel = useMemo(() => {
     if (!model) return 'No model selected';
-    return models.find(candidate => candidate.id === model)?.display_name ?? model;
-  }, [model, models]);
+    return selectedModelInfo?.display_name ?? model;
+  }, [model, selectedModelInfo]);
   const workspaceContext = useMemo(
     () =>
       sessionType === 'code'
         ? formatWorkspaceContextMetadata(workspaceDirectory, targetBranch)
         : null,
     [sessionType, targetBranch, workspaceDirectory],
-  );
-  const selectedModelInfo = useMemo(
-    () => models.find(candidate => candidate.id === model) ?? null,
-    [model, models],
   );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
@@ -1006,6 +1020,7 @@ function ChatBarComponent(props: ChatBarProps) {
   };
 
   const openModelPicker = () => {
+    if (isHive) return;
     clearModelCloseTimer();
     if (attachPickerOpen) {
       setAttachPickerOpen(false);
@@ -1037,10 +1052,20 @@ function ChatBarComponent(props: ChatBarProps) {
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
 
-  const handleModelSelectFromPicker = useCallback((modelId: string) => {
-    onModelSelectRef.current(modelId);
+  const handleModelSelectFromPicker = useCallback((modelInfo: ModelInfo) => {
+    if (isHive) return;
+    onModelSelectRef.current(modelInfo);
     closeModelPicker();
-  }, [closeModelPicker]);
+  }, [closeModelPicker, isHive]);
+
+  useEffect(() => {
+    if (!isHive) return;
+    clearModelCloseTimer();
+    modelPopoverScale.value = 0;
+    setModelRailOpen(false);
+    setModelPickerOpen(false);
+    setSelectedProviderFilter(null);
+  }, [clearModelCloseTimer, isHive, modelPopoverScale]);
 
   const closeExpandedEditor = useCallback(() => {
     setExpandedEditorOpen(false);
@@ -1076,7 +1101,7 @@ function ChatBarComponent(props: ChatBarProps) {
     hasAttachments: attachments.length > 0,
   });
   const kActive = accordionOpen;
-  const kColor = kActive ? t.thinking : t.mutedForeground;
+  const kColor = t.thinking;
   const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
 
   // The composer keeps one stable closed-screen inset. Keyboard lift moves
@@ -1092,10 +1117,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
   // only when the catalog has not loaded or the model is unknown.
-  const selectedModel =
-    models.find((entry) => entry.id === model) ??
-    models.find((entry) => entry.key?.model_id === model) ??
-    null;
+  const selectedModel = selectedModelInfo;
   const contextWindow = Math.max(
     1,
     selectedModel?.context_window && selectedModel.context_window > 0
@@ -1313,7 +1335,9 @@ function ChatBarComponent(props: ChatBarProps) {
         </View>
       )}
 
-      {/* L-shape: [input bar] + [K column] */}
+      {/* L-shape: [input bar] + spacer. Agent lives in AccordionControls
+          with the compact pills. Skia paints the pour silhouette; glass
+          crystallizes in each 56pt slot. Never GlassContainer. */}
       <View style={styles.lRow}>
         {/* Input bar */}
         <View
@@ -1350,7 +1374,7 @@ function ChatBarComponent(props: ChatBarProps) {
               >
                 <Maximize2
                   size={17}
-                  color={t.mutedForeground}
+                  color={t.thinking}
                   strokeWidth={1.8}
                 />
               </Pressable>
@@ -1397,58 +1421,58 @@ function ChatBarComponent(props: ChatBarProps) {
               isRecording={isRecording}
               canSend={canSend}
               foreground={t.foreground}
-              mutedForeground={t.mutedForeground}
+              mutedForeground={t.thinking}
               onPress={handleActionBtn}
               onLongPress={toggleRecording}
             />
           </View>
         </View>
 
-        {showComposerChrome ? (
-          <View style={styles.kCol}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={
-                accordionOpen ? 'Close agent controls' : 'Open agent controls'
-              }
-              accessibilityState={{ expanded: accordionOpen }}
-              onPress={toggleAccordion}
-              style={[
-                styles.kWrap,
-                {
-                  borderColor: kBorder,
-                  borderRadius: RADIUS,
-                },
-              ]}
-            >
-              <AdaptiveMaterial
-                borderRadius={RADIUS}
-                tone="regular"
-              />
-              <View style={styles.kInner}>
-                <MitsuroMark size={26} color={kColor} strokeWidth={62} />
-              </View>
-            </Pressable>
-          </View>
-        ) : null}
+        {showComposerChrome ? <View style={styles.kCol} /> : null}
       </View>
 
-      {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
-          56px Agent column (WebKit clips overflow from that narrow column). */}
-      {showComposerChrome && accordionVisible ? (
+      {showComposerChrome ? (
         <View
           style={[
             styles.controlsLayer,
             styles.pointerBoxNone,
             {
-              bottom: controlsLayerBottom,
+              // Sit on the input/Agent row, not the meta/home-indicator band.
+              bottom: inputRowBottom,
               width: controlsLayerWidth,
               right: ROOT_HORIZONTAL_PADDING,
-              zIndex: modelPickerOpen || modelRailOpen ? 40 : 20,
+              zIndex: modelPickerOpen || modelRailOpen ? 40 : 22,
             },
           ]}
         >
           <AccordionControls
+            agent={
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={
+                  accordionOpen ? 'Close agent controls' : 'Open agent controls'
+                }
+                accessibilityState={{ expanded: accordionOpen }}
+                onPress={toggleAccordion}
+                style={[
+                  styles.kWrap,
+                  {
+                    borderColor: kBorder,
+                    borderRadius: RADIUS,
+                  },
+                ]}
+              >
+                <AdaptiveMaterial
+                  borderRadius={RADIUS}
+                  tone="regular"
+                  interactive
+                />
+                <View style={styles.kInner}>
+                  <MitsuroMark size={26} color={kColor} strokeWidth={62} />
+                </View>
+              </Pressable>
+            }
+            pillsMounted={accordionVisible}
             thinkingLevel={thinkingLevel}
             onThinkingChange={onThinkingChange}
             permissionMode={permissionMode}
@@ -1464,7 +1488,8 @@ function ChatBarComponent(props: ChatBarProps) {
             onPickCamera={pickCamera}
             onPickFile={pickFile}
             onModelSelect={() =>
-              modelPickerOpen ? closeModelPicker() : openModelPicker()
+              !isHive &&
+                (modelPickerOpen ? closeModelPicker() : openModelPicker())
             }
             modelPickerOpen={modelRailOpen}
             providerFilters={providerFilterActions}
@@ -1479,13 +1504,14 @@ function ChatBarComponent(props: ChatBarProps) {
             modelInfo={selectedModelInfo}
             isOpen={accordionOpen}
             onToggle={toggleAccordion}
+            onCloseComplete={handleAccordionCloseComplete}
             sessionType={sessionType}
           />
         </View>
       ) : null}
 
       {/* Model popover — under the filter row, same width + right edge */}
-      {showComposerChrome && modelPickerOpen ? (
+      {showComposerChrome && !isHive && modelPickerOpen ? (
         <ChatBarModelPopover
           isDesktop={isDesktop}
           modelPopoverWidth={modelPopoverWidth}
@@ -1501,7 +1527,7 @@ function ChatBarComponent(props: ChatBarProps) {
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
           filteredModels={filteredModels}
-          model={model}
+          selectedModel={selectedModelInfo}
           onSelectModel={handleModelSelectFromPicker}
         />
       ) : null}
@@ -1632,7 +1658,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     overflow: 'visible',
     position: 'relative',
-    zIndex: 15,
+    zIndex: 22,
   },
   controlsLayer: {
     position: 'absolute',

@@ -38,7 +38,7 @@ pub(super) fn build_memory_context(
     let store = MemoryStore::new(db);
     let query_terms = relevance_terms(conversation);
     let memories = store
-        .list(project_dir, user_id)
+        .list_for_standard_reader(project_dir, user_id)
         .into_iter()
         .filter(|memory| !is_current_snapshot(memory))
         .filter(|memory| !is_compaction_flush_memory(memory))

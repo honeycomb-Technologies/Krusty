@@ -1,5 +1,12 @@
-import { memo, type ReactNode, useEffect, useRef, useState } from "react";
-import { Animated, Text, View } from "react-native";
+import {
+  memo,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Animated, Pressable, Text, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
 import type { SessionType } from "@mitsuro/api";
 
@@ -26,9 +33,28 @@ interface ActiveConversationSurfaceProps {
   onErrorBannerHeightChange: (height: number) => void;
   onApproveTool: (sessionId: string, toolCallId: string) => void;
   onDenyTool: (sessionId: string, toolCallId: string) => void;
-  onSubmitToolResult: (toolCallId: string, result: string) => void;
-  onPlanConfirm: (toolCallId: string, choice: "execute" | "abandon") => void;
+  onSubmitToolResult: (
+    sessionId: string,
+    toolCallId: string,
+    result: string,
+  ) => void;
+  onPlanConfirm: (
+    sessionId: string,
+    toolCallId: string,
+    choice: "execute" | "abandon",
+  ) => void;
+  renderThreadControls?: (
+    activity: ActiveConversationActivity,
+  ) => ReactNode;
   emptyState?: ReactNode;
+}
+
+export interface ActiveConversationActivity {
+  sessionId: string | null;
+  transcriptTailKey: string;
+  isStreaming: boolean;
+  isThinking: boolean;
+  messageCount: number;
 }
 
 function ActiveConversationSurfaceComponent({
@@ -49,6 +75,7 @@ function ActiveConversationSurfaceComponent({
   onDenyTool,
   onSubmitToolResult,
   onPlanConfirm,
+  renderThreadControls,
   emptyState,
 }: ActiveConversationSurfaceProps) {
   const { theme } = useThemeContext();
@@ -62,6 +89,9 @@ function ActiveConversationSurfaceComponent({
       isThinking: state.isThinking,
       error: state.error,
       isLoading: state.isLoading,
+      queuedRecoveryBlocked: state.queuedRecoveryBlocked,
+      retryQueuedRecovery: state.retryQueuedRecovery,
+      discardQueuedRecovery: state.discardQueuedRecovery,
     })),
     activeMode,
   );
@@ -72,6 +102,20 @@ function ActiveConversationSurfaceComponent({
   const isThinking = sessionView.isThinking ?? false;
   const isLoading = sessionView.isLoading ?? false;
   const error = sessionView.error ?? null;
+  const queuedRecoveryBlocked = sessionView.queuedRecoveryBlocked ?? false;
+  const tail = messages.at(-1);
+  const messageCount = messages.length;
+  const tailId = tail?.id ?? null;
+  const tailRole = tail?.role ?? null;
+  const activity = useMemo<ActiveConversationActivity>(() => ({
+    sessionId,
+    transcriptTailKey: `${messageCount}:${tailId ?? "none"}:${
+      tailRole ?? "none"
+    }`,
+    isStreaming,
+    isThinking,
+    messageCount,
+  }), [sessionId, messageCount, tailId, tailRole, isStreaming, isThinking]);
   const showTranscriptError = Boolean(error) && showErrorBanner;
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [planTrackerMounted, setPlanTrackerMounted] = useState(
@@ -193,9 +237,39 @@ function ActiveConversationSurfaceComponent({
             >
               {error}
             </Text>
+            {queuedRecoveryBlocked
+              ? (
+                <View style={styles.errorBannerActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry uncertain queued message"
+                    onPress={() => void sessionView.retryQueuedRecovery()}
+                    style={({ pressed }) => [
+                      styles.errorBannerAction,
+                      { borderColor: `${t.error}70`, opacity: pressed ? 0.7 : 1 },
+                    ]}
+                  >
+                    <Text style={[styles.errorBannerActionText, { color: t.error }]}>Retry</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Discard uncertain queued message"
+                    onPress={() => void sessionView.discardQueuedRecovery()}
+                    style={({ pressed }) => [
+                      styles.errorBannerAction,
+                      { borderColor: `${t.error}70`, opacity: pressed ? 0.7 : 1 },
+                    ]}
+                  >
+                    <Text style={[styles.errorBannerActionText, { color: t.error }]}>Discard</Text>
+                  </Pressable>
+                </View>
+              )
+              : null}
           </View>
         )
         : null}
+
+      {renderThreadControls?.(activity)}
     </View>
   );
 }

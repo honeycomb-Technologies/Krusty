@@ -6,13 +6,22 @@
 # Usage: sh scripts/honey-upgrade.sh v0.9.23
 set -eu
 
+valid_release_tag() {
+  candidate=$1
+  case "$candidate" in
+    ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+  esac
+  printf '%s\n' "$candidate" | \
+    grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
 repo="honeycomb-Technologies/Mitsuro"
 tag=${1:-}
 if [ -z "$tag" ]; then
   echo "Usage: sh scripts/honey-upgrade.sh v0.9.23" >&2
   exit 2
 fi
-if ! printf '%s' "$tag" | grep -Eq '^v[0-9]'; then
+if ! valid_release_tag "$tag"; then
   echo "Tag must look like v0.9.23, got: $tag" >&2
   exit 2
 fi
@@ -46,5 +55,10 @@ if [ -x "$HOME/.local/bin/.mitsuro-current/mitsuro" ]; then
   echo -n "Installed CLI: "
   "$HOME/.local/bin/.mitsuro-current/mitsuro" --version
   echo "Executable: $(readlink -f "$HOME/.local/bin/.mitsuro-current/mitsuro")"
+fi
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$script_dir/honey-atlas-repair.sh" ]; then
+  echo "Pointing serve at the Atlas sidecar"
+  sh "$script_dir/honey-atlas-repair.sh" "$tag"
 fi
 echo "Honey ${tag} is live only if /health passed and the executable is this release."

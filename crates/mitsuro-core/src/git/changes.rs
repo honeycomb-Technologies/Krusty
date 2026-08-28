@@ -172,7 +172,9 @@ fn validate_relative_file(file: &str) -> Result<()> {
 fn parse_name_status(bytes: &[u8]) -> Vec<(String, String)> {
     let fields = nul_fields(bytes);
     fields
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let status = match pair[0].chars().next().unwrap_or('M') {
                 'A' => "added",

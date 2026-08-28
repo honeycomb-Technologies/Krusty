@@ -1,4 +1,5 @@
-use super::{create_store, slugify, CreateReportInput};
+use super::{create_store, slugify, CreateReportInput, ReportScope};
+use crate::storage::{Database, HiveWorkerStore, NewHiveWorker};
 
 #[test]
 fn writes_reports_to_project_local_directory() {
@@ -16,6 +17,7 @@ fn writes_reports_to_project_local_directory() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -48,6 +50,7 @@ fn duplicate_titles_do_not_overwrite_report_files() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -60,6 +63,7 @@ fn duplicate_titles_do_not_overwrite_report_files() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -72,6 +76,46 @@ fn duplicate_titles_do_not_overwrite_report_files() {
 
     assert_eq!(names.len(), 2);
     assert_ne!(names[0], names[1]);
+}
+
+#[test]
+fn worker_private_reports_do_not_create_shared_disk_mirrors() {
+    let (store, tmp) = create_store();
+    store
+        .db
+        .conn()
+        .execute(
+            "UPDATE sessions SET session_type = 'hive' WHERE id = 'sess-1'",
+            [],
+        )
+        .expect("mark source as Hive DM");
+    let worker = HiveWorkerStore::new(
+        Database::new(&tmp.path().join("reports.db")).expect("reopen report database"),
+    )
+    .create(&NewHiveWorker {
+        dm_session_id: Some("sess-1".into()),
+        memory_namespace_id: Some("crew-private-report".into()),
+        ..NewHiveWorker::new("private-report-worker")
+    })
+    .expect("create report Worker");
+    let project_root = tmp.path().join("private-workspace");
+    std::fs::create_dir_all(&project_root).unwrap();
+
+    store
+        .create_report(CreateReportInput {
+            title: "Private Worker Report",
+            session_id: "sess-1",
+            project_dir: Some(project_root.to_str().unwrap()),
+            report_root: Some(&project_root),
+            content: "private content",
+            summary: "",
+            tags: &[],
+            sources: &[],
+            scope: ReportScope::worker_private(worker.id, worker.memory_namespace_id).unwrap(),
+        })
+        .expect("persist private report without a file mirror");
+
+    assert!(!crate::paths::project_reports_dir(&project_root).exists());
 }
 
 #[test]

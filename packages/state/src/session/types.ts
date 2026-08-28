@@ -1,8 +1,8 @@
 import type {
   DelegatedRunStage,
+  DelegatedToolKind,
   DelegationGroupState,
   DelegationTaskState,
-  DelegatedToolKind,
   ModelInfo,
   ModelKey,
   SessionType,
@@ -11,7 +11,7 @@ import type {
   WorkflowCommand,
   WorkflowMutation,
   WorkspaceMode,
-} from '@mitsuro/api';
+} from "@mitsuro/api";
 
 export interface ToolCall {
   id: string;
@@ -22,24 +22,24 @@ export interface ToolCall {
   delegatedRunId?: string;
   delegated?: DelegatedArtifactState;
   status:
-    | 'pending'
-    | 'running'
-    | 'success'
-    | 'partial'
-    | 'error'
-    | 'awaiting_approval';
+    | "pending"
+    | "running"
+    | "success"
+    | "partial"
+    | "error"
+    | "awaiting_approval";
 }
 
 export interface DelegatedAgentState {
   taskId: string;
   name: string;
   status:
-    | 'pending'
-    | 'running'
-    | 'complete'
-    | 'degraded'
-    | 'cancelled'
-    | 'failed';
+    | "pending"
+    | "running"
+    | "complete"
+    | "degraded"
+    | "cancelled"
+    | "failed";
   success?: boolean;
   usableEvidence?: boolean;
   degradedSuccess?: boolean;
@@ -54,13 +54,13 @@ export interface DelegatedAgentState {
   completedPlanTask?: string;
   attemptCount?: number;
   taskState?: DelegationTaskState;
-  integrationState?: 'pending' | 'ready' | 'failed' | null;
+  integrationState?: "pending" | "ready" | "failed" | null;
 }
 
 export interface DelegatedArtifactState {
   kind: DelegatedToolKind;
   name?: string;
-  capabilities?: Array<'read' | 'write' | 'execute'>;
+  capabilities?: Array<"read" | "write" | "execute">;
   delegatedRunId?: string;
   stage?: DelegatedRunStage;
   groupState?: DelegationGroupState;
@@ -70,10 +70,10 @@ export interface DelegatedArtifactState {
   message?: string;
   investigationSummary?: string;
   humanReview?: string;
-  outcome?: 'success' | 'partial' | 'failed' | 'cancelled';
-  confidence?: 'high' | 'medium' | 'low';
-  structuralCoverage?: 'high' | 'medium' | 'low';
-  semanticCoverage?: 'high' | 'medium' | 'low';
+  outcome?: "success" | "partial" | "failed" | "cancelled";
+  confidence?: "high" | "medium" | "low";
+  structuralCoverage?: "high" | "medium" | "low";
+  semanticCoverage?: "high" | "medium" | "low";
   agents: DelegatedAgentState[];
   filesExamined: string[];
   errors: string[];
@@ -102,7 +102,7 @@ export interface DelegatedArtifactState {
 }
 
 export interface ChatMessageAttachment {
-  type: 'image' | 'file';
+  type: "image" | "file";
   name?: string;
   mimeType?: string;
   uri?: string;
@@ -111,7 +111,7 @@ export interface ChatMessageAttachment {
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   thinking?: string;
   attachments?: ChatMessageAttachment[];
@@ -119,37 +119,39 @@ export interface ChatMessage {
   renderParts?: ChatRenderPart[];
   isQueued?: boolean;
   queuedUntilNextRun?: boolean;
-  kind?: 'recovery_notice' | 'live_partial' | 'streaming';
+  workerStagedInputId?: string;
+  successorRunId?: string;
+  kind?: "recovery_notice" | "live_partial" | "streaming";
 }
 
 export type ChatRenderPart =
   | {
-      type: 'text';
-      id: string;
-      content: string;
-    }
+    type: "text";
+    id: string;
+    content: string;
+  }
   | {
-      type: 'thinking';
-      id: string;
-      content: string;
-    }
+    type: "thinking";
+    id: string;
+    content: string;
+  }
   | {
-      type: 'tool';
-      id: string;
-      toolCallId: string;
-    }
+    type: "tool";
+    id: string;
+    toolCallId: string;
+  }
   | {
-      type: 'attachments';
-      id: string;
-    };
+    type: "attachments";
+    id: string;
+  };
 
-export type SessionMode = 'build' | 'plan';
-export type PermissionMode = 'supervised' | 'autonomous';
+export type SessionMode = "build" | "plan";
+export type PermissionMode = "supervised" | "autonomous";
 export type ThinkingLevel = ApiThinkingLevel;
 
 export interface Attachment {
   name: string;
-  type: 'image' | 'file';
+  type: "image" | "file";
   mimeType: string;
   uri?: string;
   base64?: string;
@@ -162,12 +164,63 @@ export interface SendMessageOptions {
   workspaceMode?: WorkspaceMode;
   sessionType?: SessionType;
   targetBranch?: string | null;
+  /** Client-only ownership hint. Never serialized into the chat request. */
+  hiveConversationKind?: "worker_dm" | "primary_hive";
+  /**
+   * Client-only handoff for a queue claimed by the just-finished stream.
+   * The store retains this exact batch until the successor is accepted or
+   * restores it to its originating session after a definite failure.
+   */
+  queuedSuccessor?: QueuedSuccessorClaimInput;
 }
 
 export interface QueuedMessage {
+  /** Stable optimistic row identity used for exact retry and deduplication. */
+  id: string;
+  /** Stable per-store ordering reservation for concurrent steer fallbacks. */
+  orderKey?: string;
+  /** Durable transport intent for direct Worker input. Legacy queues are Chat. */
+  workerOperation?: "chat" | "steer";
+  /**
+   * Exact Worker retry identity, persisted before the matching transport can
+   * begin. Keeping this on the individual input (rather than only on the
+   * currently claimed batch) also protects a steer queued behind a live Chat.
+   */
+  workerInput?: {
+    operation: "chat" | "steer";
+    fingerprint: string;
+    key: string;
+  };
+  /** Canonical user-turn count before this optimistic row was appended. */
+  canonicalUserCountBefore?: number;
   content: string;
   attachments: Attachment[];
   sendOptions?: SendMessageOptions;
+}
+
+export interface QueuedSuccessorClaimInput {
+  id: string;
+  sessionId: string;
+  /** Original durable owner when a validated pinch moves the queue to sessionId. */
+  sourceSessionId?: string;
+  queuedMessages: QueuedMessage[];
+  /** Process-local authority for this exact claim. Never serialized. */
+  attemptToken?: string;
+}
+
+export interface StopStreamingOptions {
+  expectedSessionId?: string;
+  hiveConversationKind?: "worker_dm" | "primary_hive";
+}
+
+export interface SessionDeletionAdmission {
+  /** No-throw release after the server confirms deletion. */
+  commit(): void;
+  /**
+   * Restore the exact pre-delete recovery record when server deletion fails.
+   * A persistence failure keeps this lease admitted so rollback can be retried.
+   */
+  rollback(): Promise<void>;
 }
 
 export interface SessionStoreState {
@@ -178,6 +231,7 @@ export interface SessionStoreState {
   permissionMode: PermissionMode;
   messages: ChatMessage[];
   queuedMessages: QueuedMessage[];
+  queuedRecoveryBlocked: boolean;
   isLoading: boolean;
   isStreaming: boolean;
   isThinking: boolean;
@@ -202,6 +256,15 @@ export interface SessionStoreState {
     attachments?: Attachment[],
     sendOptions?: SendMessageOptions,
   ) => Promise<void>;
+  retryQueuedRecovery: () => Promise<void>;
+  discardQueuedRecovery: (sessionId?: string) => Promise<void>;
+  /**
+   * Concurrent calls reject; one lease owns one DELETE. After rollback storage
+   * failure, the next call repairs that rollback before acquiring a fresh lease.
+   */
+  beginSessionDeletionAdmission: (
+    sessionId: string,
+  ) => Promise<SessionDeletionAdmission>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   /**
    * Invalidate pending hydration work without clearing the optimistic shell.
@@ -223,7 +286,9 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
-  executeWorkflowCommand: (command: WorkflowCommand) => Promise<WorkflowMutation>;
+  executeWorkflowCommand: (
+    command: WorkflowCommand,
+  ) => Promise<WorkflowMutation>;
   setModel: (
     model: string | null,
     provider?: string | null,
@@ -242,7 +307,7 @@ export interface SessionStoreState {
    * server-side session. Used when navigating between conversations or modes.
    */
   detachSession: () => void;
-  stopStreaming: () => void;
+  stopStreaming: (options?: StopStreamingOptions) => void;
   startStatePolling: (sessionId: string) => void;
   stopStatePolling: () => void;
   refreshDelegationState: (sessionId: string) => void;

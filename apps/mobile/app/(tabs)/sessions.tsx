@@ -1,42 +1,87 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  View,
-  Text,
+  Alert,
   FlatList,
   Pressable,
-  StyleSheet,
   RefreshControl,
-  Alert,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
-import { Plus, Trash2 } from 'lucide-react-native';
-import * as Haptics from '../../platform/haptics';
-import { useThemeContext } from '../../hooks/useTheme';
-import { useConnection } from '../../hooks/useConnection';
-import { SessionListSkeleton } from '../../components/ui/Skeleton';
-import { GlassCard } from '../../components/ui/GlassCard';
-import type { SessionResponse } from '@mitsuro/api';
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { router } from "expo-router";
+import { Plus, Trash2 } from "lucide-react-native";
+import * as Haptics from "../../platform/haptics";
+import { useThemeContext } from "../../hooks/useTheme";
+import { useConnection } from "../../hooks/useConnection";
+import { useStores } from "../../hooks/useStores";
+import { SessionListSkeleton } from "../../components/ui/Skeleton";
+import { GlassCard } from "../../components/ui/GlassCard";
+import {
+  beginAllModeSessionDeletionAdmission,
+  clearDeletedSessionFromModeStoreGraphs,
+  type SessionDeletionAdmission,
+} from "../../components/chat-screen/sessionDeletionAdmission";
+import type { SessionResponse } from "@mitsuro/api";
 
 export default function SessionsScreen() {
   const { theme } = useThemeContext();
-  const { client, isConnected } = useConnection();
-  const [sessions, setSessions] = useState<SessionResponse[]>([]);
+  const { client, isConnected, recoveryConnectionScope } = useConnection();
+  const stores = useStores();
+  const activeStoresRef = useRef(stores);
+  activeStoresRef.current = stores;
+  const activeRecoveryScopeRef = useRef<string | null>(
+    recoveryConnectionScope,
+  );
+  activeRecoveryScopeRef.current = recoveryConnectionScope;
+  useEffect(() => {
+    activeRecoveryScopeRef.current = recoveryConnectionScope;
+    return () => {
+      if (activeRecoveryScopeRef.current === recoveryConnectionScope) {
+        activeRecoveryScopeRef.current = null;
+      }
+    };
+  }, [recoveryConnectionScope]);
+  useEffect(() => {
+    activeStoresRef.current = stores;
+    return () => {
+      if (activeStoresRef.current === stores) {
+        activeStoresRef.current = null;
+      }
+    };
+  }, [stores]);
+  const [sessionSnapshot, setSessionSnapshot] = useState<
+    {
+      recoveryConnectionScope: string;
+      sessions: SessionResponse[];
+    } | null
+  >(null);
+  const sessions = recoveryConnectionScope &&
+      sessionSnapshot?.recoveryConnectionScope === recoveryConnectionScope
+    ? sessionSnapshot.sessions
+    : [];
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const loadSessions = useCallback(async () => {
-    if (!client) return;
+    if (!client || !recoveryConnectionScope) return;
+    const expectedScope = recoveryConnectionScope;
     try {
       const data = await client.getSessions();
-      setSessions(data);
+      if (activeRecoveryScopeRef.current !== expectedScope) return;
+      setSessionSnapshot({
+        recoveryConnectionScope: expectedScope,
+        sessions: data,
+      });
     } catch {
       // silent
     } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+      if (activeRecoveryScopeRef.current === expectedScope) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
-  }, [client]);
+  }, [client, recoveryConnectionScope]);
 
   useEffect(() => {
     if (isConnected) loadSessions();
@@ -48,34 +93,100 @@ export default function SessionsScreen() {
   };
 
   const handleCreate = async () => {
-    if (!client) return;
+    if (!client || !recoveryConnectionScope) return;
+    const expectedScope = recoveryConnectionScope;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
       const session = await client.createSession();
-      setSessions(prev => [session, ...prev]);
-      router.navigate('/(tabs)');
+      if (activeRecoveryScopeRef.current !== expectedScope) return;
+      setSessionSnapshot((previous) => ({
+        recoveryConnectionScope: expectedScope,
+        sessions: [
+          session,
+          ...(previous?.recoveryConnectionScope === expectedScope
+            ? previous.sessions
+            : []),
+        ],
+      }));
+      router.navigate("/(tabs)");
     } catch {
       // silent
     }
   };
 
   const handleDelete = (session: SessionResponse) => {
+    const expectedScope = recoveryConnectionScope;
+    const expectedStores = stores;
     Alert.alert(
-      'Delete Session',
-      `Delete "${session.title || 'Untitled'}"?`,
+      "Delete Session",
+      `Delete "${session.title || "Untitled"}"?`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: "Cancel", style: "cancel" },
         {
-          text: 'Delete',
-          style: 'destructive',
+          text: "Delete",
+          style: "destructive",
           onPress: async () => {
-            if (!client) return;
+            const isCurrentDeletionBoundary = () =>
+              activeRecoveryScopeRef.current === expectedScope &&
+              activeStoresRef.current === expectedStores;
+            if (
+              !expectedStores || !expectedScope ||
+              !isCurrentDeletionBoundary()
+            ) return;
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+            let admission: SessionDeletionAdmission | null = null;
             try {
-              await client.deleteSession(session.id);
-              setSessions(prev => prev.filter(s => s.id !== session.id));
-            } catch {
-              // silent
+              admission = await beginAllModeSessionDeletionAdmission(
+                expectedStores.modes,
+                session.id,
+              );
+              if (!isCurrentDeletionBoundary()) {
+                await admission.rollback();
+                return;
+              }
+              const deleted = await expectedStores.sessions.getState()
+                .deleteSession(session.id);
+              if (!deleted) {
+                await admission.rollback();
+                if (!isCurrentDeletionBoundary()) return;
+                Alert.alert(
+                  "Delete unavailable",
+                  expectedStores.sessions.getState().error ??
+                    "The session could not be deleted safely.",
+                );
+                return;
+              }
+              clearDeletedSessionFromModeStoreGraphs(
+                expectedStores.modes,
+                activeRecoveryScopeRef.current === expectedScope
+                  ? activeStoresRef.current?.modes ?? null
+                  : null,
+                session.id,
+              );
+              admission.commit();
+              if (isCurrentDeletionBoundary()) {
+                setSessionSnapshot((previous) => ({
+                  recoveryConnectionScope: expectedScope,
+                  sessions: previous?.recoveryConnectionScope === expectedScope
+                    ? previous.sessions.filter((entry) =>
+                      entry.id !== session.id
+                    )
+                    : [],
+                }));
+              }
+            } catch (deleteError) {
+              try {
+                await admission?.rollback();
+              } catch (rollbackError) {
+                deleteError = rollbackError;
+              }
+              if (!isCurrentDeletionBoundary()) return;
+              Alert.alert(
+                "Delete incomplete",
+                deleteError instanceof Error
+                  ? deleteError.message
+                  : "The session recovery record could not be cleared.",
+              );
             }
           },
         },
@@ -90,7 +201,7 @@ export default function SessionsScreen() {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
     const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'Just now';
+    if (mins < 1) return "Just now";
     if (mins < 60) return `${mins}m ago`;
     const hours = Math.floor(mins / 60);
     if (hours < 24) return `${hours}h ago`;
@@ -107,7 +218,7 @@ export default function SessionsScreen() {
           style={({ pressed }) => [
             styles.addButton,
             {
-              backgroundColor: pressed ? t.userMessage + 'cc' : t.userMessage,
+              backgroundColor: pressed ? t.userMessage + "cc" : t.userMessage,
             },
           ]}
         >
@@ -115,17 +226,15 @@ export default function SessionsScreen() {
         </Pressable>
       </View>
 
-      {isLoading ? (
-        <SessionListSkeleton />
-      ) : (
+      {isLoading ? <SessionListSkeleton /> : (
         <FlatList
           data={sessions}
-          keyExtractor={s => s.id}
+          keyExtractor={(s) => s.id}
           renderItem={({ item }) => (
             <Pressable
               onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                router.navigate('/(tabs)');
+                router.navigate("/(tabs)");
               }}
             >
               <GlassCard style={styles.card}>
@@ -135,14 +244,20 @@ export default function SessionsScreen() {
                       style={[styles.cardTitle, { color: t.foreground }]}
                       numberOfLines={1}
                     >
-                      {item.title || 'Untitled'}
+                      {item.title || "Untitled"}
                     </Text>
                     <View style={styles.cardMeta}>
-                      <Text style={[styles.cardDate, { color: t.mutedForeground }]}>
+                      <Text
+                        style={[styles.cardDate, { color: t.mutedForeground }]}
+                      >
                         {formatDate(item.updated_at)}
                       </Text>
                       {item.token_count != null && (
-                        <Text style={[styles.cardTokens, { color: t.mutedForeground }]}>
+                        <Text
+                          style={[styles.cardTokens, {
+                            color: t.mutedForeground,
+                          }]}
+                        >
                           {(item.token_count / 1000).toFixed(0)}k tokens
                         </Text>
                       )}
@@ -153,7 +268,11 @@ export default function SessionsScreen() {
                     hitSlop={12}
                     style={styles.deleteBtn}
                   >
-                    <Trash2 size={18} color={t.mutedForeground} strokeWidth={1.5} />
+                    <Trash2
+                      size={18}
+                      color={t.mutedForeground}
+                      strokeWidth={1.5}
+                    />
                   </Pressable>
                 </View>
               </GlassCard>
@@ -183,28 +302,28 @@ export default function SessionsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     paddingHorizontal: 20,
     paddingVertical: 16,
   },
   title: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: -0.5,
   },
   addButton: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   center: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   list: {
     paddingHorizontal: 16,
@@ -215,8 +334,8 @@ const styles = StyleSheet.create({
     marginBottom: 0,
   },
   cardRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
   },
   cardContent: {
     flex: 1,
@@ -224,10 +343,10 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: 17,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   cardMeta: {
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: 12,
   },
   cardDate: {

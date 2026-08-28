@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
@@ -8,13 +7,20 @@ use mitsuro_core::storage::RuntimeTraceEvent;
 #[cfg(unix)]
 use mitsuro_hive_protocol::HiveIpcClientConfig;
 use mitsuro_hive_protocol::{
-    AckResponse, Actor, ClientError, Command, CreateScheduleCommand, DaemonStats, DispatchCommand,
-    EventEnvelope, EventSubscription, GroupMessageCommand, GroupStopCommand, GroupTurnResponse,
-    HiveEvent, HiveIpcClient, MessageCommand, ModelKey, RecoverCommand, ReplaceScheduleCommand,
-    RequestEnvelope, ResponsePayload, ScheduleCommand, ScheduleDefinition, ScheduleResponse,
-    SessionCommand, SetCrewCommand, SetPriorityCommand, SetScheduleStatusCommand, SteerCommand,
-    SubscribeCommand, ToolApprovalCommand, UserResponseCommand, MODEL_IDENTITY_PROTOCOL_MINOR,
-    PROTOCOL_MAJOR,
+    AckResponse, ActivateOrResumeWorkerWorkflowCommand, Actor, ClientError, Command,
+    ConfirmWorkerIntroductionCommand, CreateScheduleCommand, CreateWorkerIntroductionCommand,
+    DaemonStats, DispatchCommand, EventEnvelope, EventSubscription,
+    GrantWorkerGovernorRecoveryCommand, GroupArchiveCommand, GroupMessageCommand, GroupStopCommand,
+    GroupTurnResponse, HiveEvent, HiveIpcClient, MessageCommand, ModelKey, RecoverCommand,
+    ReplaceScheduleCommand, RequestEnvelope, ResolveWorkerGoalAcceptanceCommand, ResponsePayload,
+    ReturnWorkerIntroductionToContextCommand, ScheduleCommand, ScheduleDefinition,
+    ScheduleResponse, SessionCommand, SetCrewCommand, SetPriorityCommand, SetScheduleStatusCommand,
+    SetWorkerWorkspaceCommand, SteerCommand, SubscribeCommand, ToolApprovalCommand,
+    UpdateWorkerCommand, UserResponseCommand, WorkerConversationInputDisposition,
+    WorkerConversationInputResponse, WorkerGoalAcceptanceResponse, WorkerGovernorRecoveryResponse,
+    WorkerIntroductionActionResponse, WorkerIntroductionCommand, WorkerIntroductionResponse,
+    WorkerMutationResponse, WorkerTargetStatus, WorkerWorkflowLifecycleCommand,
+    WorkerWorkflowResponse, WorkerWorkspaceResponse, MODEL_IDENTITY_PROTOCOL_MINOR, PROTOCOL_MAJOR,
 };
 
 use super::HiveRuntimeStats;
@@ -55,6 +61,12 @@ pub(super) struct HiveDaemonControl {
     client: HiveIpcClient,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DaemonInputAcceptance {
+    Ack(AckResponse),
+    Worker(WorkerConversationInputResponse),
+}
+
 impl HiveDaemonControl {
     #[cfg(unix)]
     pub(super) async fn connect_discovered() -> Result<Self> {
@@ -80,8 +92,34 @@ impl HiveDaemonControl {
         Ok(control)
     }
 
+    #[cfg(unix)]
+    pub(super) async fn connect_explicit(socket_path: PathBuf, key_path: PathBuf) -> Result<Self> {
+        let mut config = HiveIpcClientConfig::new(socket_path.clone(), CLIENT_ID);
+        config.request_timeout = DEFAULT_REQUEST_TIMEOUT;
+        let client = HiveIpcClient::from_key_path(config, &key_path).with_context(|| {
+            format!(
+                "loading explicit Hive daemon IPC key at {}",
+                key_path.display()
+            )
+        })?;
+        let control = Self { client };
+        control
+            .healthcheck()
+            .await
+            .with_context(|| format!("Hive daemon unavailable at {}", socket_path.display()))?;
+        Ok(control)
+    }
+
     #[cfg(not(unix))]
     pub(super) async fn connect_discovered() -> Result<Self> {
+        bail!("Hive daemon IPC is unavailable: this platform has no Unix-domain socket support")
+    }
+
+    #[cfg(not(unix))]
+    pub(super) async fn connect_explicit(
+        _socket_path: PathBuf,
+        _key_path: PathBuf,
+    ) -> Result<Self> {
         bail!("Hive daemon IPC is unavailable: this platform has no Unix-domain socket support")
     }
 
@@ -130,13 +168,14 @@ impl HiveDaemonControl {
         wake_reason: &str,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
-        self.expect_ack(
+        self.expect_session_control(
             user_id,
             start_command(session_id),
             request_key(
                 idempotency_key,
                 unique_key(&format!("start:{session_id}:{wake_reason}")),
             ),
+            session_id,
             "start session",
         )
         .await
@@ -178,6 +217,285 @@ impl HiveDaemonControl {
         {
             ResponsePayload::Dispatch(response) => Ok((response.session_id, response.status)),
             payload => bail!("Hive dispatch returned unexpected response {payload:?}"),
+        }
+    }
+
+    /// Commit the Worker identity, private conversation, and its one-time
+    /// Introduction run as one daemon-owned idempotent mutation.
+    pub(super) async fn create_worker_introduction(
+        &self,
+        user_id: Option<&str>,
+        command: CreateWorkerIntroductionCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerIntroductionResponse> {
+        match self
+            .command(
+                user_id,
+                Command::CreateWorkerIntroduction(command),
+                Some(idempotency_key.to_string()),
+            )
+            .await?
+        {
+            ResponsePayload::WorkerIntroduction(response) => Ok(response),
+            payload => bail!("Hive Worker Introduction returned unexpected response {payload:?}"),
+        }
+    }
+
+    pub(super) async fn retry_worker_introduction(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<WorkerIntroductionActionResponse> {
+        self.worker_introduction_action(
+            user_id,
+            Command::RetryWorkerIntroduction(WorkerIntroductionCommand {
+                worker_id: worker_id.to_string(),
+            }),
+            idempotency_key,
+            "retry",
+        )
+        .await
+    }
+
+    pub(super) async fn skip_worker_introduction(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<WorkerIntroductionActionResponse> {
+        self.worker_introduction_action(
+            user_id,
+            Command::SkipWorkerIntroduction(WorkerIntroductionCommand {
+                worker_id: worker_id.to_string(),
+            }),
+            idempotency_key,
+            "skip",
+        )
+        .await
+    }
+
+    pub(super) async fn confirm_worker_introduction(
+        &self,
+        user_id: Option<&str>,
+        command: ConfirmWorkerIntroductionCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerIntroductionActionResponse> {
+        self.worker_introduction_action(
+            user_id,
+            Command::ConfirmWorkerIntroduction(command),
+            idempotency_key,
+            "confirm",
+        )
+        .await
+    }
+
+    pub(super) async fn return_worker_introduction_to_context(
+        &self,
+        user_id: Option<&str>,
+        command: ReturnWorkerIntroductionToContextCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerIntroductionActionResponse> {
+        self.worker_introduction_action(
+            user_id,
+            Command::ReturnWorkerIntroductionToContext(command),
+            idempotency_key,
+            "return to context",
+        )
+        .await
+    }
+
+    async fn worker_introduction_action(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: &str,
+        action: &str,
+    ) -> Result<WorkerIntroductionActionResponse> {
+        match self
+            .command(user_id, command, Some(idempotency_key.to_string()))
+            .await?
+        {
+            ResponsePayload::WorkerIntroductionAction(response) => Ok(response),
+            payload => {
+                bail!("Hive Worker Introduction {action} returned unexpected response {payload:?}")
+            }
+        }
+    }
+
+    pub(super) async fn update_worker(
+        &self,
+        user_id: Option<&str>,
+        command: UpdateWorkerCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerMutationResponse> {
+        self.worker_mutation(
+            user_id,
+            Command::UpdateWorker(command),
+            idempotency_key,
+            "update Worker",
+        )
+        .await
+    }
+
+    pub(super) async fn set_worker_status(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        expected_revision: u64,
+        status: WorkerTargetStatus,
+        idempotency_key: &str,
+    ) -> Result<WorkerMutationResponse> {
+        self.worker_mutation(
+            user_id,
+            Command::SetWorkerStatus(mitsuro_hive_protocol::SetWorkerStatusCommand {
+                worker_id: worker_id.to_string(),
+                expected_revision,
+                status,
+            }),
+            idempotency_key,
+            "set Worker status",
+        )
+        .await
+    }
+
+    async fn worker_mutation(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: &str,
+        action: &str,
+    ) -> Result<WorkerMutationResponse> {
+        match self
+            .command(user_id, command, Some(idempotency_key.to_string()))
+            .await?
+        {
+            ResponsePayload::WorkerMutation(response) => Ok(response),
+            payload => bail!("Hive {action} returned unexpected response {payload:?}"),
+        }
+    }
+
+    pub(super) async fn grant_worker_governor_recovery(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<WorkerGovernorRecoveryResponse> {
+        match self
+            .command(
+                user_id,
+                Command::GrantWorkerGovernorRecovery(GrantWorkerGovernorRecoveryCommand {
+                    worker_id: worker_id.to_string(),
+                }),
+                Some(idempotency_key.to_string()),
+            )
+            .await?
+        {
+            ResponsePayload::WorkerGovernorRecovery(response) => Ok(response),
+            payload => {
+                bail!("Hive Worker governor recovery returned unexpected response {payload:?}")
+            }
+        }
+    }
+
+    pub(super) async fn activate_or_resume_worker_workflow(
+        &self,
+        user_id: Option<&str>,
+        command: ActivateOrResumeWorkerWorkflowCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerWorkflowResponse> {
+        self.worker_workflow_mutation(
+            user_id,
+            Command::ActivateOrResumeWorkerWorkflow(command),
+            idempotency_key,
+            "activate or resume Worker Workflow",
+        )
+        .await
+    }
+
+    pub(super) async fn pause_worker_workflow(
+        &self,
+        user_id: Option<&str>,
+        command: WorkerWorkflowLifecycleCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerWorkflowResponse> {
+        self.worker_workflow_mutation(
+            user_id,
+            Command::PauseWorkerWorkflow(command),
+            idempotency_key,
+            "pause Worker Workflow",
+        )
+        .await
+    }
+
+    pub(super) async fn cancel_worker_workflow(
+        &self,
+        user_id: Option<&str>,
+        command: WorkerWorkflowLifecycleCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerWorkflowResponse> {
+        self.worker_workflow_mutation(
+            user_id,
+            Command::CancelWorkerWorkflow(command),
+            idempotency_key,
+            "cancel Worker Workflow",
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_worker_goal_acceptance(
+        &self,
+        user_id: Option<&str>,
+        command: ResolveWorkerGoalAcceptanceCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerGoalAcceptanceResponse> {
+        match self
+            .command(
+                user_id,
+                Command::ResolveWorkerGoalAcceptance(command),
+                Some(idempotency_key.to_string()),
+            )
+            .await?
+        {
+            ResponsePayload::WorkerGoalAcceptance(response) => Ok(response),
+            payload => bail!(
+                "Hive resolve Worker Goal acceptance returned unexpected response {payload:?}"
+            ),
+        }
+    }
+
+    async fn worker_workflow_mutation(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: &str,
+        action: &str,
+    ) -> Result<WorkerWorkflowResponse> {
+        match self
+            .command(user_id, command, Some(idempotency_key.to_string()))
+            .await?
+        {
+            ResponsePayload::WorkerWorkflow(response) => Ok(response),
+            payload => bail!("Hive {action} returned unexpected response {payload:?}"),
+        }
+    }
+
+    pub(super) async fn set_worker_workspace(
+        &self,
+        user_id: Option<&str>,
+        command: SetWorkerWorkspaceCommand,
+        idempotency_key: &str,
+    ) -> Result<WorkerWorkspaceResponse> {
+        match self
+            .command(
+                user_id,
+                Command::SetWorkerWorkspace(command),
+                Some(idempotency_key.to_string()),
+            )
+            .await?
+        {
+            ResponsePayload::WorkerWorkspace(response) => Ok(response),
+            payload => bail!("Hive Worker workspace returned unexpected response {payload:?}"),
         }
     }
 
@@ -252,10 +570,11 @@ impl HiveDaemonControl {
         session_id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
-        self.expect_ack(
+        self.expect_session_control(
             user_id,
             resume_command(session_id),
             request_key(idempotency_key, unique_key(&format!("resume:{session_id}"))),
+            session_id,
             "resume session",
         )
         .await
@@ -267,10 +586,11 @@ impl HiveDaemonControl {
         session_id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
-        self.expect_ack(
+        self.expect_session_control(
             user_id,
             pause_command(session_id),
             request_key(idempotency_key, unique_key(&format!("pause:{session_id}"))),
+            session_id,
             "pause session",
         )
         .await
@@ -284,13 +604,14 @@ impl HiveDaemonControl {
         reason: &str,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
-        self.expect_ack(
+        self.expect_session_control(
             user_id,
             schedule_command(session_id, wake_at_unix_ms, reason),
             request_key(
                 idempotency_key,
                 unique_key(&format!("schedule:{session_id}:{wake_at_unix_ms}")),
             ),
+            session_id,
             "schedule session",
         )
         .await
@@ -302,13 +623,36 @@ impl HiveDaemonControl {
         session_id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
-        self.expect_ack(
+        self.expect_session_control(
             user_id,
             cancel_command(session_id),
             request_key(idempotency_key, unique_key(&format!("cancel:{session_id}"))),
+            session_id,
             "cancel session",
         )
         .await
+    }
+
+    pub(super) async fn stop_worker_conversation(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkerMutationResponse> {
+        match self
+            .command(
+                user_id,
+                stop_worker_conversation_command(session_id),
+                Some(request_key(
+                    idempotency_key,
+                    unique_key(&format!("worker-stop:{session_id}")),
+                )),
+            )
+            .await?
+        {
+            ResponsePayload::WorkerMutation(response) => Ok(response),
+            payload => bail!("Hive Worker Stop returned unexpected response {payload:?}"),
+        }
     }
 
     pub(super) async fn delete(
@@ -332,15 +676,36 @@ impl HiveDaemonControl {
         session_id: &str,
         message: &str,
         idempotency_key: Option<&str>,
-    ) -> Result<()> {
-        self.expect_ack(
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
             user_id,
             message_command(session_id, message),
             request_key(
                 idempotency_key,
                 unique_key(&format!("message:{session_id}")),
             ),
+            session_id,
             "send message",
+        )
+        .await
+    }
+
+    pub(super) async fn send_worker_message(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
+            user_id,
+            worker_message_command(session_id, message),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("worker-message:{session_id}")),
+            ),
+            session_id,
+            "send Worker message",
         )
         .await
     }
@@ -391,6 +756,26 @@ impl HiveDaemonControl {
                 unique_key(&format!("group-stop:{group_id}")),
             ),
             "stop the group turn",
+        )
+        .await
+    }
+
+    pub(super) async fn group_archive(
+        &self,
+        user_id: Option<&str>,
+        group_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        self.expect_ack(
+            user_id,
+            Command::GroupArchive(GroupArchiveCommand {
+                group_id: group_id.to_string(),
+            }),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("group-archive:{group_id}")),
+            ),
+            "archive the group",
         )
         .await
     }
@@ -494,21 +879,33 @@ impl HiveDaemonControl {
         pending_id: &str,
         content: serde_json::Value,
         idempotency_key: Option<&str>,
-    ) -> Result<AckResponse> {
-        match self
-            .command(
-                user_id,
-                steer_command(session_id, pending_id, content),
-                Some(request_key(
-                    idempotency_key,
-                    stable_key("steer", pending_id),
-                )),
-            )
-            .await?
-        {
-            ResponsePayload::Ack(response) => Ok(response),
-            payload => bail!("Hive steer returned unexpected response {payload:?}"),
-        }
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
+            user_id,
+            steer_command(session_id, pending_id, content),
+            request_key(idempotency_key, stable_key("steer", pending_id)),
+            session_id,
+            "steer",
+        )
+        .await
+    }
+
+    pub(super) async fn steer_worker(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        pending_id: &str,
+        content: serde_json::Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
+            user_id,
+            worker_steer_command(session_id, pending_id, content),
+            request_key(idempotency_key, stable_key("worker-steer", pending_id)),
+            session_id,
+            "steer Worker",
+        )
+        .await
     }
 
     pub(super) async fn tool_approval(
@@ -540,17 +937,73 @@ impl HiveDaemonControl {
         tool_call_id: &str,
         response: &str,
         idempotency_key: Option<&str>,
-    ) -> Result<()> {
-        self.expect_ack(
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
             user_id,
             user_response_command(session_id, run_id, tool_call_id, response),
             request_key(
                 idempotency_key,
                 stable_key("response", &format!("{session_id}:{run_id}:{tool_call_id}")),
             ),
+            session_id,
             "submit user response",
         )
         .await
+    }
+
+    pub(super) async fn worker_user_response(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        response: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<DaemonInputAcceptance> {
+        self.expect_input_acceptance(
+            user_id,
+            worker_user_response_command(session_id, run_id, tool_call_id, response),
+            request_key(
+                idempotency_key,
+                stable_key(
+                    "worker-response",
+                    &format!("{session_id}:{run_id}:{tool_call_id}"),
+                ),
+            ),
+            session_id,
+            "submit Worker user response",
+        )
+        .await
+    }
+
+    async fn expect_input_acceptance(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: String,
+        session_id: &str,
+        operation: &str,
+    ) -> Result<DaemonInputAcceptance> {
+        match self
+            .command(user_id, command, Some(idempotency_key))
+            .await?
+        {
+            ResponsePayload::Ack(ack) if ack.accepted => Ok(DaemonInputAcceptance::Ack(ack)),
+            ResponsePayload::Ack(ack) => Err(HiveDaemonError::Remote {
+                code: "conflict".to_string(),
+                message: format!(
+                    "Hive daemon declined to {operation}: {}",
+                    ack.message
+                        .unwrap_or_else(|| "no reason provided".to_string())
+                ),
+            }
+            .into()),
+            ResponsePayload::WorkerConversationInput(response) => {
+                validate_worker_input_acceptance(&response, session_id)?;
+                Ok(DaemonInputAcceptance::Worker(response))
+            }
+            payload => bail!("Hive {operation} returned unexpected response {payload:?}"),
+        }
     }
 
     async fn expect_ack(
@@ -576,6 +1029,22 @@ impl HiveDaemonControl {
             .into()),
             payload => bail!("Hive {operation} returned unexpected response {payload:?}"),
         }
+    }
+
+    async fn expect_session_control(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: String,
+        session_id: &str,
+        operation: &str,
+    ) -> Result<()> {
+        decode_session_control_response(
+            self.command(user_id, command, Some(idempotency_key))
+                .await?,
+            session_id,
+            operation,
+        )
     }
 
     async fn expect_schedule(
@@ -605,6 +1074,33 @@ impl HiveDaemonControl {
             .await
             .map_err(HiveDaemonError::from)
             .context("Hive daemon command failed")
+    }
+}
+
+fn decode_session_control_response(
+    payload: ResponsePayload,
+    expected_session_id: &str,
+    operation: &str,
+) -> Result<()> {
+    match payload {
+        ResponsePayload::Session(response) if response.session_id == expected_session_id => Ok(()),
+        ResponsePayload::Session(response) => bail!(
+            "Hive {operation} returned session '{}' instead of '{expected_session_id}'",
+            response.session_id
+        ),
+        // Pre-SessionProjection daemons acknowledged these controls without a
+        // state projection. Preserve that exact legacy success shape only.
+        ResponsePayload::Ack(ack) if ack.accepted => Ok(()),
+        ResponsePayload::Ack(ack) => Err(HiveDaemonError::Remote {
+            code: "conflict".to_string(),
+            message: format!(
+                "Hive daemon declined to {operation}: {}",
+                ack.message
+                    .unwrap_or_else(|| "no reason provided".to_string())
+            ),
+        }
+        .into()),
+        payload => bail!("Hive {operation} returned unexpected response {payload:?}"),
     }
 }
 
@@ -672,6 +1168,12 @@ fn cancel_command(session_id: &str) -> Command {
     })
 }
 
+fn stop_worker_conversation_command(session_id: &str) -> Command {
+    Command::StopWorkerConversation(SessionCommand {
+        session_id: session_id.to_string(),
+    })
+}
+
 fn delete_command(session_id: &str) -> Command {
     Command::DeleteSession(SessionCommand {
         session_id: session_id.to_string(),
@@ -680,6 +1182,13 @@ fn delete_command(session_id: &str) -> Command {
 
 fn message_command(session_id: &str, message: &str) -> Command {
     Command::SendMessage(MessageCommand {
+        session_id: session_id.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn worker_message_command(session_id: &str, message: &str) -> Command {
+    Command::WorkerSendMessage(MessageCommand {
         session_id: session_id.to_string(),
         message: message.to_string(),
     })
@@ -725,6 +1234,14 @@ fn steer_command(session_id: &str, pending_id: &str, content: serde_json::Value)
     })
 }
 
+fn worker_steer_command(session_id: &str, pending_id: &str, content: serde_json::Value) -> Command {
+    Command::WorkerSteer(SteerCommand {
+        session_id: session_id.to_string(),
+        pending_id: Some(pending_id.to_string()),
+        content,
+    })
+}
+
 fn tool_approval_command(
     session_id: &str,
     run_id: &str,
@@ -751,6 +1268,50 @@ fn user_response_command(
         tool_call_id: tool_call_id.to_string(),
         response: response.to_string(),
     })
+}
+
+fn worker_user_response_command(
+    session_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    response: &str,
+) -> Command {
+    Command::WorkerUserResponse(UserResponseCommand {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        tool_call_id: tool_call_id.to_string(),
+        response: response.to_string(),
+    })
+}
+
+fn validate_worker_input_acceptance(
+    response: &WorkerConversationInputResponse,
+    expected_session_id: &str,
+) -> Result<()> {
+    if response.session_id != expected_session_id
+        || response.worker_id.trim().is_empty()
+        || response.run_id.trim().is_empty()
+    {
+        bail!("Hive Worker input acceptance has an invalid durable binding");
+    }
+    match response.disposition {
+        WorkerConversationInputDisposition::Queued
+            if response.canonical_message_id.is_some_and(|id| id > 0)
+                && response.staged_input_id.is_none() =>
+        {
+            Ok(())
+        }
+        WorkerConversationInputDisposition::Staged
+            if response.canonical_message_id.is_none()
+                && response
+                    .staged_input_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        _ => bail!("Hive Worker input acceptance has an invalid disposition projection"),
+    }
 }
 
 fn stable_key(operation: &str, identity: &str) -> String {
@@ -916,12 +1477,25 @@ fn env_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use chrono::{TimeZone, Utc};
+    #[cfg(unix)]
+    use mitsuro_core::storage::{
+        accept_worker_conversation_input_in_transaction, AcceptWorkerConversationInput,
+        AcceptWorkerConversationInputResult, Database, HiveRunExecutionContextV1, HiveRunStore,
+        HiveWorker, HiveWorkerStore, NewHiveWorker, WorkerConversationLane,
+    };
+    #[cfg(unix)]
     use mitsuro_hive_protocol::{
         read_frame, unix_time_millis, write_frame, AuthPolicy, ClientFrame, DaemonRuntimeStats,
-        ProtocolErrorPayload, ProtocolVersion, RecoverResponse, ResponseEnvelope, RuntimeEvent,
-        ServerFrame, SubscriptionAccepted,
+        ExtensionEvent, LaggedEvent, ProtocolErrorPayload, ProtocolVersion, RecoverResponse,
+        ReplayGapEvent, ResponseEnvelope, RuntimeEvent, ServerFrame, SubscriptionAccepted,
     };
     use mitsuro_hive_protocol::{HiveIpcClientConfig, IpcKey};
+    #[cfg(unix)]
+    use rusqlite::{params, Transaction, TransactionBehavior};
     #[cfg(unix)]
     use tokio::net::{UnixListener, UnixStream};
 
@@ -994,6 +1568,337 @@ mod tests {
         )
         .await
         .expect("runtime event should write");
+    }
+
+    #[cfg(unix)]
+    fn worker_chat_fixture(database_path: &Path) -> HiveWorker {
+        let database = Database::new(database_path).expect("database should initialize");
+        database
+            .conn()
+            .execute(
+                "INSERT INTO sessions (
+                     id, title, created_at, updated_at, session_type,
+                     workspace_mode, working_dir, project_dir
+                 ) VALUES (
+                     'worker-dm', 'Worker DM', '2026-08-27T00:00:00.000000Z',
+                     '2026-08-27T00:00:00.000000Z', 'hive', 'neutral', NULL, NULL
+                 )",
+                [],
+            )
+            .expect("Worker DM session should exist");
+        let worker = HiveWorkerStore::new(
+            Database::new(database_path).expect("Worker store database should open"),
+        )
+        .create(&NewHiveWorker {
+            dm_session_id: Some("worker-dm".into()),
+            ..NewHiveWorker::new("worker-one")
+        })
+        .expect("Worker should bind its exact DM");
+        database
+            .conn()
+            .execute(
+                "INSERT INTO hive_controllers (
+                     id, scope_key, session_id, status, timezone,
+                     max_concurrent_runs, worker_id, created_at, updated_at
+                 ) VALUES (
+                     'worker-controller', 'worker:worker-one', 'worker-dm', 'active', 'UTC',
+                     1, ?1, '2026-08-27T00:00:00.000000Z',
+                     '2026-08-27T00:00:00.000000Z'
+                 )",
+                [&worker.id],
+            )
+            .expect("Worker controller should exist");
+        worker
+    }
+
+    #[cfg(unix)]
+    fn seed_worker_chat_run(
+        database_path: &Path,
+        worker: &HiveWorker,
+        input_id: &str,
+        run_id: &str,
+        body: &str,
+        event_sequence: i64,
+    ) -> i64 {
+        let database = Database::new(database_path).expect("Worker run database should open");
+        let tx = Transaction::new_unchecked(database.conn(), TransactionBehavior::Immediate)
+            .expect("Worker run transaction should start");
+        let accepted = accept_worker_conversation_input_in_transaction(
+            &tx,
+            &AcceptWorkerConversationInput {
+                input_id: input_id.to_string(),
+                request_id: input_id.to_string(),
+                worker_id: worker.id.clone(),
+                owner_user_id: worker.user_id.clone(),
+                session_id: "worker-dm".into(),
+                controller_id: "worker-controller".into(),
+                body: body.to_string(),
+                accepted_at: Utc
+                    .with_ymd_and_hms(2026, 8, 27, 0, 0, 1)
+                    .single()
+                    .expect("test timestamp should exist"),
+                new_run_id: run_id.to_string(),
+                run_config: serde_json::json!({
+                    "model": worker.model,
+                    "model_key": worker.model_key,
+                    "model_catalog_revision": worker.model_catalog_revision,
+                    "permission_mode": worker.permission_mode.as_str(),
+                    "working_dir": null,
+                    "project_dir": null,
+                }),
+                execution_context: HiveRunExecutionContextV1::worker_conversation_neutral(
+                    worker.id.clone(),
+                    worker.revision,
+                    WorkerConversationLane::DirectMessage,
+                )
+                .expect("Worker DM context should be valid"),
+                priority: 0,
+                concurrency_key: Some(format!("worker:{}:dm", worker.id)),
+                max_attempts: 2,
+            },
+        )
+        .expect("Worker input should be accepted");
+        let (accepted_run_id, message_id) = match accepted {
+            AcceptWorkerConversationInputResult::Queued { run_id, message_id } => {
+                (run_id, message_id)
+            }
+            AcceptWorkerConversationInputResult::Staged { .. } => {
+                panic!("first Worker fixture input unexpectedly staged")
+            }
+        };
+        assert_eq!(accepted_run_id, run_id);
+        tx.execute(
+            "INSERT INTO hive_controller_events (
+                 controller_id, sequence, event_type, run_id, payload_json, created_at
+             ) VALUES (
+                 'worker-controller', ?1, 'run_queued', ?2, ?3,
+                 '2026-08-27T00:00:01.000000Z'
+             )",
+            params![
+                event_sequence,
+                run_id,
+                serde_json::json!({"run_id": run_id}).to_string(),
+            ],
+        )
+        .expect("Worker fixture event should exist");
+        tx.commit().expect("Worker run fixture should commit");
+        message_id
+    }
+
+    #[cfg(unix)]
+    fn worker_agentic_event(
+        session_id: &str,
+        run_id: &str,
+        sequence: i64,
+        payload: serde_json::Value,
+    ) -> EventEnvelope {
+        EventEnvelope {
+            version: ProtocolVersion::CURRENT,
+            session_id: Some(session_id.to_string()),
+            run_id: Some(run_id.to_string()),
+            sequence: Some(sequence),
+            emitted_at_unix_ms: unix_time_millis(),
+            event: HiveEvent::Extension(ExtensionEvent {
+                name: "agentic_event".into(),
+                payload,
+            }),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn send_worker_success_events(
+        stream: &mut UnixStream,
+        session_id: &str,
+        worker_id: &str,
+        run_id: &str,
+        first_sequence: i64,
+    ) {
+        let payloads = [
+            serde_json::json!({
+                "type": "worker_response_pending",
+                "worker_id": worker_id,
+                "session_id": session_id,
+                "run_id": run_id,
+            }),
+            serde_json::json!({
+                "type": "worker_response_committed",
+                "worker_id": worker_id,
+                "session_id": session_id,
+                "run_id": run_id,
+            }),
+            serde_json::json!({"type": "turn_complete", "turn": 1, "has_more": false}),
+            serde_json::json!({
+                "type": "finish",
+                "session_id": session_id,
+                "stop_reason": "completed",
+            }),
+        ];
+        for (offset, payload) in payloads.into_iter().enumerate() {
+            write_frame(
+                stream,
+                &ServerFrame::Event(worker_agentic_event(
+                    session_id,
+                    run_id,
+                    first_sequence + offset as i64,
+                    payload,
+                )),
+            )
+            .await
+            .expect("Worker success event should write");
+        }
+    }
+
+    #[cfg(unix)]
+    fn seed_materialized_staged_worker_run(
+        database_path: &Path,
+        worker: &HiveWorker,
+        predecessor_run_id: &str,
+        staged_input_id: &str,
+        successor_run_id: &str,
+        body: &str,
+        successor_event_sequence: i64,
+    ) -> i64 {
+        let database = Database::new(database_path).expect("Worker staging database should open");
+        let tx = Transaction::new_unchecked(database.conn(), TransactionBehavior::Immediate)
+            .expect("Worker staging transaction should start");
+        let staged = accept_worker_conversation_input_in_transaction(
+            &tx,
+            &AcceptWorkerConversationInput {
+                input_id: staged_input_id.to_string(),
+                request_id: staged_input_id.to_string(),
+                worker_id: worker.id.clone(),
+                owner_user_id: worker.user_id.clone(),
+                session_id: "worker-dm".into(),
+                controller_id: "worker-controller".into(),
+                body: body.to_string(),
+                accepted_at: Utc
+                    .with_ymd_and_hms(2026, 8, 27, 0, 0, 2)
+                    .single()
+                    .expect("test timestamp should exist"),
+                new_run_id: "unused-staged-run-id".into(),
+                run_config: serde_json::json!({
+                    "model": worker.model,
+                    "model_key": worker.model_key,
+                    "model_catalog_revision": worker.model_catalog_revision,
+                    "permission_mode": worker.permission_mode.as_str(),
+                    "working_dir": null,
+                    "project_dir": null,
+                }),
+                execution_context: HiveRunExecutionContextV1::worker_conversation_neutral(
+                    worker.id.clone(),
+                    worker.revision,
+                    WorkerConversationLane::DirectMessage,
+                )
+                .expect("Worker DM context should be valid"),
+                priority: 0,
+                concurrency_key: Some(format!("worker:{}:dm", worker.id)),
+                max_attempts: 2,
+            },
+        )
+        .expect("second Worker input should stage");
+        let staged = match staged {
+            AcceptWorkerConversationInputResult::Staged {
+                active_run_id,
+                input,
+            } => {
+                assert_eq!(active_run_id, predecessor_run_id);
+                input
+            }
+            AcceptWorkerConversationInputResult::Queued { .. } => {
+                panic!("second Worker fixture input unexpectedly queued")
+            }
+        };
+        assert_eq!(staged.id, staged_input_id);
+
+        tx.execute(
+            "INSERT INTO messages (
+                 session_id, role, content, created_at, idempotency_key
+             ) VALUES (
+                 'worker-dm', 'user', ?1, '2026-08-27T00:00:03.000000Z', ?2
+             )",
+            params![
+                serde_json::json!([{ "type": "text", "text": body }]).to_string(),
+                format!("worker-request:{staged_input_id}:canonical"),
+            ],
+        )
+        .expect("materialized Worker input message should exist");
+        let canonical_message_id = tx.last_insert_rowid();
+        tx.commit()
+            .expect("staged Worker fixture should commit before successor insert");
+
+        let store = HiveRunStore::new(
+            Database::new(database_path).expect("Worker successor store should open"),
+        );
+        let mut successor = store
+            .get_run(predecessor_run_id)
+            .expect("predecessor lookup should succeed")
+            .expect("predecessor should exist");
+        successor.id = successor_run_id.to_string();
+        successor.objective = body.to_string();
+        successor.objective_message_id = Some(canonical_message_id);
+        successor.conversation_through_message_id = Some(canonical_message_id);
+        successor.created_at = "2026-08-27T00:00:03.000000Z".into();
+        successor.available_at = successor.created_at.clone();
+        successor.updated_at = successor.created_at.clone();
+        if let Some(governor) = successor.governor.as_mut() {
+            governor.run_id = successor_run_id.to_string();
+        }
+        store
+            .insert_run(&successor)
+            .expect("materialized Worker successor should exist");
+
+        let database =
+            Database::new(database_path).expect("Worker projection database should open");
+        let tx = Transaction::new_unchecked(database.conn(), TransactionBehavior::Immediate)
+            .expect("Worker projection transaction should start");
+        // This transport regression supplies the already-proven materialized
+        // projection directly; response-commit provenance is exercised in the
+        // core storage suite and is outside this IPC follower fixture.
+        tx.execute_batch("DROP TRIGGER hive_worker_conversation_inputs_materialize_guard;")
+            .expect("fixture may bypass the response-commit prerequisite");
+        tx.execute(
+            "UPDATE hive_worker_conversation_inputs
+             SET state = 'materialized', canonical_message_id = ?2,
+                 assigned_run_id = ?3,
+                 materialized_at = '2026-08-27T00:00:03.000000Z'
+             WHERE id = ?1",
+            params![staged_input_id, canonical_message_id, successor_run_id],
+        )
+        .expect("staged Worker input should point at its exact successor");
+        tx.execute(
+            "INSERT INTO hive_controller_events (
+                 controller_id, sequence, event_type, run_id, payload_json, created_at
+             ) VALUES (
+                 'worker-controller', ?1, 'run_queued', ?2, ?3,
+                 '2026-08-27T00:00:03.000000Z'
+             )",
+            params![
+                successor_event_sequence,
+                successor_run_id,
+                serde_json::json!({"run_id": successor_run_id}).to_string(),
+            ],
+        )
+        .expect("successor Worker fixture event should exist");
+        tx.commit()
+            .expect("materialized Worker projection should commit");
+        canonical_message_id
+    }
+
+    #[cfg(unix)]
+    fn mark_worker_run_succeeded_for_replay(database_path: &Path, run_id: &str) {
+        Database::new(database_path)
+            .expect("terminal replay database should open")
+            .conn()
+            .execute(
+                "UPDATE hive_runs
+                 SET status = 'succeeded', attempt_count = 1,
+                     started_at = '2026-08-27T00:00:04.000000Z',
+                     finished_at = '2026-08-27T00:00:05.000000Z',
+                     updated_at = '2026-08-27T00:00:05.000000Z'
+                 WHERE id = ?1",
+                [run_id],
+            )
+            .expect("transport replay fixture should be durably terminal");
     }
 
     #[cfg(unix)]
@@ -1222,10 +2127,18 @@ mod tests {
             Command::ScheduleSession(_)
         ));
         assert!(matches!(cancel_command("s"), Command::CancelSession(_)));
+        assert!(matches!(
+            stop_worker_conversation_command("worker-dm"),
+            Command::StopWorkerConversation(_)
+        ));
         assert!(matches!(delete_command("s"), Command::DeleteSession(_)));
         assert!(matches!(
             message_command("s", "hello"),
             Command::SendMessage(_)
+        ));
+        assert!(matches!(
+            worker_message_command("worker-dm", "hello"),
+            Command::WorkerSendMessage(_)
         ));
         assert!(matches!(
             priority_command("s", "high"),
@@ -1246,6 +2159,10 @@ mod tests {
             Command::Steer(_)
         ));
         assert!(matches!(
+            worker_steer_command("worker-dm", "p", serde_json::json!([])),
+            Command::WorkerSteer(_)
+        ));
+        assert!(matches!(
             tool_approval_command("s", "r", "t", true),
             Command::ToolApproval(_)
         ));
@@ -1253,12 +2170,470 @@ mod tests {
             user_response_command("s", "r", "t", "yes"),
             Command::UserResponse(_)
         ));
+        assert!(matches!(
+            worker_user_response_command("worker-dm", "r", "t", "yes"),
+            Command::WorkerUserResponse(_)
+        ));
+    }
+
+    #[test]
+    fn session_control_decoder_accepts_exact_projection_and_legacy_ack_only() {
+        let projection = ResponsePayload::Session(mitsuro_hive_protocol::SessionResponse {
+            session_id: "session-1".to_string(),
+            state: serde_json::json!({"status": "paused"}),
+        });
+        decode_session_control_response(projection, "session-1", "pause session")
+            .expect("exact committed session projection must be accepted");
+        decode_session_control_response(
+            ResponsePayload::Ack(AckResponse {
+                accepted: true,
+                message: None,
+            }),
+            "session-1",
+            "pause session",
+        )
+        .expect("legacy accepted acknowledgement remains compatible");
+
+        let wrong_projection = ResponsePayload::Session(mitsuro_hive_protocol::SessionResponse {
+            session_id: "session-2".to_string(),
+            state: serde_json::json!({"status": "paused"}),
+        });
+        assert!(
+            decode_session_control_response(wrong_projection, "session-1", "pause session")
+                .is_err()
+        );
+        assert!(decode_session_control_response(
+            ResponsePayload::Ack(AckResponse {
+                accepted: false,
+                message: Some("declined".to_string()),
+            }),
+            "session-1",
+            "pause session"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn worker_input_acceptance_is_exactly_bound_and_shape_checked() {
+        let queued = WorkerConversationInputResponse {
+            worker_id: "worker-1".into(),
+            session_id: "worker-dm".into(),
+            disposition: WorkerConversationInputDisposition::Queued,
+            run_id: "run-1".into(),
+            canonical_message_id: Some(41),
+            staged_input_id: None,
+        };
+        assert!(validate_worker_input_acceptance(&queued, "worker-dm").is_ok());
+
+        let staged = WorkerConversationInputResponse {
+            disposition: WorkerConversationInputDisposition::Staged,
+            canonical_message_id: None,
+            staged_input_id: Some("input-2".into()),
+            ..queued
+        };
+        assert!(validate_worker_input_acceptance(&staged, "worker-dm").is_ok());
+        assert!(validate_worker_input_acceptance(&staged, "other-dm").is_err());
+
+        let malformed = WorkerConversationInputResponse {
+            canonical_message_id: Some(42),
+            ..staged
+        };
+        assert!(validate_worker_input_acceptance(&malformed, "worker-dm").is_err());
     }
 
     #[test]
     fn actor_preserves_the_authenticated_user_exactly() {
         assert_eq!(actor(Some("alice")).user_id.as_deref(), Some("alice"));
         assert_eq!(actor(None).user_id, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn introduction_actions_preserve_exact_worker_actor_and_replay_key() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..5 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                let payload = if index == 0 {
+                    ready_stats()
+                } else {
+                    ResponsePayload::WorkerIntroductionAction(WorkerIntroductionActionResponse {
+                        worker_id: "worker-1".into(),
+                        session_id: "worker-dm".into(),
+                        run_id: (index == 1).then(|| "retry-run".into()),
+                        status: match index {
+                            1 => "queued",
+                            2 => "skipped",
+                            3 => "confirmed",
+                            _ => "awaiting_context",
+                        }
+                        .into(),
+                        autonomy_eligible: matches!(index, 2 | 3),
+                        cancellation_requested: false,
+                    })
+                };
+                respond(&mut stream, &request, payload).await;
+                requests.push(request);
+            }
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "introduction-action-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let retried = control
+            .retry_worker_introduction(Some("alice"), "worker-1", "retry-key")
+            .await
+            .expect("retry should decode");
+        assert_eq!(retried.run_id.as_deref(), Some("retry-run"));
+        let skipped = control
+            .skip_worker_introduction(Some("alice"), "worker-1", "skip-key")
+            .await
+            .expect("skip should decode");
+        assert!(skipped.autonomy_eligible);
+        let confirmed = control
+            .confirm_worker_introduction(
+                Some("alice"),
+                ConfirmWorkerIntroductionCommand {
+                    worker_id: "worker-1".into(),
+                    proposal_id: "proposal-1".into(),
+                    proposal_revision: 3,
+                    selected_facts: vec![mitsuro_hive_protocol::WorkerIntroductionSelectedFact {
+                        fact_id: "fact-1".into(),
+                        final_statement: "Help with runtime reliability.".into(),
+                    }],
+                },
+                "confirm-key",
+            )
+            .await
+            .expect("confirm should decode");
+        assert!(confirmed.autonomy_eligible);
+        let returned = control
+            .return_worker_introduction_to_context(
+                Some("alice"),
+                ReturnWorkerIntroductionToContextCommand {
+                    worker_id: "worker-1".into(),
+                    proposal_id: "proposal-1".into(),
+                    proposal_revision: 3,
+                    decision: mitsuro_hive_protocol::WorkerIntroductionReturnDecision::KeepTalking,
+                },
+                "keep-key",
+            )
+            .await
+            .expect("keep talking should decode");
+        assert_eq!(returned.status, "awaiting_context");
+
+        let requests = server.await.expect("test daemon should finish");
+        let retry = &requests[1];
+        assert_eq!(retry.actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(retry.idempotency_key, "retry-key");
+        assert!(matches!(
+            &retry.command,
+            Command::RetryWorkerIntroduction(command) if command.worker_id == "worker-1"
+        ));
+        let skip = &requests[2];
+        assert_eq!(skip.actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(skip.idempotency_key, "skip-key");
+        assert!(matches!(
+            &skip.command,
+            Command::SkipWorkerIntroduction(command) if command.worker_id == "worker-1"
+        ));
+        let confirm = &requests[3];
+        assert_eq!(confirm.actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(confirm.idempotency_key, "confirm-key");
+        assert!(matches!(
+            &confirm.command,
+            Command::ConfirmWorkerIntroduction(command)
+                if command.worker_id == "worker-1"
+                    && command.proposal_id == "proposal-1"
+                    && command.proposal_revision == 3
+                    && command.selected_facts.len() == 1
+        ));
+        let keep = &requests[4];
+        assert_eq!(keep.actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(keep.idempotency_key, "keep-key");
+        assert!(matches!(
+            &keep.command,
+            Command::ReturnWorkerIntroductionToContext(command)
+                if command.worker_id == "worker-1"
+                    && command.decision
+                        == mitsuro_hive_protocol::WorkerIntroductionReturnDecision::KeepTalking
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_mutations_preserve_actor_revision_and_replay_key() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..4 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                let payload = match index {
+                    0 => ready_stats(),
+                    1 | 2 => ResponsePayload::WorkerMutation(WorkerMutationResponse {
+                        worker_id: "worker-1".into(),
+                        revision: index as u64 + 1,
+                        status: if index == 2 { "paused" } else { "active" }.into(),
+                        cancellation_requests: Vec::new(),
+                        attention: Vec::new(),
+                    }),
+                    3 => ResponsePayload::WorkerGovernorRecovery(WorkerGovernorRecoveryResponse {
+                        worker_id: "worker-1".into(),
+                        grant_id: Some("recovery-grant-1".into()),
+                        expires_at: Some("2026-08-25T01:05:00.000000Z".into()),
+                        status: "granted".into(),
+                        bypass_unresolved_provider_call: true,
+                    }),
+                    _ => unreachable!(),
+                };
+                respond(&mut stream, &request, payload).await;
+                requests.push(request);
+            }
+            requests
+        });
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-mutation-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        control
+            .update_worker(
+                Some("alice"),
+                UpdateWorkerCommand {
+                    worker_id: "worker-1".into(),
+                    expected_revision: 1,
+                    display_name: "Worker One".into(),
+                    avatar_color: None,
+                    model: None,
+                    model_key: None,
+                    model_catalog_revision: None,
+                    permission_mode: "supervised".into(),
+                    autonomy: "manual".into(),
+                    heartbeat_interval_secs: None,
+                    identity: None,
+                    soul: None,
+                },
+                "worker-update-key",
+            )
+            .await
+            .expect("update response should decode");
+        control
+            .set_worker_status(
+                Some("alice"),
+                "worker-1",
+                2,
+                WorkerTargetStatus::Paused,
+                "worker-pause-key",
+            )
+            .await
+            .expect("pause response should decode");
+        let recovery = control
+            .grant_worker_governor_recovery(Some("alice"), "worker-1", "worker-recovery-key")
+            .await
+            .expect("recovery response should decode");
+        assert_eq!(recovery.grant_id.as_deref(), Some("recovery-grant-1"));
+
+        let requests = server.await.expect("test daemon should finish");
+        assert_eq!(requests[1].actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(requests[1].idempotency_key, "worker-update-key");
+        assert!(matches!(
+            &requests[1].command,
+            Command::UpdateWorker(command)
+                if command.worker_id == "worker-1" && command.expected_revision == 1
+        ));
+        assert_eq!(requests[2].actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(requests[2].idempotency_key, "worker-pause-key");
+        assert!(matches!(
+            &requests[2].command,
+            Command::SetWorkerStatus(command)
+                if command.worker_id == "worker-1"
+                    && command.expected_revision == 2
+                    && command.status == WorkerTargetStatus::Paused
+        ));
+        assert_eq!(requests[3].actor.user_id.as_deref(), Some("alice"));
+        assert_eq!(requests[3].idempotency_key, "worker-recovery-key");
+        assert!(matches!(
+            &requests[3].command,
+            Command::GrantWorkerGovernorRecovery(command)
+                if command.worker_id == "worker-1"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_workflow_and_workspace_commands_preserve_actor_revisions_and_keys() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..5 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                let payload = match index {
+                    0 => ready_stats(),
+                    1 => ResponsePayload::WorkerWorkflow(WorkerWorkflowResponse {
+                        disposition: mitsuro_hive_protocol::WorkerWorkflowDisposition::Created,
+                        worker_id: "worker-1".into(),
+                        worker_revision: 7,
+                        session_id: "worker-dm".into(),
+                        goal_id: "goal-1".into(),
+                        goal_revision: 11,
+                        goal_status: "active".into(),
+                        active: Some(mitsuro_hive_protocol::WorkerWorkflowRunProjection {
+                            run_id: "run-1".into(),
+                            run_status: "queued".into(),
+                            attempt_id: "attempt-1".into(),
+                            attempt_status: "running".into(),
+                        }),
+                        affected_run_ids: Vec::new(),
+                        affected_attempt_ids: Vec::new(),
+                        cancellation_requests: Vec::new(),
+                    }),
+                    2 => ResponsePayload::WorkerWorkflow(WorkerWorkflowResponse {
+                        disposition: mitsuro_hive_protocol::WorkerWorkflowDisposition::Paused,
+                        worker_id: "worker-1".into(),
+                        worker_revision: 7,
+                        session_id: "worker-dm".into(),
+                        goal_id: "goal-1".into(),
+                        goal_revision: 12,
+                        goal_status: "paused".into(),
+                        active: None,
+                        affected_run_ids: vec!["run-1".into()],
+                        affected_attempt_ids: vec!["attempt-1".into()],
+                        cancellation_requests: Vec::new(),
+                    }),
+                    3 => ResponsePayload::WorkerWorkflow(WorkerWorkflowResponse {
+                        disposition: mitsuro_hive_protocol::WorkerWorkflowDisposition::Cancelled,
+                        worker_id: "worker-1".into(),
+                        worker_revision: 7,
+                        session_id: "worker-dm".into(),
+                        goal_id: "goal-1".into(),
+                        goal_revision: 13,
+                        goal_status: "cancelled".into(),
+                        active: None,
+                        affected_run_ids: Vec::new(),
+                        affected_attempt_ids: Vec::new(),
+                        cancellation_requests: Vec::new(),
+                    }),
+                    _ => ResponsePayload::WorkerWorkspace(WorkerWorkspaceResponse {
+                        worker_id: "worker-1".into(),
+                        revision: 8,
+                        session_id: "worker-dm".into(),
+                        workspace_mode: mitsuro_hive_protocol::WorkerWorkspaceMode::Selected,
+                        working_dir: Some("/work/project".into()),
+                        project_dir: Some("/work/project".into()),
+                    }),
+                };
+                respond(&mut stream, &request, payload).await;
+                requests.push(request);
+            }
+            requests
+        });
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-workflow-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        control
+            .activate_or_resume_worker_workflow(
+                Some("alice"),
+                ActivateOrResumeWorkerWorkflowCommand {
+                    worker_id: "worker-1".into(),
+                    expected_worker_revision: 7,
+                    goal_id: "goal-1".into(),
+                    expected_goal_revision: 11,
+                },
+                "workflow-activate-key",
+            )
+            .await
+            .expect("activation response should decode");
+        for (pause, key, revision) in [
+            (true, "workflow-pause-key", 11),
+            (false, "workflow-cancel-key", 12),
+        ] {
+            let command = WorkerWorkflowLifecycleCommand {
+                worker_id: "worker-1".into(),
+                expected_worker_revision: 7,
+                goal_id: "goal-1".into(),
+                expected_goal_revision: revision,
+                reason: if pause { "Pause" } else { "Cancel" }.into(),
+            };
+            if pause {
+                control
+                    .pause_worker_workflow(Some("alice"), command, key)
+                    .await
+                    .expect("pause response should decode");
+            } else {
+                control
+                    .cancel_worker_workflow(Some("alice"), command, key)
+                    .await
+                    .expect("cancel response should decode");
+            }
+        }
+        control
+            .set_worker_workspace(
+                Some("alice"),
+                SetWorkerWorkspaceCommand {
+                    worker_id: "worker-1".into(),
+                    expected_worker_revision: 7,
+                    workspace_mode: mitsuro_hive_protocol::WorkerWorkspaceMode::Selected,
+                    working_dir: Some("/work/project".into()),
+                    project_dir: Some("/work/project".into()),
+                },
+                "worker-workspace-key",
+            )
+            .await
+            .expect("workspace response should decode");
+
+        let requests = server.await.expect("test daemon should finish");
+        for request in &requests[1..] {
+            assert_eq!(request.actor.user_id.as_deref(), Some("alice"));
+        }
+        assert_eq!(requests[1].idempotency_key, "workflow-activate-key");
+        assert_eq!(requests[2].idempotency_key, "workflow-pause-key");
+        assert_eq!(requests[3].idempotency_key, "workflow-cancel-key");
+        assert_eq!(requests[4].idempotency_key, "worker-workspace-key");
+        assert!(matches!(
+            &requests[1].command,
+            Command::ActivateOrResumeWorkerWorkflow(command)
+                if command.expected_worker_revision == 7
+                    && command.expected_goal_revision == 11
+        ));
+        assert!(matches!(
+            &requests[2].command,
+            Command::PauseWorkerWorkflow(command) if command.expected_goal_revision == 11
+        ));
+        assert!(matches!(
+            &requests[3].command,
+            Command::CancelWorkerWorkflow(command) if command.expected_goal_revision == 12
+        ));
+        assert!(matches!(
+            &requests[4].command,
+            Command::SetWorkerWorkspace(command)
+                if command.expected_worker_revision == 7
+                    && command.workspace_mode
+                        == mitsuro_hive_protocol::WorkerWorkspaceMode::Selected
+        ));
     }
 
     #[cfg(unix)]
@@ -1848,6 +3223,879 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn daemon_chat_routes_exact_worker_dm_through_typed_input_before_sse() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        let worker = worker_chat_fixture(&database_path);
+        let canonical_message_id = seed_worker_chat_run(
+            &database_path,
+            &worker,
+            "worker-chat-key",
+            "worker-run-1",
+            "hello Worker",
+            1,
+        );
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let expected_worker_id = worker.id.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            let mut live_subscription = None;
+            for _ in 0..3 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(0),
+                            }),
+                        )
+                        .await;
+                        live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::WorkerConversationInput(
+                                WorkerConversationInputResponse {
+                                    worker_id: expected_worker_id.clone(),
+                                    session_id: command.session_id.clone(),
+                                    disposition: WorkerConversationInputDisposition::Queued,
+                                    run_id: "worker-run-1".into(),
+                                    canonical_message_id: Some(canonical_message_id),
+                                    staged_input_id: None,
+                                },
+                            ),
+                        )
+                        .await;
+                        let mut live_subscription = live_subscription
+                            .take()
+                            .expect("Worker send must follow its live subscription");
+                        send_worker_success_events(
+                            &mut live_subscription,
+                            "worker-dm",
+                            &expected_worker_id,
+                            "worker-run-1",
+                            2,
+                        )
+                        .await;
+                    }
+                    unexpected => panic!(
+                        "Worker /api/chat path emitted an unexpected daemon command: {unexpected:?}"
+                    ),
+                }
+                requests.push(request);
+            }
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-chat-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path,
+                "worker-dm",
+                "hello Worker",
+                None,
+                true,
+                Some("worker-chat-key"),
+            )
+            .await
+            .expect("Worker chat turn should use the typed daemon path");
+        let mut saw_pending = false;
+        let mut saw_committed = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("fresh Worker response should reach SSE")
+                .expect("fresh Worker response channel should remain open");
+            match event {
+                AgenticEvent::WorkerResponsePending { run_id, .. } => {
+                    assert_eq!(run_id, "worker-run-1");
+                    saw_pending = true;
+                }
+                AgenticEvent::WorkerResponseCommitted { run_id, .. } => {
+                    assert_eq!(run_id, "worker-run-1");
+                    saw_committed = true;
+                }
+                AgenticEvent::Finish {
+                    session_id,
+                    stop_reason,
+                } => {
+                    assert_eq!(session_id, "worker-dm");
+                    assert_eq!(stop_reason, "completed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_pending && saw_committed);
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        let Command::Subscribe(subscribe) = &requests[1].command else {
+            panic!("Worker chat must subscribe before its typed send");
+        };
+        assert_eq!(subscribe.session_id, "worker-dm");
+        assert_eq!(subscribe.after_sequence, None);
+        assert_eq!(subscribe.replay_limit, Some(0));
+        assert_eq!(requests[2].idempotency_key, "worker-chat-key");
+        assert!(matches!(
+            &requests[2].command,
+            Command::WorkerSendMessage(command)
+                if command.session_id == "worker-dm" && command.message == "hello Worker"
+        ));
+        assert!(requests
+            .iter()
+            .all(|request| !matches!(&request.command, Command::StartSession(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_chat_replays_only_the_exact_queued_worker_run_after_transport_retry() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        let worker = worker_chat_fixture(&database_path);
+        let canonical_message_id = seed_worker_chat_run(
+            &database_path,
+            &worker,
+            "worker-replay-key",
+            "worker-replay-run",
+            "retry this Worker message",
+            1,
+        );
+        mark_worker_run_succeeded_for_replay(&database_path, "worker-replay-run");
+
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let expected_worker_id = worker.id.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            let mut held_live_subscription = None;
+            for _ in 0..4 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) if command.after_sequence.is_none() => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(8),
+                            }),
+                        )
+                        .await;
+                        held_live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::WorkerConversationInput(
+                                WorkerConversationInputResponse {
+                                    worker_id: expected_worker_id.clone(),
+                                    session_id: command.session_id.clone(),
+                                    disposition: WorkerConversationInputDisposition::Queued,
+                                    run_id: "worker-replay-run".into(),
+                                    canonical_message_id: Some(canonical_message_id),
+                                    staged_input_id: None,
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(8),
+                            }),
+                        )
+                        .await;
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(EventEnvelope {
+                                version: ProtocolVersion::CURRENT,
+                                session_id: Some("worker-dm".into()),
+                                run_id: None,
+                                sequence: None,
+                                emitted_at_unix_ms: unix_time_millis(),
+                                event: HiveEvent::Lagged(LaggedEvent {
+                                    skipped: 3,
+                                    resume_after_sequence: Some(1),
+                                }),
+                            }),
+                        )
+                        .await
+                        .expect("session-scoped lag signal should write");
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(worker_agentic_event(
+                                "worker-dm",
+                                "unrelated-worker-run",
+                                3,
+                                serde_json::json!({
+                                    "type": "worker_response_pending",
+                                    "worker_id": expected_worker_id,
+                                    "session_id": "worker-dm",
+                                    "run_id": "unrelated-worker-run",
+                                }),
+                            )),
+                        )
+                        .await
+                        .expect("foreign pending boundary should write");
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(worker_agentic_event(
+                                "worker-dm",
+                                "unrelated-worker-run",
+                                4,
+                                serde_json::json!({
+                                    "type": "finish",
+                                    "session_id": "worker-dm",
+                                    "stop_reason": "completed",
+                                }),
+                            )),
+                        )
+                        .await
+                        .expect("foreign finish boundary should write");
+                        send_worker_success_events(
+                            &mut stream,
+                            "worker-dm",
+                            &expected_worker_id,
+                            "worker-replay-run",
+                            5,
+                        )
+                        .await;
+                    }
+                    unexpected => panic!("unexpected queued replay command: {unexpected:?}"),
+                }
+                requests.push(request);
+            }
+            drop(held_live_subscription);
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-replay-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path,
+                "worker-dm",
+                "retry this Worker message",
+                None,
+                false,
+                Some("worker-replay-key"),
+            )
+            .await
+            .expect("idempotent Worker replay should attach to its exact run");
+        let mut lagged = Vec::new();
+        let mut observed_run_ids = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("historical Worker response should replay")
+                .expect("historical Worker replay channel should remain open");
+            match event {
+                AgenticEvent::Lagged { skipped } => lagged.push(skipped),
+                AgenticEvent::WorkerResponsePending { run_id, .. }
+                | AgenticEvent::WorkerResponseCommitted { run_id, .. } => {
+                    observed_run_ids.push(run_id);
+                }
+                AgenticEvent::Finish { stop_reason, .. } => {
+                    assert_eq!(stop_reason, "completed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(lagged.contains(&1), "replay must force a canonical reload");
+        assert!(
+            lagged.contains(&3),
+            "session-scoped daemon lag must reach the exact follower"
+        );
+        assert_eq!(observed_run_ids, ["worker-replay-run", "worker-replay-run"]);
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        assert!(matches!(&requests[1].command, Command::Subscribe(command)
+            if command.after_sequence.is_none() && command.replay_limit == Some(0)));
+        assert!(matches!(
+            &requests[2].command,
+            Command::WorkerSendMessage(_)
+        ));
+        assert!(matches!(&requests[3].command, Command::Subscribe(command)
+            if command.after_sequence == Some(0) && command.replay_limit == Some(256)));
+        assert!(requests
+            .iter()
+            .all(|request| !matches!(&request.command, Command::StartSession(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_chat_fails_closed_on_session_scoped_worker_replay_gap() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        let worker = worker_chat_fixture(&database_path);
+        let canonical_message_id = seed_worker_chat_run(
+            &database_path,
+            &worker,
+            "worker-gap-key",
+            "worker-gap-run",
+            "retry pruned Worker message",
+            1,
+        );
+
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let expected_worker_id = worker.id.clone();
+        let server = tokio::spawn(async move {
+            let mut held_live_subscription = None;
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) if command.after_sequence.is_none() => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(5),
+                            }),
+                        )
+                        .await;
+                        held_live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::WorkerConversationInput(
+                                WorkerConversationInputResponse {
+                                    worker_id: expected_worker_id.clone(),
+                                    session_id: command.session_id.clone(),
+                                    disposition: WorkerConversationInputDisposition::Queued,
+                                    run_id: "worker-gap-run".into(),
+                                    canonical_message_id: Some(canonical_message_id),
+                                    staged_input_id: None,
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(5),
+                            }),
+                        )
+                        .await;
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(EventEnvelope {
+                                version: ProtocolVersion::CURRENT,
+                                session_id: Some("worker-dm".into()),
+                                run_id: None,
+                                sequence: None,
+                                emitted_at_unix_ms: unix_time_millis(),
+                                event: HiveEvent::ReplayGap(ReplayGapEvent {
+                                    requested_after: 0,
+                                    earliest_available: 3,
+                                }),
+                            }),
+                        )
+                        .await
+                        .expect("session-scoped replay gap should write");
+                    }
+                    unexpected => panic!("unexpected replay-gap command: {unexpected:?}"),
+                }
+                requests.push(request);
+            }
+            drop(held_live_subscription);
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-gap-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path,
+                "worker-dm",
+                "retry pruned Worker message",
+                None,
+                false,
+                Some("worker-gap-key"),
+            )
+            .await
+            .expect("typed Worker acceptance should establish its follower");
+        assert!(matches!(
+            receiver.recv().await.expect("reload marker should arrive"),
+            AgenticEvent::Lagged { skipped: 1 }
+        ));
+        let terminal = receiver.recv().await.expect("replay gap should terminate");
+        let AgenticEvent::Error { error } = terminal else {
+            panic!("expected replay-gap error, got {terminal:?}");
+        };
+        assert!(error.contains("replay gap"));
+        assert!(matches!(
+            receiver.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        assert!(matches!(&requests[3].command, Command::Subscribe(command)
+            if command.after_sequence == Some(0) && command.replay_limit == Some(256)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_chat_replays_the_exact_materialized_successor_for_a_staged_retry() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        let worker = worker_chat_fixture(&database_path);
+        seed_worker_chat_run(
+            &database_path,
+            &worker,
+            "worker-predecessor-key",
+            "worker-predecessor-run",
+            "first Worker message",
+            1,
+        );
+        let successor_message_id = seed_materialized_staged_worker_run(
+            &database_path,
+            &worker,
+            "worker-predecessor-run",
+            "worker-staged-key",
+            "worker-successor-run",
+            "second Worker message",
+            2,
+        );
+        mark_worker_run_succeeded_for_replay(&database_path, "worker-successor-run");
+
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let expected_worker_id = worker.id.clone();
+        let server = tokio::spawn(async move {
+            let mut held_live_subscription = None;
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) if command.after_sequence.is_none() => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(8),
+                            }),
+                        )
+                        .await;
+                        held_live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::WorkerConversationInput(
+                                WorkerConversationInputResponse {
+                                    worker_id: expected_worker_id.clone(),
+                                    session_id: command.session_id.clone(),
+                                    disposition: WorkerConversationInputDisposition::Staged,
+                                    run_id: "worker-predecessor-run".into(),
+                                    canonical_message_id: None,
+                                    staged_input_id: Some("worker-staged-key".into()),
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: Some(8),
+                            }),
+                        )
+                        .await;
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(worker_agentic_event(
+                                "worker-dm",
+                                "unrelated-worker-run",
+                                3,
+                                serde_json::json!({
+                                    "type": "worker_response_pending",
+                                    "worker_id": expected_worker_id,
+                                    "session_id": "worker-dm",
+                                    "run_id": "unrelated-worker-run",
+                                }),
+                            )),
+                        )
+                        .await
+                        .expect("foreign staged-replay event should write");
+                        write_frame(
+                            &mut stream,
+                            &ServerFrame::Event(worker_agentic_event(
+                                "worker-dm",
+                                "unrelated-worker-run",
+                                4,
+                                serde_json::json!({
+                                    "type": "finish",
+                                    "session_id": "worker-dm",
+                                    "stop_reason": "completed",
+                                }),
+                            )),
+                        )
+                        .await
+                        .expect("foreign staged-replay finish should write");
+                        send_worker_success_events(
+                            &mut stream,
+                            "worker-dm",
+                            &expected_worker_id,
+                            "worker-successor-run",
+                            5,
+                        )
+                        .await;
+                    }
+                    unexpected => panic!("unexpected staged replay command: {unexpected:?}"),
+                }
+                requests.push(request);
+            }
+            drop(held_live_subscription);
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-staged-replay-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path.clone(),
+                "worker-dm",
+                "second Worker message",
+                None,
+                false,
+                Some("worker-staged-key"),
+            )
+            .await
+            .expect("staged Worker retry should establish its exact successor follower");
+        let mut staged_successors = Vec::new();
+        let mut observed_run_ids = Vec::new();
+        let mut saw_reload = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("materialized successor response should replay")
+                .expect("materialized successor replay channel should remain open");
+            match event {
+                AgenticEvent::WorkerInputStaged {
+                    active_run_id,
+                    staged_input_id,
+                    successor_run_id,
+                    ..
+                } => {
+                    assert_eq!(active_run_id, "worker-predecessor-run");
+                    assert_eq!(staged_input_id, "worker-staged-key");
+                    staged_successors.push(successor_run_id);
+                }
+                AgenticEvent::Lagged { skipped: 1 } => saw_reload = true,
+                AgenticEvent::WorkerResponsePending { run_id, .. }
+                | AgenticEvent::WorkerResponseCommitted { run_id, .. } => {
+                    observed_run_ids.push(run_id);
+                }
+                AgenticEvent::Finish { stop_reason, .. } => {
+                    assert_eq!(stop_reason, "completed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            staged_successors,
+            [None, Some("worker-successor-run".to_string())]
+        );
+        assert!(
+            saw_reload,
+            "historical successor replay must reload transcript"
+        );
+        assert_eq!(
+            observed_run_ids,
+            ["worker-successor-run", "worker-successor-run"]
+        );
+        let projection: (String, i64, String) = Database::new(&database_path)
+            .expect("projection database should open")
+            .conn()
+            .query_row(
+                "SELECT state, canonical_message_id, assigned_run_id
+                 FROM hive_worker_conversation_inputs WHERE id = 'worker-staged-key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("materialized projection should remain durable");
+        assert_eq!(
+            projection,
+            (
+                "materialized".to_string(),
+                successor_message_id,
+                "worker-successor-run".to_string()
+            )
+        );
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        assert!(matches!(&requests[3].command, Command::Subscribe(command)
+            if command.after_sequence == Some(1) && command.replay_limit == Some(256)));
+        assert!(requests
+            .iter()
+            .all(|request| !matches!(&request.command, Command::StartSession(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_chat_rejects_a_foreign_worker_response_for_the_requested_dm() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        worker_chat_fixture(&database_path);
+        let database = Database::new(&database_path).expect("foreign Worker database should open");
+        database
+            .conn()
+            .execute(
+                "INSERT INTO sessions (
+                     id, title, created_at, updated_at, session_type,
+                     workspace_mode, working_dir, project_dir
+                 ) VALUES (
+                     'worker-dm-b', 'Worker DM B', '2026-08-27T00:00:00.000000Z',
+                     '2026-08-27T00:00:00.000000Z', 'hive', 'neutral', NULL, NULL
+                 )",
+                [],
+            )
+            .expect("foreign Worker DM session should exist");
+        let foreign_worker = HiveWorkerStore::new(
+            Database::new(&database_path).expect("foreign Worker store should open"),
+        )
+        .create(&NewHiveWorker {
+            dm_session_id: Some("worker-dm-b".into()),
+            ..NewHiveWorker::new("worker-two")
+        })
+        .expect("foreign same-owner Worker should exist");
+
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let foreign_worker_id = foreign_worker.id.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            let mut held_live_subscription = None;
+            for _ in 0..3 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: None,
+                            }),
+                        )
+                        .await;
+                        held_live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::WorkerConversationInput(
+                                WorkerConversationInputResponse {
+                                    worker_id: foreign_worker_id.clone(),
+                                    // Echoing A's session gets through the wire-shape
+                                    // validator; the classified Worker identity must
+                                    // still reject B before any follower can spawn.
+                                    session_id: command.session_id.clone(),
+                                    disposition: WorkerConversationInputDisposition::Queued,
+                                    run_id: "foreign-worker-run".into(),
+                                    canonical_message_id: Some(1),
+                                    staged_input_id: None,
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    unexpected => panic!("unexpected foreign Worker command: {unexpected:?}"),
+                }
+                requests.push(request);
+            }
+            drop(held_live_subscription);
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "foreign-worker-response-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let error = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path,
+                "worker-dm",
+                "message for Worker A",
+                None,
+                false,
+                Some("worker-a-key"),
+            )
+            .await
+            .expect_err("Worker B response must not attach to Worker A's DM");
+        assert!(format!("{error:#}").contains("requested durable DM"));
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        assert!(matches!(&requests[1].command, Command::Subscribe(_)));
+        assert!(matches!(
+            &requests[2].command,
+            Command::WorkerSendMessage(_)
+        ));
+        assert!(requests
+            .iter()
+            .all(|request| !matches!(&request.command, Command::StartSession(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_worker_chat_rejects_untyped_ack_without_starting_a_generic_session() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let database_path = temp.path().join("runtime.db");
+        worker_chat_fixture(&database_path);
+
+        let socket_path = temp.path().join("hive.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            let mut held_live_subscription = None;
+            for _ in 0..3 {
+                let (mut stream, request) =
+                    accept_authenticated_request(&listener, &server_key).await;
+                match &request.command {
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
+                    Command::Subscribe(command) => {
+                        respond(
+                            &mut stream,
+                            &request,
+                            ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                                session_id: command.session_id.clone(),
+                                high_water_sequence: None,
+                            }),
+                        )
+                        .await;
+                        held_live_subscription = Some(stream);
+                        requests.push(request);
+                        continue;
+                    }
+                    Command::WorkerSendMessage(_) => {
+                        respond(&mut stream, &request, accepted()).await;
+                    }
+                    unexpected => panic!("unexpected first Worker command: {unexpected:?}"),
+                }
+                requests.push(request);
+            }
+            drop(held_live_subscription);
+            requests
+        });
+
+        let control = HiveDaemonControl::connect_client(HiveIpcClient::new(
+            HiveIpcClientConfig::new(socket_path, "worker-ack-fence-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::HiveRuntimeManager::build(Some(control), false);
+        let error = manager
+            .begin_daemon_chat_turn_for_user(
+                database_path,
+                "worker-dm",
+                "first Worker message",
+                None,
+                true,
+                Some("worker-first-key"),
+            )
+            .await
+            .expect_err("Worker ACK must not cross into generic session startup");
+        assert!(format!("{error:#}").contains("refusing generic session startup"));
+        drop(manager);
+
+        let requests = server.await.expect("test daemon should finish");
+        assert!(requests
+            .iter()
+            .all(|request| !matches!(&request.command, Command::StartSession(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn first_chat_message_sends_starts_then_replays_without_local_runtime() {
         let temp = tempfile::tempdir().expect("temp directory should exist");
         let socket_path = temp.path().join("hive.sock");
@@ -1856,7 +4104,7 @@ mod tests {
         let server_key = key.clone();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let (mut stream, request) =
                     accept_authenticated_request(&listener, &server_key).await;
                 match &request.command {
@@ -1903,7 +4151,14 @@ mod tests {
         .expect("healthcheck should succeed");
         let manager = super::super::HiveRuntimeManager::build(Some(control), false);
         let mut receiver = manager
-            .begin_daemon_chat_turn_for_user("session-1", "hello", Some("alice"), true, None)
+            .begin_daemon_chat_turn_for_user(
+                temp.path().join("runtime.db"),
+                "session-1",
+                "hello",
+                Some("alice"),
+                true,
+                None,
+            )
             .await
             .expect("first chat turn should be accepted");
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -1920,10 +4175,15 @@ mod tests {
         assert!(manager.runtimes.read().await.is_empty());
 
         let requests = server.await.expect("test daemon should finish");
-        assert!(matches!(requests[1].command, Command::SendMessage(_)));
-        assert!(matches!(requests[2].command, Command::StartSession(_)));
-        let Command::Subscribe(subscribe) = &requests[3].command else {
-            panic!("fourth request was not subscribe");
+        let Command::Subscribe(live_cursor) = &requests[1].command else {
+            panic!("second request was not the pre-accept live cursor");
+        };
+        assert_eq!(live_cursor.after_sequence, None);
+        assert_eq!(live_cursor.replay_limit, Some(0));
+        assert!(matches!(requests[2].command, Command::SendMessage(_)));
+        assert!(matches!(requests[3].command, Command::StartSession(_)));
+        let Command::Subscribe(subscribe) = &requests[4].command else {
+            panic!("fifth request was not the replay subscription");
         };
         assert_eq!(subscribe.after_sequence, Some(0));
         assert_eq!(subscribe.replay_limit, Some(256));

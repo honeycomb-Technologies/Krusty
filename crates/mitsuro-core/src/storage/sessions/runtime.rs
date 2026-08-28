@@ -10,12 +10,20 @@ const LIST_ACTIVE_SESSIONS_SQL_ALL: &str =
             agent_state, pinned_at, archived_at, agent_started_at, agent_last_event_at
              FROM sessions
              WHERE agent_state != 'idle'
+               AND NOT EXISTS (
+                   SELECT 1 FROM hive_group_worker_lanes lane
+                   WHERE lane.session_id = sessions.id
+               )
              ORDER BY id";
 const LIST_ACTIVE_SESSIONS_SQL_BY_USER: &str =
     "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision,
             agent_state, pinned_at, archived_at, agent_started_at, agent_last_event_at
              FROM sessions
              WHERE agent_state != 'idle' AND user_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM hive_group_worker_lanes lane
+                   WHERE lane.session_id = sessions.id
+               )
              ORDER BY id";
 
 impl SessionManager {
@@ -40,7 +48,11 @@ impl SessionManager {
 
     /// List sessions with active agents (not idle)
     pub fn list_active_sessions(&self) -> Result<Vec<(String, AgentState)>> {
-        AgentStateStore::new(&self.db).list_active_sessions()
+        Ok(self
+            .list_active_session_details_for_user(None)?
+            .into_iter()
+            .map(|(session, state)| (session.id, state))
+            .collect())
     }
 
     /// List active sessions with session metadata and optional ownership filtering.

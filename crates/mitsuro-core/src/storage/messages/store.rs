@@ -53,6 +53,213 @@ impl<'a> MessageStore<'a> {
         Ok(())
     }
 
+    /// Persist one canonical message for a session-scoped idempotency key and
+    /// return its stable row id.
+    ///
+    /// The first committed payload is authoritative. A retry that supplies
+    /// the same key adopts that row without replacing its role, content, or
+    /// timestamp. Reserving the SQLite writer before the lookup makes the
+    /// read/insert sequence deterministic across concurrent connections.
+    pub fn save_message_once(
+        &self,
+        session_id: &str,
+        role: &str,
+        content_json: &str,
+        idempotency_key: &str,
+    ) -> Result<i64> {
+        ensure!(
+            !idempotency_key.trim().is_empty(),
+            "message idempotency key is empty"
+        );
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, role, content, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND idempotency_key = ?2",
+                params![session_id, idempotency_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let canonical = if let Some(existing) = existing {
+            existing
+        } else {
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO messages (
+                     session_id, role, content, created_at, idempotency_key
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, role, content_json, now, idempotency_key],
+            )?;
+            let message_id = tx.last_insert_rowid();
+            tx.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, session_id],
+            )?;
+            (message_id, role.to_string(), content_json.to_string(), now)
+        };
+        tx.commit()?;
+
+        // Re-indexing the adopted row is intentional: if a process died after
+        // the canonical commit but before best-effort episode indexing, an
+        // idempotent retry repairs that secondary projection.
+        if let Err(error) = EpisodeStore::new(self.db).record_message(
+            session_id,
+            canonical.0,
+            &canonical.1,
+            &canonical.2,
+            &canonical.3,
+        ) {
+            tracing::warn!(
+                session_id,
+                message_id = canonical.0,
+                error = %error,
+                "Idempotent canonical message saved but episodic recall indexing failed"
+            );
+        }
+
+        Ok(canonical.0)
+    }
+
+    /// Persist the assistant opening only if this conversation is still empty.
+    ///
+    /// The immediate transaction makes the emptiness check and insert one
+    /// writer-serialized decision: if a user message commits first, the
+    /// opening is rejected instead of appearing to answer a user who never saw
+    /// it. A retry adopts only the same keyed assistant row, and only when it
+    /// is still the session's first message.
+    pub fn save_first_assistant_once(
+        &self,
+        session_id: &str,
+        content_json: &str,
+        idempotency_key: &str,
+    ) -> Result<i64> {
+        ensure!(
+            !idempotency_key.trim().is_empty(),
+            "message idempotency key is empty"
+        );
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, role, content, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND idempotency_key = ?2",
+                params![session_id, idempotency_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let canonical = if let Some(existing) = existing {
+            ensure!(
+                existing.1 == "assistant",
+                "first-assistant idempotency key belongs to a non-assistant message"
+            );
+            let earlier: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE session_id = ?1 AND id < ?2",
+                params![session_id, existing.0],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                earlier == 0,
+                "keyed assistant message is not the session's first message"
+            );
+            existing
+        } else {
+            let message_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                message_count == 0,
+                "session already has messages; refusing a late assistant opening"
+            );
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO messages (
+                     session_id, role, content, created_at, idempotency_key
+                 ) VALUES (?1, 'assistant', ?2, ?3, ?4)",
+                params![session_id, content_json, now, idempotency_key],
+            )?;
+            let message_id = tx.last_insert_rowid();
+            tx.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, session_id],
+            )?;
+            (
+                message_id,
+                "assistant".to_string(),
+                content_json.to_string(),
+                now,
+            )
+        };
+        tx.commit()?;
+
+        if let Err(error) = EpisodeStore::new(self.db).record_message(
+            session_id,
+            canonical.0,
+            &canonical.1,
+            &canonical.2,
+            &canonical.3,
+        ) {
+            tracing::warn!(
+                session_id,
+                message_id = canonical.0,
+                error = %error,
+                "First assistant message saved but episodic recall indexing failed"
+            );
+        }
+
+        Ok(canonical.0)
+    }
+
+    /// Load the canonical message reserved by a session-scoped idempotency
+    /// key without exposing the underlying database connection to callers.
+    pub fn load_message_by_idempotency_key(
+        &self,
+        session_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<StoredMessageRecord>> {
+        ensure!(
+            !idempotency_key.trim().is_empty(),
+            "message idempotency key is empty"
+        );
+        self.db
+            .conn()
+            .query_row(
+                "SELECT id, role, content, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND idempotency_key = ?2",
+                params![session_id, idempotency_key],
+                |row| {
+                    Ok(StoredMessageRecord {
+                        id: row.get(0)?,
+                        role: row.get(1)?,
+                        content_json: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Durably queue a live steering message without exposing it as canonical
     /// model history until the active run reaches a safe boundary.
     pub fn queue_pending_steering(

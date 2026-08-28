@@ -55,6 +55,7 @@ pub mod pinch_context;
 pub mod pinch_session;
 pub mod plan_handler;
 pub mod progress;
+pub mod provider_governance;
 pub mod run_spec;
 pub mod state;
 pub mod stream;
@@ -62,6 +63,9 @@ pub mod subagent;
 pub mod summarizer;
 mod tool_control;
 pub mod user_hooks;
+pub mod worker_conversation;
+pub mod worker_goal;
+pub mod worker_introduction;
 
 use serde::{Deserialize, Serialize};
 
@@ -86,14 +90,24 @@ pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
 pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapshot};
-pub use observability::ProviderCallTraceContext;
+pub use observability::{ProviderCallTraceContext, ProviderCallTraceOutcome};
 pub use orchestrator::OrchestratorServices;
 pub use pinch_context::{PinchContext, PinchContextInput};
 pub use pinch_session::{
     create_pinched_session, CreatePinchedSessionRequest, CreatePinchedSessionResult,
 };
 pub use progress::{ActionClass, ProgressGuardAction, ProgressGuardTelemetry, ProgressLedger};
-pub use run_spec::{RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError};
+pub use provider_governance::{
+    bounded_reservation, conservative_text_token_reservation, freeze_worker_model_pricing,
+    WorkerProviderAdmission, WorkerProviderCallGovernor, WorkerProviderCallKind,
+    WorkerProviderCallPermit, WorkerProviderCallSlot, WorkerProviderCompletion,
+    WorkerProviderCompletionAcceptance, WorkerProviderGovernorBinding,
+    WorkerProviderTerminalOutcome,
+};
+pub use run_spec::{
+    RunContextMode, RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError,
+    WorkerGoalExecutionBinding, WorkerGoalExecutionContext, WORKER_GOAL_TOOL_CAPABILITY_CEILING,
+};
 pub use state::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
 pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
@@ -101,6 +115,37 @@ pub use summarizer::{generate_summary, SummarizationResult};
 pub use user_hooks::{
     PackageHookConfig, PackageHookLoadReport, UserHook, UserHookExecutor, UserHookManager,
     UserHookResult, UserHookSource, UserHookType, UserPostToolHook, UserPreToolHook,
+};
+pub use worker_conversation::{
+    SqliteWorkerConversationResponseCommitter, WorkerConversationResponseCommit,
+    WorkerConversationResponseCommitDisposition, WorkerConversationResponseCommitError,
+    WorkerConversationResponseCommitInput, WorkerConversationResponseCommitter,
+};
+pub use worker_goal::{
+    WorkerGoalAttemptOutcome, WorkerGoalEffectSummary, WorkerGoalEvidence, WorkerGoalEvidenceKind,
+    WorkerGoalOutcomeCommit, WorkerGoalOutcomeCommitDisposition, WorkerGoalOutcomeCommitError,
+    WorkerGoalOutcomeCommitInput, WorkerGoalOutcomeCommitter, WorkerGoalOutcomeCounters,
+    WorkerGoalOutcomeInputError, MAX_WORKER_GOAL_EFFECT_SUMMARY_BYTES,
+    MAX_WORKER_GOAL_EVIDENCE_ITEMS, MAX_WORKER_GOAL_EVIDENCE_SUMMARY_BYTES,
+    MAX_WORKER_GOAL_PROVIDER_CALL_IDS,
+};
+pub use worker_introduction::{
+    confirm_worker_introduction, confirm_worker_introduction_in_transaction,
+    fallback_worker_introduction_onboarding_reply_intent,
+    fallback_worker_introduction_opening_intent, list_due_worker_introduction_reviews,
+    materialize_due_worker_introduction_review_runs_fenced,
+    materialize_worker_introduction_review_run_fenced,
+    parse_worker_introduction_onboarding_reply_intent, parse_worker_introduction_opening_intent,
+    render_worker_introduction_onboarding_reply, render_worker_introduction_opening,
+    return_worker_introduction_to_context, return_worker_introduction_to_context_in_transaction,
+    review_worker_introduction, worker_introduction_onboarding_reply_intent_instructions,
+    worker_introduction_opening_intent_instructions, ConfirmWorkerIntroductionRequest,
+    DueWorkerIntroductionReview, MaterializedWorkerIntroductionReviewRun,
+    ReturnWorkerIntroductionToContextRequest, WorkerIntroductionAcknowledgement,
+    WorkerIntroductionOnboardingReplyIntentV1, WorkerIntroductionOpeningIntentV1,
+    WorkerIntroductionOpeningTone, WorkerIntroductionPresentationContext,
+    WorkerIntroductionQuestionTopic, WorkerIntroductionReviewOutcome,
+    WorkerIntroductionReviewRequest, WORKER_INTRODUCTION_PRESENTATION_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,10 +1,13 @@
 use serde_json::json;
 
 use crate::storage::reports::{promote_report_content, CreateReportInput};
-use crate::storage::{refresh_current_snapshot, Database, MemoryStore, MemoryType, ReportStore};
+use crate::storage::{
+    refresh_current_snapshot, CanonicalMemoryInput, Database, MemoryAclScope, MemoryNamespace,
+    MemorySource, MemoryStore, MemoryType, ReportStore,
+};
 use crate::tools::registry::{ToolContext, ToolResult};
 
-use super::Params;
+use super::{resolve_reader_scope, Params};
 
 pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
     let Some(title) = params.title.as_deref().filter(|value| !value.is_empty()) else {
@@ -24,6 +27,14 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
         Err(e) => return ToolResult::error(format!("Database error: {e}")),
     };
 
+    // Report creation is also an access boundary. Resolve the exact durable
+    // session/Worker identity before writing so a forged ToolContext cannot
+    // create owner-shared artifacts or promote Worker-private conclusions.
+    let writer = match resolve_reader_scope(ctx, &db) {
+        Ok(writer) => writer,
+        Err(e) => return ToolResult::error(format!("Report access denied: {e}")),
+    };
+
     let store = ReportStore::new(db);
     let project_dir = ctx.project_dir.as_ref().map(|p| p.to_string_lossy());
     let report_root = ctx
@@ -33,7 +44,11 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
     let summary = params.summary.as_deref().unwrap_or("");
     let tags = params.tags.unwrap_or_default();
     let sources = params.sources.unwrap_or_default();
-    let user_id = ctx.user_id.as_deref();
+    let user_id = writer.user_id.as_deref();
+    let report_scope = match writer.report_scope() {
+        Ok(scope) => scope,
+        Err(e) => return ToolResult::error(format!("Report access denied: {e}")),
+    };
     let promotion_memory_type = if params.promote_to_memory {
         match params.memory_type.as_deref() {
             Some(raw) => match raw.parse::<MemoryType>() {
@@ -60,6 +75,7 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
         summary,
         tags: &tags,
         sources: &sources,
+        scope: report_scope,
     }) {
         Ok(report_id) => {
             let promoted_memory = if let Some(memory_type) = promotion_memory_type {
@@ -82,13 +98,35 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
                     }
                 };
                 let memory_content = promote_report_content(&report);
-                match memory_store.save_or_update_by_title(
-                    memory_type,
-                    &report.title,
-                    &memory_content,
-                    project_dir.as_deref(),
-                    user_id,
-                ) {
+                let promoted = if let (Some(namespace_id), Some(source_worker_id)) =
+                    (report.scope.namespace_id(), report.scope.source_worker_id())
+                {
+                    let mut input = CanonicalMemoryInput::new(
+                        memory_type,
+                        format!("report.promotion:{source_worker_id}:{}", report.id),
+                        &report.title,
+                        &memory_content,
+                    );
+                    input.project_dir = project_dir.as_deref().map(str::to_string);
+                    input.user_id = report.owner_user_id.clone();
+                    input.namespace = MemoryNamespace::Crew;
+                    input.namespace_id = Some(namespace_id.to_string());
+                    input.acl_scope = MemoryAclScope::Worker;
+                    input.source = MemorySource::Tool;
+                    input.source_session_id = Some(report.session_id.clone());
+                    memory_store
+                        .save_canonical(&input)
+                        .map(|memory| (memory, true))
+                } else {
+                    memory_store.save_or_update_by_title(
+                        memory_type,
+                        &report.title,
+                        &memory_content,
+                        project_dir.as_deref(),
+                        user_id,
+                    )
+                };
+                match promoted {
                     Ok((memory, created)) => Some(json!({
                         "id": memory.id,
                         "memory_type": memory.memory_type.as_str(),

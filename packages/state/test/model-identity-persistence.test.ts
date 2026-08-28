@@ -48,7 +48,10 @@ Deno.test('session and default persistence forward exact model identity', async 
       },
     }),
   };
-  const getState = () => ({ sessionId: 'session-1' }) as SessionStoreState;
+  const getState = () => ({
+    sessionId: 'session-1',
+    sessionType: 'code',
+  }) as SessionStoreState;
 
   await persistSessionModel(
     client,
@@ -73,6 +76,61 @@ Deno.test('session and default persistence forward exact model identity', async 
     'default persistence must retain the exact key',
   );
   assertDeepEquals(reloads, 1, 'session persistence should refresh the list once');
+});
+
+Deno.test('Hive session model persistence remains runtime-owned', async () => {
+  const updates: Array<{ id: string; data: unknown }> = [];
+  const defaults: Array<{ model: string | null; key: ModelKey | null | undefined }> = [];
+  let reloads = 0;
+  const client = {
+    updateSession: async (id: string, data: unknown) => {
+      updates.push({ id, data });
+      return {};
+    },
+    setCurrentModel: async (
+      model: string | null,
+      key?: ModelKey | null,
+    ) => {
+      defaults.push({ model, key });
+      return { ok: true };
+    },
+  } as unknown as MitsuroClient;
+  const sessionsStore = {
+    getState: () => ({
+      loadSessions: () => {
+        reloads += 1;
+      },
+    }),
+  };
+  const getState = () => ({
+    sessionId: 'worker-dm',
+    sessionType: 'hive',
+  }) as SessionStoreState;
+
+  await persistSessionModel(
+    client,
+    sessionsStore as never,
+    getState,
+    exactGrokKey.model_id,
+    exactGrokKey,
+  );
+  await persistCurrentModel(client, exactGrokKey.model_id, exactGrokKey);
+
+  assertDeepEquals(
+    updates,
+    [],
+    'generic session persistence must not write Hive runtime-owned metadata',
+  );
+  assertDeepEquals(
+    reloads,
+    0,
+    'skipping a Hive session update must not reload the session list',
+  );
+  assertDeepEquals(
+    defaults,
+    [{ model: 'grok-4.5', key: exactGrokKey }],
+    'global current-model persistence must remain independent of the Hive fence',
+  );
 });
 
 Deno.test('legacy model persistence remains slug-only compatible', async () => {

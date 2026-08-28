@@ -4,6 +4,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info};
 
 use crate::ai::providers::{AuthHeader, ProviderId};
+use crate::ai::transport_policy::{build_provider_http_client, provider_http_client_builder};
 use crate::constants;
 
 use super::client::AiClient;
@@ -17,14 +18,21 @@ const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20";
 impl AiClient {
     /// Create the HTTP client with configuration optimized for SSE streaming
     pub(super) fn create_http_client() -> Client {
-        Client::builder()
+        provider_http_client_builder()
             .user_agent("Mitsuro/1.0")
             .connect_timeout(constants::http::CONNECT_TIMEOUT)
             .timeout(constants::http::STREAM_TIMEOUT)
             .build()
             .unwrap_or_else(|e| {
-                error!("Failed to build HTTP client: {}. Using default client.", e);
-                Client::new()
+                error!(
+                    "Failed to build configured HTTP client: {}. Using fail-closed fallback client.",
+                    e
+                );
+                build_provider_http_client().unwrap_or_else(|fallback_error| {
+                    panic!(
+                        "failed to build provider HTTP client without redirects: {fallback_error}"
+                    )
+                })
             })
     }
 
@@ -148,5 +156,68 @@ impl AiClient {
         let error = crate::ai::retry::provider_http_error(response, "API error").await;
         error.log();
         Err(error.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use reqwest::StatusCode;
+    use tiny_http::{Header, Response, Server};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_provider_http_client_returns_redirect_without_replaying_request() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let base_url = format!("http://{}", server.server_addr());
+        let redirect_url = format!("{base_url}/followed");
+        let (request_tx, request_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let request = server.recv().expect("initial request should arrive");
+            let initial_path = request.url().to_string();
+            request
+                .respond(
+                    Response::from_string("redirect")
+                        .with_status_code(307)
+                        .with_header(
+                            Header::from_bytes("Location", redirect_url)
+                                .expect("redirect header should be valid"),
+                        ),
+                )
+                .expect("redirect should be sent");
+
+            let followed_path = server
+                .recv_timeout(Duration::from_millis(300))
+                .expect("redirect probe should succeed")
+                .map(|request| {
+                    let path = request.url().to_string();
+                    request
+                        .respond(Response::from_string("followed"))
+                        .expect("followed response should be sent");
+                    path
+                });
+            request_tx
+                .send((initial_path, followed_path))
+                .expect("request evidence should be recorded");
+        });
+
+        let response = AiClient::create_http_client()
+            .post(format!("{base_url}/initial"))
+            .body("one governed request")
+            .send()
+            .await
+            .expect("redirect response should be returned");
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        server_thread.join().expect("server thread should finish");
+        let (initial_path, followed_path) = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("request evidence should arrive");
+        assert_eq!(initial_path, "/initial");
+        assert_eq!(followed_path, None);
     }
 }

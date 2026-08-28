@@ -51,7 +51,12 @@ if (!globalWithMitsuroLogFilter.__mitsuroSvgWarningFilterInstalled) {
 
 function RootNavigator() {
   const { theme } = useThemeContext();
-  const { client, isConfigured, hasLoadedConnection } = useConnection();
+  const {
+    client,
+    isConfigured,
+    hasLoadedConnection,
+    recoveryConnectionScope,
+  } = useConnection();
   useDeepLink();
   const router = useRouter();
   const segments = useSegments();
@@ -95,7 +100,12 @@ function RootNavigator() {
 
   return (
     <NotificationProvider>
-      <StoresProvider client={client}>{content}</StoresProvider>
+      <StoresProvider
+        client={client}
+        recoveryConnectionScope={recoveryConnectionScope}
+      >
+        {content}
+      </StoresProvider>
     </NotificationProvider>
   );
 }

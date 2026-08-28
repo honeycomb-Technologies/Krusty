@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   View,
   Pressable,
@@ -10,6 +10,15 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
+import { FabGooeyLayer } from './FabGooeyLayer';
+import {
+  GOOEY_PAD,
+  gooeyCanvasHeight,
+  gooeyCanvasWidth,
+  gooeyFill,
+  pillTravelY,
+  type GooeyProgresses,
+} from './fabGooey';
 import * as Haptics from '../../platform/haptics';
 import Animated, {
   type SharedValue,
@@ -18,7 +27,6 @@ import Animated, {
   useAnimatedReaction,
   withSpring,
   withTiming,
-  withDelay,
   interpolate,
   runOnJS,
   Extrapolation,
@@ -73,12 +81,18 @@ interface AccordionControlsProps {
   isOpen: boolean;
   onToggle: () => void;
   sessionType?: 'chat' | 'code' | 'hive';
+  /** Fires when the last accordion droplet has merged back into the Agent. */
+  onCloseComplete?: () => void;
+  /** Agent mark — sits in the same 56pt column as the compact pills. */
+  agent: ReactNode;
+  /** Keep the cluster mounted while close stagger unmounts each GlassView. */
+  pillsMounted: boolean;
 }
 
 interface ProviderFilterAction {
   id: string;
   label: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }
 
 const THINKING_ICON_ALPHA: Record<ThinkingLevel, string> = {
@@ -92,10 +106,17 @@ const THINKING_ICON_ALPHA: Record<ThinkingLevel, string> = {
   ultra: '',
 };
 
-const SPRING_CONFIG = { damping: 18, stiffness: 350, mass: 0.6 };
+/** Glyph settle only — never spring a GlassView. Transforms stamp iOS glass. */
+const LIQUID_OPEN_SPRING = { damping: 24, stiffness: 198, mass: 0.96 };
 const MAX_PILL_INDEX = 5;
-const OPEN_STAGGER_MS = 40;
-const CLOSE_STAGGER_MS = 28;
+/** Readable cascade — 20ms read as one pop. */
+const OPEN_STAGGER_MS = 58;
+const CLOSE_STAGGER_MS = 46;
+/** Glyph fade-out before that pill's GlassView unmounts. */
+const PILL_SETTLE_MS = 160;
+/** Hide glyphs before the glass tile is torn down. */
+const GLYPH_FADE_START = 0.42;
+const GLYPH_SETTLE_Y = 10;
 const ATTACH_ACTION_COUNT = 3;
 const DOCK_FADE_WIDTH = 34;
 const MODEL_BUTTON_GAP = 10;
@@ -109,41 +130,170 @@ const PROVIDER_AUTO_SCROLL_EDGE_WIDTH = 52;
 const PROVIDER_AUTO_SCROLL_MAX_STEP = 18;
 const PROVIDER_REORDER_SPRING_CONFIG = { damping: 24, stiffness: 420, mass: 0.55 };
 const PROVIDER_REORDER_LONG_PRESS_MS = 460;
+
+export function pourCloseDurationMs(itemCount: number): number {
+  const lastStagger = Math.max(0, itemCount - 1) * CLOSE_STAGGER_MS;
+  return lastStagger + PILL_SETTLE_MS;
+}
+
+function useDeferredPresence(present: boolean, unmountMs: number): boolean {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    if (present) {
+      setMounted(true);
+      return;
+    }
+    const timer = setTimeout(() => setMounted(false), unmountMs);
+    return () => clearTimeout(timer);
+  }, [present, unmountMs]);
+
+  return present || mounted;
+}
+
+/**
+ * Staggered presence. iOS GlassView stamps a copy at every transformed
+ * frame, so the glass host never translates or scales.
+ *
+ * crystallizeOnSettle: a transform-safe stand-in travels first; real glass
+ * mounts only after the pour lands, and unmounts before the stand-in leaves.
+ */
+function usePourMotion({
+  isOpen,
+  openDelayMs,
+  closeDelayMs,
+  onCloseSettled,
+  progress: progressProp,
+  crystallizeOnSettle = false,
+}: {
+  isOpen: boolean;
+  openDelayMs: number;
+  closeDelayMs: number;
+  onCloseSettled?: () => void;
+  progress?: SharedValue<number>;
+  crystallizeOnSettle?: boolean;
+}): {
+  progress: SharedValue<number>;
+  materialActive: boolean;
+} {
+  const fallbackProgress = useSharedValue(0);
+  const progress = progressProp ?? fallbackProgress;
+  const [materialActive, setMaterialActive] = useState(false);
+  const generationRef = useRef(0);
+  const onCloseSettledRef = useRef(onCloseSettled);
+  onCloseSettledRef.current = onCloseSettled;
+
+  const activateMaterial = useCallback((generation: number) => {
+    if (generation !== generationRef.current) return;
+    setMaterialActive(true);
+  }, []);
+
+  const finishClose = useCallback((generation: number) => {
+    if (generation !== generationRef.current) return;
+    setMaterialActive(false);
+    onCloseSettledRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    const generation = ++generationRef.current;
+
+    if (isOpen) {
+      const appearTimer = setTimeout(() => {
+        if (generation !== generationRef.current) return;
+        if (!crystallizeOnSettle) setMaterialActive(true);
+        progress.value = withSpring(1, LIQUID_OPEN_SPRING, (finished) => {
+          if (!finished || !crystallizeOnSettle) return;
+          runOnJS(activateMaterial)(generation);
+        });
+      }, openDelayMs);
+      return () => {
+        clearTimeout(appearTimer);
+      };
+    }
+
+    if (crystallizeOnSettle) setMaterialActive(false);
+
+    const retractTimer = setTimeout(() => {
+      if (generation !== generationRef.current) return;
+      progress.value = withTiming(0, { duration: PILL_SETTLE_MS }, (finished) => {
+        if (!finished) return;
+        runOnJS(finishClose)(generation);
+      });
+    }, closeDelayMs);
+
+    return () => {
+      clearTimeout(retractTimer);
+    };
+  }, [
+    activateMaterial,
+    closeDelayMs,
+    crystallizeOnSettle,
+    finishClose,
+    isOpen,
+    openDelayMs,
+    progress,
+  ]);
+
+  return { progress, materialActive };
+}
+
+function FabGlyph({
+  progress,
+  children,
+}: {
+  progress: SharedValue<number>;
+  children: ReactNode;
+}) {
+  const glyphStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      progress.value,
+      [0, GLYPH_FADE_START, 1],
+      [0, 1, 1],
+      Extrapolation.CLAMP,
+    ),
+    transform: [
+      {
+        translateY: interpolate(progress.value, [0, 1], [GLYPH_SETTLE_Y, 0]),
+      },
+    ],
+  }));
+
+  return (
+    <Animated.View pointerEvents="none" style={glyphStyle}>
+      {children}
+    </Animated.View>
+  );
+}
+
 /** Desktop provider filter — keeps staggered spring entrance without scale-to-zero. */
 function DesktopFilterPill({
   index,
+  itemCount,
+  isOpen,
   active,
   label,
   onPress,
   children,
 }: {
   index: number;
+  itemCount: number;
+  isOpen: boolean;
   active: boolean;
   label: string;
   onPress: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   const { theme } = useThemeContext();
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    progress.value = withDelay(
-      index * OPEN_STAGGER_MS,
-      withSpring(1, SPRING_CONFIG),
-    );
-  }, [index, progress]);
-
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(progress.value, [0, 1], [16, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.88, 1]) },
-    ],
-  }));
+  const { progress, materialActive } = usePourMotion({
+    isOpen,
+    openDelayMs: index * OPEN_STAGGER_MS,
+    closeDelayMs: Math.max(0, itemCount - index - 1) * CLOSE_STAGGER_MS,
+  });
 
   const g = theme.colors.glass;
 
   return (
-    <Animated.View style={[styles.desktopFilterHit, animatedStyle]}>
+    <View style={styles.desktopFilterHit}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Filter models by ${label}`}
@@ -151,11 +301,13 @@ function DesktopFilterPill({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onPress();
         }}
-        style={[styles.desktopFilterHit, styles.materialHost]}
+        style={[styles.desktopFilterHit, styles.materialHost, styles.clipHost]}
       >
         <AdaptiveMaterial
+          active={materialActive}
           borderRadius={18}
           tone="regular"
+          interactive
         />
         <View
           style={[
@@ -173,10 +325,10 @@ function DesktopFilterPill({
             },
           ]}
         >
-          {children}
+          <FabGlyph progress={progress}>{children}</FabGlyph>
         </View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -192,37 +344,43 @@ function AccordionPill({
   maxIndex = MAX_PILL_INDEX,
   accessibilityLabel,
   accessibilityHint,
+  onCloseSettled,
+  progress: progressProp,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   index: number;
   isOpen: boolean;
   onPress: () => void;
   active?: boolean;
-  sideContent?: React.ReactNode;
+  sideContent?: ReactNode;
   disabled?: boolean;
   /** When true, only as wide as the pill (no full-width row stretch). */
   compact?: boolean;
   maxIndex?: number;
   accessibilityLabel: string;
   accessibilityHint?: string;
+  onCloseSettled?: () => void;
+  progress?: SharedValue<number>;
 }) {
   const { theme } = useThemeContext();
-  const progress = useSharedValue(0);
+  const { progress, materialActive } = usePourMotion({
+    isOpen,
+    openDelayMs: index * OPEN_STAGGER_MS,
+    closeDelayMs: Math.max(0, maxIndex - index) * CLOSE_STAGGER_MS,
+    onCloseSettled,
+    progress: progressProp,
+    crystallizeOnSettle: true,
+  });
 
-  useEffect(() => {
-    const delayMs = isOpen
-      ? index * OPEN_STAGGER_MS
-      : Math.max(0, maxIndex - index) * CLOSE_STAGGER_MS;
-    progress.value = withDelay(
-      delayMs,
-      withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
-    );
-  }, [index, isOpen, maxIndex, progress]);
-
-  const animatedStyle = useAnimatedStyle(() => ({
+  const travelStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: interpolate(progress.value, [0, 1], [20, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
+      {
+        translateY: interpolate(
+          progress.value,
+          [0, 1],
+          [pillTravelY(index), 0],
+        ),
+      },
     ],
   }));
 
@@ -236,7 +394,18 @@ function AccordionPill({
       ]}
     >
       {sideContent}
-      <Animated.View style={animatedStyle}>
+      <View
+        pointerEvents="none"
+        style={[styles.materialHost, styles.clipHost, styles.pillSlot]}
+      >
+        <AdaptiveMaterial
+          active={materialActive}
+          borderRadius={18}
+          tone="regular"
+          interactive
+        />
+      </View>
+      <Animated.View pointerEvents="box-none" style={[styles.pillTraveler, travelStyle]}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={accessibilityLabel}
@@ -244,22 +413,18 @@ function AccordionPill({
           accessibilityState={{ disabled: !isOpen || disabled, selected: active }}
           disabled={!isOpen || disabled}
           onPress={onPress}
-          style={styles.materialHost}
+          style={styles.pill}
         >
-          <AdaptiveMaterial
-            borderRadius={18}
-            tone="regular"
-          />
           <View
             style={[
-              styles.pill,
+              styles.pillFace,
               {
                 backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
                 borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
               },
             ]}
           >
-            {children}
+            <FabGlyph progress={progress}>{children}</FabGlyph>
           </View>
         </Pressable>
       </Animated.View>
@@ -282,41 +447,27 @@ function InlineActionPill({
   itemCount: number;
   isOpen: boolean;
   onPress: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
   active?: boolean;
   size?: number;
   accessibilityLabel?: string;
   closeStaggerMs?: number;
 }) {
   const { theme } = useThemeContext();
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    const delayMs = isOpen
-      ? index * OPEN_STAGGER_MS
-      : Math.max(0, itemCount - index - 1) * closeStaggerMs;
-    progress.value = withDelay(
-      delayMs,
-      withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
-    );
-  }, [isOpen, itemCount, closeStaggerMs, progress]);
-
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(progress.value, [0, 1], [size * 0.75, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
-    ],
-  }));
+  const { progress, materialActive } = usePourMotion({
+    isOpen,
+    openDelayMs: index * OPEN_STAGGER_MS,
+    closeDelayMs: Math.max(0, itemCount - index - 1) * closeStaggerMs,
+  });
 
   const g = theme.colors.glass;
 
   return (
-    <Animated.View
+    <View
       style={[
         styles.inlineActionOuter,
         styles.pointerBoxNone,
         { width: size, height: size },
-        animatedStyle,
       ]}
     >
       <Pressable
@@ -327,11 +478,17 @@ function InlineActionPill({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onPress();
         }}
-        style={styles.materialHost}
+        style={[
+          styles.materialHost,
+          styles.clipHost,
+          { borderRadius: size >= 56 ? 18 : 14 },
+        ]}
       >
         <AdaptiveMaterial
+          active={materialActive}
           borderRadius={size >= 56 ? 18 : 14}
           tone="regular"
+          interactive
         />
         <View
           style={[
@@ -345,10 +502,10 @@ function InlineActionPill({
             },
           ]}
         >
-          {children}
+          <FabGlyph progress={progress}>{children}</FabGlyph>
         </View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -391,11 +548,16 @@ function ProviderDockPill({
   onDrop: (providerId: string, toIndex: number) => void;
   onDragFinalize: () => void;
   onAutoScrollPointer: (absoluteX: number) => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   const { theme } = useThemeContext();
+  const animationIndex = Math.max(0, itemCount - index - 1);
+  const { progress: revealProgress, materialActive } = usePourMotion({
+    isOpen,
+    openDelayMs: animationIndex * OPEN_STAGGER_MS,
+    closeDelayMs: index * CLOSE_STAGGER_MS,
+  });
   const editProgress = useSharedValue(0);
-  const revealProgress = useSharedValue(0);
   const reorderX = useSharedValue(0);
   const dragging = useSharedValue(0);
   const rawDragX = useSharedValue(0);
@@ -406,17 +568,6 @@ function ProviderDockPill({
   useEffect(() => {
     editProgress.value = withTiming(editMode ? 1 : 0, { duration: 150 });
   }, [editMode]);
-
-  useEffect(() => {
-    const animationIndex = itemCount - index - 1;
-    const delayMs = isOpen
-      ? animationIndex * OPEN_STAGGER_MS
-      : index * CLOSE_STAGGER_MS;
-    revealProgress.value = withDelay(
-      delayMs,
-      withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
-    );
-  }, [index, isOpen, itemCount, revealProgress]);
 
   useEffect(() => {
     reorderX.value = 0;
@@ -545,12 +696,6 @@ function ProviderDockPill({
   const animatedStyle = useAnimatedStyle(() => {
     const isActiveDrag = dragIndex.value === index;
     const zIndex = isActiveDrag ? 20 : editProgress.value ? 4 : 0;
-    const revealTranslateX = interpolate(
-      revealProgress.value,
-      [0, 1],
-      [PROVIDER_PILL_SIZE * 0.75, 0],
-    );
-    const revealScale = interpolate(revealProgress.value, [0, 1], [0.01, 1]);
     const lift = interpolate(editProgress.value, [0, 1], [0, -2]);
     const dragLift = interpolate(dragging.value, [0, 1], [0, -4]);
     const tilt = interpolate(
@@ -564,10 +709,10 @@ function ProviderDockPill({
       zIndex,
       transform: [
         {
-          translateX: revealTranslateX + (isActiveDrag ? sharedDragX.value : reorderX.value),
+          translateX: isActiveDrag ? sharedDragX.value : reorderX.value,
         },
         { translateY: lift + dragLift },
-        { scale: revealScale * (1 + editProgress.value * 0.02 + dragging.value * 0.05) },
+        { scale: 1 + editProgress.value * 0.02 + dragging.value * 0.05 },
         { rotate: `${tilt}deg` },
       ],
     };
@@ -587,7 +732,7 @@ function ProviderDockPill({
         accessibilityRole="button"
         accessibilityLabel={`Filter models by ${provider.label}`}
         disabled={!isOpen}
-        style={[styles.providerDockPressable, styles.materialHost]}
+        style={[styles.providerDockPressable, styles.materialHost, styles.clipHost]}
         delayLongPress={PROVIDER_REORDER_LONG_PRESS_MS}
         onLongPress={handleLongPress}
         onTouchStart={handleTouchStart}
@@ -604,8 +749,10 @@ function ProviderDockPill({
         }}
       >
         <AdaptiveMaterial
+          active={materialActive}
           borderRadius={18}
           tone="regular"
+          interactive
         />
         <View
           style={[
@@ -617,7 +764,7 @@ function ProviderDockPill({
             },
           ]}
         >
-          {children}
+          <FabGlyph progress={revealProgress}>{children}</FabGlyph>
         </View>
       </Pressable>
     </Animated.View>
@@ -652,9 +799,26 @@ export function AccordionControls({
   isOpen,
   onToggle,
   sessionType = 'code',
+  onCloseComplete,
+  agent,
+  pillsMounted,
 }: AccordionControlsProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
+  const gooey0 = useSharedValue(0);
+  const gooey1 = useSharedValue(0);
+  const gooey2 = useSharedValue(0);
+  const gooey3 = useSharedValue(0);
+  const gooey4 = useSharedValue(0);
+  const gooey5 = useSharedValue(0);
+  const pillProgresses: GooeyProgresses = [
+    gooey0,
+    gooey1,
+    gooey2,
+    gooey3,
+    gooey4,
+    gooey5,
+  ];
   // Desktop has room — no edge-fade “scroll chrome” or long-press reorder.
   const enableProviderReorder = !isDesktop && providerFilters.length > 1;
   const providerScrollRef = useRef<ScrollView>(null);
@@ -673,6 +837,7 @@ export function AccordionControls({
   const providerDragX = useSharedValue(0);
   const providerDragScrollDelta = useSharedValue(0);
   const hasWorkMode = sessionType === 'code';
+  const modelManagedByHive = sessionType === 'hive';
   const maxPillIndex = hasWorkMode ? 5 : 4;
   const modelPillIndex = maxPillIndex;
   const attachPillIndex = hasWorkMode ? 4 : 3;
@@ -825,6 +990,7 @@ export function AccordionControls({
   };
 
   const handleModel = () => {
+    if (modelManagedByHive) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onModelSelect();
   };
@@ -832,9 +998,9 @@ export function AccordionControls({
   const t = theme.colors;
   const fabAccent = t.thinking;
   const thinkingColor = thinkingLevel === 'off'
-    ? `${t.mutedForeground}${THINKING_ICON_ALPHA.off}`
+    ? `${fabAccent}${THINKING_ICON_ALPHA.off}`
     : `${fabAccent}${THINKING_ICON_ALPHA[thinkingLevel]}`;
-  const providerDockOpen = modelPickerOpen && isOpen;
+  const providerDockOpen = !modelManagedByHive && modelPickerOpen && isOpen;
 
   useEffect(() => {
     if (!providerDockOpen) {
@@ -943,131 +1109,125 @@ export function AccordionControls({
       }
     });
 
-  const g = theme.colors.glass;
-  const showDesktopFilters = isDesktop && modelPickerOpen && isOpen;
+  const desktopFiltersOpen = isDesktop && !modelManagedByHive &&
+    modelPickerOpen && isOpen;
   const desktopFilterCount = providerFilters.length;
+  const attachActionsOpen = attachPickerOpen && isOpen;
+  const providerDockMounted = useDeferredPresence(
+    providerDockOpen,
+    pourCloseDurationMs(providerFilters.length),
+  );
+  const attachActionsMounted = useDeferredPresence(
+    attachActionsOpen,
+    pourCloseDurationMs(ATTACH_ACTION_COUNT),
+  );
+  const desktopFiltersMounted = useDeferredPresence(
+    desktopFiltersOpen,
+    pourCloseDurationMs(desktopFilterCount),
+  );
+  const onCloseCompleteRef = useRef(onCloseComplete);
+  onCloseCompleteRef.current = onCloseComplete;
+
+  const handleLastPillSettled = useCallback(() => {
+    if (isOpen) return;
+    onCloseCompleteRef.current?.();
+  }, [isOpen]);
+
+  const mergePillCount = maxPillIndex + 1;
+  const gooeyPillCount = mergePillCount;
+  const sideColumnHeight = mergePillCount * 56 + Math.max(0, mergePillCount - 1) * 10;
 
   return (
     <View style={[styles.container, styles.pointerBoxNone]}>
-      {/* Floating accordion pills */}
-      <GestureDetector gesture={swipeDown}>
-        <Animated.View style={styles.pillColumn}>
-          {/* Desktop: filters + bot as a flex row. Filters keep a light stagger
-              animation but avoid nested sideContent/scale-to-zero (which hid them). */}
-          {isDesktop ? (
-            <View style={[styles.desktopModelRow, styles.pointerBoxNone]}>
-              {showDesktopFilters
-                ? providerFilters.map((provider, visualIndex) => {
-                    const active = selectedProviderFilter === provider.id;
-                    // Stagger from the bot outward (right → left).
-                    const staggerIndex = desktopFilterCount - visualIndex - 1;
-                    return (
-                      <DesktopFilterPill
+      <View style={[styles.chromeRow, styles.pointerBoxNone]}>
+        {pillsMounted ? (
+          <View
+            style={[
+              styles.sideColumn,
+              styles.pointerBoxNone,
+              { height: sideColumnHeight },
+            ]}
+          >
+            <View style={[styles.sideRow, styles.pointerBoxNone]}>
+              {isDesktop ? (
+                <View style={[styles.desktopModelRow, styles.pointerBoxNone]}>
+                  {desktopFiltersMounted
+                    ? providerFilters.map((provider, visualIndex) => {
+                        const active = selectedProviderFilter === provider.id;
+                        const staggerIndex = desktopFilterCount - visualIndex - 1;
+                        return (
+                          <DesktopFilterPill
+                            key={provider.id}
+                            index={staggerIndex}
+                            itemCount={desktopFilterCount}
+                            isOpen={desktopFiltersOpen}
+                            active={active}
+                            label={provider.label}
+                            onPress={() => onProviderFilterToggle(provider.id)}
+                          >
+                            {provider.icon}
+                          </DesktopFilterPill>
+                        );
+                      })
+                    : null}
+                </View>
+              ) : (
+                <Animated.View
+                  style={[
+                    styles.modelFilterDock,
+                    {
+                      pointerEvents: providerDockOpen ? "box-none" : "none",
+                    },
+                  ]}
+                >
+                  <ScrollView
+                    ref={providerScrollRef}
+                    horizontal
+                    bounces={false}
+                    alwaysBounceHorizontal={false}
+                    directionalLockEnabled
+                    nestedScrollEnabled
+                    keyboardShouldPersistTaps="always"
+                    overScrollMode="never"
+                    scrollEnabled={providerDockOpen && !providerDragging}
+                    showsHorizontalScrollIndicator={false}
+                    scrollEventThrottle={16}
+                    onLayout={handleProviderScrollLayout}
+                    onContentSizeChange={handleProviderContentSizeChange}
+                    onScroll={handleProviderScroll}
+                    style={styles.modelFilterScroll}
+                    contentContainerStyle={styles.modelFilterContent}
+                  >
+                    {providerDockMounted
+                      ? providerFilters.map((provider, visualIndex) => (
+                      <ProviderDockPill
                         key={provider.id}
-                        index={staggerIndex}
-                        active={active}
-                        label={provider.label}
+                        provider={provider}
+                        index={visualIndex}
+                        itemCount={providerFilters.length}
+                        isOpen={providerDockOpen}
+                        active={selectedProviderFilter === provider.id}
+                        editMode={enableProviderReorder && providerEditMode}
+                        canReorder={enableProviderReorder}
+                        dragIndex={providerDragIndex}
+                        dropIndex={providerDropIndex}
+                        sharedDragX={providerDragX}
+                        dragScrollDelta={providerDragScrollDelta}
                         onPress={() => onProviderFilterToggle(provider.id)}
+                        onDragStart={handleProviderDragStart}
+                        onDrop={handleProviderDrop}
+                        onDragFinalize={handleProviderDragFinalize}
+                        onAutoScrollPointer={handleProviderAutoScrollPointer}
                       >
                         {provider.icon}
-                      </DesktopFilterPill>
-                    );
-                  })
-                : null}
-              <AccordionPill
-                index={modelPillIndex}
-                isOpen={isOpen}
-                onPress={handleModel}
-                active={modelPickerOpen}
-                compact
-                maxIndex={maxPillIndex}
-                accessibilityLabel="Choose model"
-              >
-                <Bot
-                  size={24}
-                  color={modelPickerOpen ? fabAccent : t.mutedForeground}
-                  strokeWidth={1.6}
-                />
-              </AccordionPill>
+                      </ProviderDockPill>
+                        ))
+                      : null}
+                  </ScrollView>
+                </Animated.View>
+              )}
             </View>
-          ) : (
-          <AccordionPill
-            index={modelPillIndex}
-            isOpen={isOpen}
-            onPress={handleModel}
-            active={modelPickerOpen}
-            maxIndex={maxPillIndex}
-            accessibilityLabel="Choose model"
-            sideContent={
-              <Animated.View
-                style={[
-                  styles.modelFilterDock,
-                  {
-                    pointerEvents: providerDockOpen ? "box-none" : "none",
-                  },
-                ]}
-              >
-                <ScrollView
-                  ref={providerScrollRef}
-                  horizontal
-                  bounces={false}
-                  alwaysBounceHorizontal={false}
-                  directionalLockEnabled
-                  nestedScrollEnabled
-                  keyboardShouldPersistTaps="always"
-                  overScrollMode="never"
-                  scrollEnabled={modelPickerOpen && isOpen && !providerDragging}
-                  showsHorizontalScrollIndicator={false}
-                  scrollEventThrottle={16}
-                  onLayout={handleProviderScrollLayout}
-                  onContentSizeChange={handleProviderContentSizeChange}
-                  onScroll={handleProviderScroll}
-                  style={styles.modelFilterScroll}
-                  contentContainerStyle={styles.modelFilterContent}
-                >
-                  {providerFilters.map((provider, visualIndex) => (
-                    <ProviderDockPill
-                      key={provider.id}
-                      provider={provider}
-                      index={visualIndex}
-                      itemCount={providerFilters.length}
-                      isOpen={modelPickerOpen && isOpen}
-                      active={selectedProviderFilter === provider.id}
-                      editMode={enableProviderReorder && providerEditMode}
-                      canReorder={enableProviderReorder}
-                      dragIndex={providerDragIndex}
-                      dropIndex={providerDropIndex}
-                      sharedDragX={providerDragX}
-                      dragScrollDelta={providerDragScrollDelta}
-                      onPress={() => onProviderFilterToggle(provider.id)}
-                      onDragStart={handleProviderDragStart}
-                      onDrop={handleProviderDrop}
-                      onDragFinalize={handleProviderDragFinalize}
-                      onAutoScrollPointer={handleProviderAutoScrollPointer}
-                    >
-                      {provider.icon}
-                    </ProviderDockPill>
-                  ))}
-                </ScrollView>
-              </Animated.View>
-            }
-          >
-            <Bot
-              size={24}
-              color={modelPickerOpen ? fabAccent : t.mutedForeground}
-              strokeWidth={1.6}
-            />
-          </AccordionPill>
-          )}
-
-          <AccordionPill
-            index={attachPillIndex}
-            isOpen={isOpen}
-            onPress={handleAttach}
-            active={attachPickerOpen}
-            maxIndex={maxPillIndex}
-            accessibilityLabel="Add attachment"
-            sideContent={
+            <View style={[styles.sideRow, styles.pointerBoxNone]}>
               <View
                 style={[
                   styles.attachActions,
@@ -1076,39 +1236,100 @@ export function AccordionControls({
                   },
                 ]}
               >
-                <InlineActionPill
-                  index={2}
-                  itemCount={ATTACH_ACTION_COUNT}
-                  isOpen={attachPickerOpen && isOpen}
-                  onPress={onPickFile}
-                  accessibilityLabel="Attach file"
-                >
-                  <FileText size={23} color={t.mutedForeground} strokeWidth={1.7} />
-                </InlineActionPill>
-                <InlineActionPill
-                  index={1}
-                  itemCount={ATTACH_ACTION_COUNT}
-                  isOpen={attachPickerOpen && isOpen}
-                  onPress={onPickCamera}
-                  accessibilityLabel="Take photo"
-                >
-                  <Camera size={23} color={t.mutedForeground} strokeWidth={1.7} />
-                </InlineActionPill>
-                <InlineActionPill
-                  index={0}
-                  itemCount={ATTACH_ACTION_COUNT}
-                  isOpen={attachPickerOpen && isOpen}
-                  onPress={onPickPhoto}
-                  accessibilityLabel="Choose photo"
-                >
-                  <ImageIcon size={23} color={t.mutedForeground} strokeWidth={1.7} />
-                </InlineActionPill>
+                {attachActionsMounted ? (
+                  <>
+                    <InlineActionPill
+                      index={2}
+                      itemCount={ATTACH_ACTION_COUNT}
+                      isOpen={attachActionsOpen}
+                      onPress={onPickFile}
+                      accessibilityLabel="Attach file"
+                    >
+                      <FileText size={23} color={fabAccent} strokeWidth={1.7} />
+                    </InlineActionPill>
+                    <InlineActionPill
+                      index={1}
+                      itemCount={ATTACH_ACTION_COUNT}
+                      isOpen={attachActionsOpen}
+                      onPress={onPickCamera}
+                      accessibilityLabel="Take photo"
+                    >
+                      <Camera size={23} color={fabAccent} strokeWidth={1.7} />
+                    </InlineActionPill>
+                    <InlineActionPill
+                      index={0}
+                      itemCount={ATTACH_ACTION_COUNT}
+                      isOpen={attachActionsOpen}
+                      onPress={onPickPhoto}
+                      accessibilityLabel="Choose photo"
+                    >
+                      <ImageIcon size={23} color={fabAccent} strokeWidth={1.7} />
+                    </InlineActionPill>
+                  </>
+                ) : null}
               </View>
-            }
+            </View>
+          </View>
+        ) : null}
+        <View pointerEvents="box-none" style={styles.mergeColumn}>
+          <View
+            pointerEvents="none"
+            style={[
+              styles.gooeyLayer,
+              {
+                width: gooeyCanvasWidth(),
+                height: gooeyCanvasHeight(gooeyPillCount),
+                right: -GOOEY_PAD,
+                bottom: -GOOEY_PAD,
+              },
+            ]}
+          >
+            <FabGooeyLayer
+              progresses={pillProgresses}
+              pillCount={gooeyPillCount}
+              fill={gooeyFill(theme.scheme)}
+            />
+          </View>
+          <GestureDetector gesture={swipeDown}>
+            <View style={styles.mergePills}>
+              {pillsMounted ? (
+                <>
+          <AccordionPill
+            index={modelPillIndex}
+            isOpen={isOpen}
+            onPress={handleModel}
+            active={!modelManagedByHive && modelPickerOpen}
+            disabled={modelManagedByHive}
+            compact
+            maxIndex={maxPillIndex}
+            progress={pillProgresses[modelPillIndex]}
+            accessibilityLabel={modelManagedByHive
+              ? "Hive-managed model"
+              : "Choose model"}
+            accessibilityHint={modelManagedByHive
+              ? "This conversation uses its configured Hive model"
+              : undefined}
+          >
+            <Bot
+              size={24}
+              color={fabAccent}
+              strokeWidth={1.6}
+            />
+          </AccordionPill>
+
+          <AccordionPill
+            index={attachPillIndex}
+            isOpen={isOpen}
+            onPress={handleAttach}
+            active={attachPickerOpen}
+            compact
+            maxIndex={maxPillIndex}
+            progress={pillProgresses[attachPillIndex]}
+            accessibilityLabel="Add attachment"
           >
             <Paperclip
               size={24}
-              color={attachPickerOpen ? fabAccent : t.mutedForeground}
+              color={fabAccent}
               strokeWidth={1.6}
             />
           </AccordionPill>
@@ -1118,14 +1339,16 @@ export function AccordionControls({
               index={3}
               isOpen={isOpen}
               onPress={handleMode}
+              compact
               maxIndex={maxPillIndex}
+              progress={pillProgresses[3]}
               accessibilityLabel={mode === 'build' ? 'Build mode' : 'Plan mode'}
               accessibilityHint="Switch between Build and Plan"
             >
               {mode === 'build' ? (
-                <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
+                <Hammer size={24} color={fabAccent} strokeWidth={1.6} />
               ) : (
-                <Compass size={24} color={t.mutedForeground} strokeWidth={1.6} />
+                <Compass size={24} color={fabAccent} strokeWidth={1.6} />
               )}
             </AccordionPill>
           ) : null}
@@ -1134,12 +1357,14 @@ export function AccordionControls({
             index={2}
             isOpen={isOpen}
             onPress={handlePermissionMode}
+            compact
             maxIndex={maxPillIndex}
+            progress={pillProgresses[2]}
             accessibilityLabel={permissionMode === 'supervised' ? 'Supervised permissions' : 'Autonomous permissions'}
             accessibilityHint="Switch permission mode"
           >
             {permissionMode === 'supervised' ? (
-              <ShieldCheck size={24} color={t.success} strokeWidth={1.6} />
+              <ShieldCheck size={24} color={fabAccent} strokeWidth={1.6} />
             ) : (
               <ShieldOff size={24} color={fabAccent} strokeWidth={1.6} />
             )}
@@ -1151,19 +1376,15 @@ export function AccordionControls({
             onPress={handleFastMode}
             disabled={!fastModeSupported}
             active={fastModeSupported && fastModeEnabled}
+            compact
             maxIndex={maxPillIndex}
+            progress={pillProgresses[1]}
             accessibilityLabel={fastModeSupported ? (fastModeEnabled ? 'Fast mode on' : 'Fast mode off') : 'Fast mode unavailable for this model'}
             accessibilityHint={fastModeSupported ? 'Toggle provider speed mode' : undefined}
           >
             <Zap
               size={24}
-              color={
-                fastModeSupported && fastModeEnabled
-                  ? fabAccent
-                  : fastModeSupported
-                    ? t.mutedForeground
-                    : `${t.mutedForeground}66`
-              }
+              color={fastModeSupported ? fabAccent : `${fabAccent}66`}
               strokeWidth={1.6}
             />
           </AccordionPill>
@@ -1173,18 +1394,26 @@ export function AccordionControls({
             isOpen={isOpen}
             onPress={handleThinking}
             disabled={!thinkingSupported}
+            compact
             maxIndex={maxPillIndex}
+            progress={pillProgresses[0]}
+            onCloseSettled={handleLastPillSettled}
             accessibilityLabel={thinkingSupported ? `Thinking ${thinkingLevel}` : 'Thinking unavailable for this model'}
             accessibilityHint={thinkingSupported ? 'Cycle thinking level' : undefined}
           >
             <Brain
               size={24}
-              color={thinkingSupported ? thinkingColor : `${t.mutedForeground}66`}
+              color={thinkingSupported ? thinkingColor : `${fabAccent}66`}
               strokeWidth={1.6}
             />
           </AccordionPill>
-        </Animated.View>
-      </GestureDetector>
+                </>
+              ) : null}
+              {agent}
+            </View>
+          </GestureDetector>
+        </View>
+      </View>
     </View>
   );
 }
@@ -1193,6 +1422,10 @@ const styles = StyleSheet.create({
   materialHost: {
     position: 'relative',
   },
+  clipHost: {
+    overflow: 'hidden',
+    borderRadius: 18,
+  },
   pointerBoxNone: {
     pointerEvents: 'box-none',
   },
@@ -1200,10 +1433,41 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'flex-end',
   },
-  pillColumn: {
+  chromeRow: {
     width: '100%',
-    gap: 10,
+    flexDirection: 'row',
     alignItems: 'flex-end',
+    justifyContent: 'flex-end',
+  },
+  sideColumn: {
+    flex: 1,
+    minWidth: 0,
+    gap: 10,
+    marginBottom: 66,
+    justifyContent: 'flex-start',
+  },
+  sideRow: {
+    height: 56,
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  mergeColumn: {
+    width: 56,
+    position: 'relative',
+    overflow: 'visible',
+  },
+  gooeyLayer: {
+    position: 'absolute',
+    zIndex: 0,
+  },
+  mergePills: {
+    width: 56,
+    gap: 10,
+    alignItems: 'center',
+    overflow: 'visible',
+    zIndex: 1,
   },
   pillOuter: {
     flexDirection: 'row',
@@ -1211,6 +1475,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     height: 56,
     width: '100%',
+    position: 'relative',
     overflow: 'visible',
   },
   pillOuterCompact: {
@@ -1220,7 +1485,27 @@ const styles = StyleSheet.create({
     height: 56,
     width: PROVIDER_PILL_SIZE,
     flexShrink: 0,
+    position: 'relative',
     overflow: 'visible',
+  },
+  pillSlot: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 56,
+    height: 56,
+  },
+  pillTraveler: {
+    width: 56,
+    height: 56,
+  },
+  pillFace: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
   },
   desktopModelRow: {
     flexDirection: 'row',
@@ -1246,21 +1531,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
     justifyContent: 'center',
-  },
-  modelFilterDockDesktop: {
-    flex: 0,
-    flexGrow: 0,
-    flexShrink: 0,
-    overflow: 'visible',
-    // Same gap ChatBar uses between model list and the Agent FAB column.
-    marginRight: MODEL_BUTTON_GAP,
-  },
-  modelFilterRowDesktop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    height: PROVIDER_DOCK_HEIGHT,
-    width: '100%',
   },
   modelFilterScroll: {
     flex: 1,

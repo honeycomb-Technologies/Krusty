@@ -19,7 +19,8 @@ use mitsuro_core::SessionManager;
 
 use super::super::session_access::{
     current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
-    load_owned_session_of_type, request_workspace_scope, session_visible_to_user,
+    load_owned_hive_session_control_scope, load_owned_session_of_type, request_workspace_scope,
+    session_visible_to_user,
 };
 use super::{
     current, idempotency_key_from_headers, open_session_manager, resolve_hive_model, OkResponse,
@@ -599,13 +600,8 @@ pub(super) async fn pause_session(
     headers: HeaderMap,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session_of_type(
-        &session_manager,
-        &id,
-        SessionType::Hive,
-        "Hive",
-        user.as_ref(),
-    )?;
+    load_owned_hive_session_control_scope(&state, &session_manager, &id, user.as_ref())?
+        .reject_generic_worker_control()?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .hive_runtime
@@ -628,13 +624,8 @@ pub(super) async fn schedule_session(
     Json(req): Json<ScheduleRequest>,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session_of_type(
-        &session_manager,
-        &id,
-        SessionType::Hive,
-        "Hive",
-        user.as_ref(),
-    )?;
+    load_owned_hive_session_control_scope(&state, &session_manager, &id, user.as_ref())?
+        .reject_generic_worker_control()?;
     let wake_at = parse_requested_wake_at(Some(req.start_at.as_str()))?
         .ok_or_else(|| AppError::BadRequest("start_at must be provided".to_string()))?;
     bind_frozen_session_model(&state, user.as_ref(), &id).await?;
@@ -735,13 +726,8 @@ pub(super) async fn resume_session(
     headers: HeaderMap,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session_of_type(
-        &session_manager,
-        &id,
-        SessionType::Hive,
-        "Hive",
-        user.as_ref(),
-    )?;
+    load_owned_hive_session_control_scope(&state, &session_manager, &id, user.as_ref())?
+        .reject_generic_worker_control()?;
     bind_frozen_session_model(&state, user.as_ref(), &id).await?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
@@ -764,13 +750,8 @@ pub(super) async fn cancel_session(
     headers: HeaderMap,
 ) -> Result<StatusCode, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session_of_type(
-        &session_manager,
-        &id,
-        SessionType::Hive,
-        "Hive",
-        user.as_ref(),
-    )?;
+    load_owned_hive_session_control_scope(&state, &session_manager, &id, user.as_ref())?
+        .reject_generic_worker_control()?;
 
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     state

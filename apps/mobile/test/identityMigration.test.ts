@@ -1,11 +1,13 @@
 import {
   canonicalNotificationAction,
   canonicalNotificationData,
-  HIVE_NOTIFICATION_ACTION,
   connectionFromInjectedGlobals,
+  HIVE_NOTIFICATION_ACTION,
   parseConnectionLaunchUrl,
 } from "../platform/identity-compatibility";
 import {
+  deleteConnectionCredentials,
+  honorPendingConnectionLogout,
   IDENTITY_STORAGE_KEYS,
   readConnectionCredentials,
   readMigratedAsyncValue,
@@ -25,6 +27,8 @@ function assert(condition: unknown, message: string): asserts condition {
 class AsyncStorageFixture {
   readonly values = new Map<string, string>();
   failKey: string | null = null;
+  readonly failDeleteKeys = new Set<string>();
+  readonly deleteAttempts: string[] = [];
 
   async getItem(key: string): Promise<string | null> {
     return this.values.get(key) ?? null;
@@ -38,6 +42,10 @@ class AsyncStorageFixture {
   }
 
   async removeItem(key: string): Promise<void> {
+    this.deleteAttempts.push(key);
+    if (this.failDeleteKeys.has(key)) {
+      throw new Error("delete failed");
+    }
     this.values.delete(key);
   }
 }
@@ -97,8 +105,14 @@ Deno.test("connection migration commits one pair and retains rollback keys", asy
   storage.values.set(oldTokenKey, "old-token");
 
   const migrated = await readConnectionCredentials(storage);
-  assert(migrated?.serverUrl === "https://old.example", "the complete old URL must migrate");
-  assert(migrated?.token === "old-token", "the matching old token must migrate");
+  assert(
+    migrated?.serverUrl === "https://old.example",
+    "the complete old URL must migrate",
+  );
+  assert(
+    migrated?.token === "old-token",
+    "the matching old token must migrate",
+  );
   assert(
     storage.values.has(IDENTITY_STORAGE_KEYS.serverConnection.canonical),
     "the pair must be committed in one canonical value",
@@ -112,9 +126,18 @@ Deno.test("connection migration commits one pair and retains rollback keys", asy
 
 Deno.test("connection migration never combines split generations", async () => {
   const storage = new AsyncStorageFixture();
-  storage.values.set(IDENTITY_STORAGE_KEYS.serverUrl.canonical, "https://partial-new.example");
-  storage.values.set(IDENTITY_STORAGE_KEYS.serverUrl.legacy[0], "https://complete-old.example");
-  storage.values.set(IDENTITY_STORAGE_KEYS.serverToken.legacy[0], "complete-old-token");
+  storage.values.set(
+    IDENTITY_STORAGE_KEYS.serverUrl.canonical,
+    "https://partial-new.example",
+  );
+  storage.values.set(
+    IDENTITY_STORAGE_KEYS.serverUrl.legacy[0],
+    "https://complete-old.example",
+  );
+  storage.values.set(
+    IDENTITY_STORAGE_KEYS.serverToken.legacy[0],
+    "complete-old-token",
+  );
 
   const migrated = await readConnectionCredentials(storage);
   assert(
@@ -124,8 +147,14 @@ Deno.test("connection migration never combines split generations", async () => {
   );
 
   const failed = new AsyncStorageFixture();
-  failed.values.set(IDENTITY_STORAGE_KEYS.serverUrl.legacy[0], "https://recover.example");
-  failed.values.set(IDENTITY_STORAGE_KEYS.serverToken.legacy[0], "recover-token");
+  failed.values.set(
+    IDENTITY_STORAGE_KEYS.serverUrl.legacy[0],
+    "https://recover.example",
+  );
+  failed.values.set(
+    IDENTITY_STORAGE_KEYS.serverToken.legacy[0],
+    "recover-token",
+  );
   failed.failKey = IDENTITY_STORAGE_KEYS.serverConnection.canonical;
   let rejected = false;
   try {
@@ -135,7 +164,8 @@ Deno.test("connection migration never combines split generations", async () => {
   }
   assert(rejected, "a failed atomic commit must surface");
   assert(
-    failed.values.get(IDENTITY_STORAGE_KEYS.serverToken.legacy[0]) === "recover-token",
+    failed.values.get(IDENTITY_STORAGE_KEYS.serverToken.legacy[0]) ===
+      "recover-token",
     "a failed commit must leave the rollback pair intact",
   );
 });
@@ -148,8 +178,115 @@ Deno.test("connection writes replace the committed pair with one operation", asy
   });
   const restored = await readConnectionCredentials(storage);
   assert(
-    restored?.serverUrl === "https://new.example" && restored.token === "new-token",
+    restored?.serverUrl === "https://new.example" &&
+      restored.token === "new-token",
     "the committed pair must round-trip together",
+  );
+});
+
+Deno.test("partial connection deletion stays observable and blocks restart reconnect", async () => {
+  const storage = new AsyncStorageFixture();
+  const committedKey = IDENTITY_STORAGE_KEYS.serverConnection.canonical;
+  const logoutKey = IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical;
+  await writeConnectionCredentials(storage, {
+    serverUrl: "https://saved.example",
+    token: "saved-token",
+  });
+  for (
+    const key of [
+      IDENTITY_STORAGE_KEYS.serverUrl.canonical,
+      IDENTITY_STORAGE_KEYS.serverToken.canonical,
+      ...IDENTITY_STORAGE_KEYS.serverUrl.legacy,
+      ...IDENTITY_STORAGE_KEYS.serverToken.legacy,
+    ]
+  ) {
+    storage.values.set(key, `transition:${key}`);
+  }
+  storage.failDeleteKeys.add(committedKey);
+
+  let deletionError: Error | null = null;
+  try {
+    await deleteConnectionCredentials(storage);
+  } catch (error) {
+    deletionError = error instanceof Error ? error : new Error(String(error));
+  }
+  assert(
+    deletionError?.message.includes("canonical connection data") === true,
+    "an authoritative credential deletion failure must reject",
+  );
+  assert(
+    storage.values.get(logoutKey) === "pending",
+    "a failed deletion must retain its durable logout marker",
+  );
+  assert(
+    storage.deleteAttempts.includes(committedKey) &&
+      [
+        IDENTITY_STORAGE_KEYS.serverUrl.canonical,
+        IDENTITY_STORAGE_KEYS.serverToken.canonical,
+        ...IDENTITY_STORAGE_KEYS.serverUrl.legacy,
+        ...IDENTITY_STORAGE_KEYS.serverToken.legacy,
+      ].every((key) => storage.deleteAttempts.includes(key)),
+    "every canonical and compatibility key must be attempted after one failure",
+  );
+  assert(
+    await readConnectionCredentials(storage) === null,
+    "the next launch must honor durable Disconnect instead of reconnecting a surviving credential",
+  );
+});
+
+Deno.test("successful Disconnect remains authoritative over injected startup credentials", async () => {
+  const storage = new AsyncStorageFixture();
+  const logoutKey = IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical;
+  await writeConnectionCredentials(storage, {
+    serverUrl: "https://saved.example",
+    token: "saved-token",
+  });
+
+  await deleteConnectionCredentials(storage);
+  assert(
+    storage.values.get(logoutKey) === "pending",
+    "successful credential deletion must retain logout intent for startup-only credential sources",
+  );
+  assert(
+    await honorPendingConnectionLogout(storage),
+    "desktop startup must observe explicit Disconnect before injected globals",
+  );
+  assert(
+    await readConnectionCredentials(storage) === null,
+    "repeated launch reads must remain disconnected",
+  );
+
+  await writeConnectionCredentials(storage, {
+    serverUrl: "https://explicit.example",
+    token: "explicit-token",
+  });
+  assert(
+    !storage.values.has(logoutKey) &&
+      (await readConnectionCredentials(storage))?.serverUrl ===
+        "https://explicit.example",
+    "only an explicit durable Connect may clear logout intent",
+  );
+});
+
+Deno.test("Disconnect rejects when durable logout intent cannot be saved", async () => {
+  const storage = new AsyncStorageFixture();
+  const logoutKey = IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical;
+  await writeConnectionCredentials(storage, {
+    serverUrl: "https://saved.example",
+    token: "saved-token",
+  });
+  storage.failKey = logoutKey;
+
+  let rejected = false;
+  try {
+    await deleteConnectionCredentials(storage);
+  } catch (error) {
+    rejected = error instanceof Error &&
+      error.message.includes("durable logout intent");
+  }
+  assert(
+    rejected,
+    "the UI must not report durable logout when injected startup suppression could not be stored",
   );
 });
 
@@ -161,7 +298,10 @@ Deno.test("workspace migration prefers canonical and upgrades the old Hive slot"
     readMigratedSyncValue(storage, key) === "prior-hive-workspace",
     "the old autonomous workspace should hydrate the Hive slot",
   );
-  assert(storage.values.get(key.canonical) === "prior-hive-workspace", "Hive state must be canonicalized");
+  assert(
+    storage.values.get(key.canonical) === "prior-hive-workspace",
+    "Hive state must be canonicalized",
+  );
 
   storage.values.set(key.canonical, "canonical-wins");
   storage.values.set(key.legacy[0], "must-not-overwrite");
@@ -181,9 +321,18 @@ Deno.test("canonical and transition launch URLs resolve to the same connection",
   const legacyHash = parseConnectionLaunchUrl(
     "https://device.example/#krusty-remote-token=secret",
   );
-  assert(canonical?.serverUrl === "https://device.example", "canonical scheme must parse");
-  assert(JSON.stringify(legacy) === JSON.stringify(canonical), "old scheme must map to canonical connection data");
-  assert(JSON.stringify(legacyHash) === JSON.stringify(canonical), "old hash token must remain readable");
+  assert(
+    canonical?.serverUrl === "https://device.example",
+    "canonical scheme must parse",
+  );
+  assert(
+    JSON.stringify(legacy) === JSON.stringify(canonical),
+    "old scheme must map to canonical connection data",
+  );
+  assert(
+    JSON.stringify(legacyHash) === JSON.stringify(canonical),
+    "old hash token must remain readable",
+  );
 });
 
 Deno.test("desktop globals support both shells without mixing generations", () => {
@@ -193,7 +342,10 @@ Deno.test("desktop globals support both shells without mixing generations", () =
     __KRUSTY_SERVER_URL: "http://legacy.example",
     __KRUSTY_SERVER_TOKEN: "legacy-token",
   });
-  assert(canonical?.serverUrl === "http://canonical.example", "canonical globals must win as a pair");
+  assert(
+    canonical?.serverUrl === "http://canonical.example",
+    "canonical globals must win as a pair",
+  );
 
   const legacy = connectionFromInjectedGlobals({
     __MITSURO_SERVER_URL: "http://incomplete.example",
@@ -201,7 +353,8 @@ Deno.test("desktop globals support both shells without mixing generations", () =
     __KRUSTY_SERVER_TOKEN: "legacy-token",
   });
   assert(
-    legacy?.serverUrl === "http://legacy.example" && legacy.token === "legacy-token",
+    legacy?.serverUrl === "http://legacy.example" &&
+      legacy.token === "legacy-token",
     "an incomplete canonical pair must fall back to one complete old generation",
   );
 });
@@ -213,10 +366,16 @@ Deno.test("old Hive push actions keep their session and open canonical Hive focu
     focus: "mako",
     sessionId: "session-42",
   });
-  assert(action === HIVE_NOTIFICATION_ACTION, "old action must normalize to OPEN_HIVE");
+  assert(
+    action === HIVE_NOTIFICATION_ACTION,
+    "old action must normalize to OPEN_HIVE",
+  );
   assert(data.type === "hive_update", "old payload type must normalize");
   assert(data.focus === "hive", "old focus must navigate to Hive");
-  assert(data.sessionId === "session-42", "the target session must be preserved");
+  assert(
+    data.sessionId === "session-42",
+    "the target session must be preserved",
+  );
 });
 
 Deno.test("native diagnostics supports both module generations and imports old files", async () => {
@@ -274,7 +433,9 @@ Deno.test("APNs registration uses the installed binary bundle identifier", async
   assert(
     notifications.includes('Application = require("expo-application")') &&
       notifications.includes("Application?.applicationId?.trim()") &&
-      notifications.includes("nativeDeviceToken,\n              runtimeBundleId,"),
+      notifications.includes(
+        "nativeDeviceToken,\n              runtimeBundleId,",
+      ),
     "direct APNs registration must send the runtime application ID instead of a renamed default",
   );
 });
@@ -306,14 +467,18 @@ Deno.test("Hive widget keeps the prior native kind through OTA skew", async () =
     new URL("../hooks/useWidgetSync.ts", import.meta.url).pathname,
   );
   const names = config.expo.plugins
-    .find((plugin: unknown) => Array.isArray(plugin) && plugin[0] === "expo-widgets")?.[1]
+    .find((plugin: unknown) =>
+      Array.isArray(plugin) && plugin[0] === "expo-widgets"
+    )?.[1]
     ?.widgets?.map((widget: { name: string }) => widget.name) ?? [];
   assert(
     names.includes("HiveWidget") && names.includes("MakoWidget"),
     "the native build must contain both widget kinds during the transition",
   );
   assert(
-    compatibilityWidget.includes('createWidget("MakoWidget", HiveWidgetView)') &&
+    compatibilityWidget.includes(
+      'createWidget("MakoWidget", HiveWidgetView)',
+    ) &&
       sync.includes('require("../widgets/HiveWidget")') &&
       sync.includes('require("../widgets/MakoWidget")'),
     "new JS must update both canonical and prior installed widget kinds",

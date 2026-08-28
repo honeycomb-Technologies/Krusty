@@ -5,8 +5,27 @@
 
 use std::time::Duration;
 
+use reqwest::{redirect::Policy, Client, ClientBuilder};
+
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
+
+/// Start every provider HTTP client from fail-closed replay policies.
+///
+/// Application-level retry policy remains owned by the caller. Redirects are
+/// transport-level replays, and reqwest otherwise retries protocol NACKs by
+/// default; neither may create an uncounted provider request.
+pub(crate) fn provider_http_client_builder() -> ClientBuilder {
+    Client::builder()
+        .redirect(Policy::none())
+        .retry(reqwest::retry::never())
+}
+
+/// Build the minimal provider HTTP client used by catalog fetchers and as the
+/// fallback when the fully configured streaming client cannot be constructed.
+pub(crate) fn build_provider_http_client() -> reqwest::Result<Client> {
+    provider_http_client_builder().build()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDrainPolicy {

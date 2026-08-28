@@ -1,13 +1,17 @@
-import * as SecureStore from './secure-store';
-import type { MitsuroStorage } from '@mitsuro/state';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "./secure-store";
+import type { MitsuroStorage } from "@mitsuro/state";
 import {
   deleteMigratedAsyncValue,
   migrationForCanonicalKey,
   readMigratedAsyncValue,
   writeCanonicalAsyncValue,
-} from './identity-storage';
+} from "./identity-storage";
+import { durableRecoveryStorageKey } from "./recovery-connection-scope";
 
 class NativeStorage implements MitsuroStorage {
+  constructor(readonly durableRecoveryNamespace: string) {}
+
   get(key: string): string | null {
     // SecureStore is async but MitsuroStorage interface is sync.
     // Use a sync cache with async hydration for stored values.
@@ -44,8 +48,29 @@ class NativeStorage implements MitsuroStorage {
       if (value !== null) this.cache.set(key, value);
     }
   }
+
+  getDurable(key: string): Promise<string | null> {
+    // Legacy unscoped records are intentionally not migrated because their
+    // historical connection principal cannot be established.
+    return AsyncStorage.getItem(
+      durableRecoveryStorageKey(this.durableRecoveryNamespace, key),
+    );
+  }
+
+  setDurable(key: string, value: string): Promise<void> {
+    return AsyncStorage.setItem(
+      durableRecoveryStorageKey(this.durableRecoveryNamespace, key),
+      value,
+    );
+  }
+
+  deleteDurable(key: string): Promise<void> {
+    return AsyncStorage.removeItem(
+      durableRecoveryStorageKey(this.durableRecoveryNamespace, key),
+    );
+  }
 }
 
-export function createStorage(): MitsuroStorage {
-  return new NativeStorage();
+export function createStorage(connectionScope: string): MitsuroStorage {
+  return new NativeStorage(connectionScope);
 }

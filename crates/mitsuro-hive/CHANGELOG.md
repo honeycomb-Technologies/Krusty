@@ -9,4 +9,3 @@
 ### Patch changes
 
 - Updated dependencies: mitsuro-core@0.9.23, mitsuro-hive-protocol@0.1.1, mitsuro-server@0.9.23
-

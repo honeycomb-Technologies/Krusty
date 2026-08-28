@@ -34,7 +34,14 @@ export function resolveAdaptiveMaterialMode({
     return "liquid-glass";
   }
 
-  if (platform === "ios" || platform === "web") return "blur";
+  if (
+    platform === "ios" ||
+    platform === "android" ||
+    platform === "web"
+  ) {
+    return "blur";
+  }
+
   return "solid";
 }
 

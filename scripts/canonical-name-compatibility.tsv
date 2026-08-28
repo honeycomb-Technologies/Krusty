@@ -112,7 +112,7 @@ content	apps/mobile/test/identityMigration.test.ts	291	      layout.includes("EX
 content	apps/mobile/test/identityMigration.test.ts	293	      probe.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE"),
 content	apps/mobile/test/identityMigration.test.ts	303	    new URL("../widgets/MakoWidget.tsx", import.meta.url).pathname,
 content	apps/mobile/test/identityMigration.test.ts	312	    names.includes("HiveWidget") && names.includes("MakoWidget"),
-content	apps/mobile/test/identityMigration.test.ts	316	    compatibilityWidget.includes('createWidget("MakoWidget", HiveWidgetView)') &&
+content	apps/mobile/test/identityMigration.test.ts	480	      'createWidget("MakoWidget", HiveWidgetView)',
 content	apps/mobile/test/identityMigration.test.ts	318	      sync.includes('require("../widgets/MakoWidget")'),
 content	apps/mobile/test/jsHotPathProbe.test.ts	17	      source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1'") &&
 content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	57	  // Expo project 6e327449-... is still named "krusty" on expo.dev. EAS requires
@@ -238,6 +238,26 @@ content	crates/mitsuro-core/src/plugins/signing.rs	10	const LEGACY_RELEASE_ENVEL
 content	crates/mitsuro-core/src/plugins/signing.rs	148	            r#"{{"manifest_version":1,"id":"signed.plugin","name":"Signed Plugin","version":"1.0.0","publisher":"signed.publisher","description":null,"runtime":"wasm","entry_component":"plugin.wasm","render_capabilities":[],"requested_permissions":{{"fs_read":false,"fs_write":false,"network":false,"process":false}},"release":{{"url":"https://plugins.example/plugin.wasm","sha256":"{}","signature":"","signing_key_id":"release-key","signature_scheme":"manifest-envelope-v1"}},"compat":{{"krusty_min":"0.7.0","krusty_max":null}}}}"#,
 content	crates/mitsuro-core/src/plugins/types.rs	102	    #[serde(default, rename = "krusty_min", alias = "mitsuro_min")]
 content	crates/mitsuro-core/src/plugins/types.rs	104	    #[serde(default, rename = "krusty_max", alias = "mitsuro_max")]
+content	crates/mitsuro-core/src/updater/managed.rs	33	const REQUIRED_BINARIES: &[&str] = &["mitsuro", "krusty"];
+content	crates/mitsuro-core/src/updater/managed.rs	34	const OPTIONAL_BINARIES: &[&str] = &["mitsuro-hive", "krusty-mako", "agent-browser"];
+content	crates/mitsuro-core/src/updater/managed.rs	143	    krusty: Vec<u8>,
+content	crates/mitsuro-core/src/updater/managed.rs	145	    krusty_mako: Option<Vec<u8>>,
+content	crates/mitsuro-core/src/updater/managed.rs	154	    let mut krusty = None;
+content	crates/mitsuro-core/src/updater/managed.rs	156	    let mut krusty_mako = None;
+content	crates/mitsuro-core/src/updater/managed.rs	185	            "krusty" => krusty = Some(contents),
+content	crates/mitsuro-core/src/updater/managed.rs	187	            "krusty-mako" => krusty_mako = Some(contents),
+content	crates/mitsuro-core/src/updater/managed.rs	201	    let krusty = krusty.ok_or_else(|| anyhow!("Release archive is missing krusty"))?;
+content	crates/mitsuro-core/src/updater/managed.rs	216	        krusty,
+content	crates/mitsuro-core/src/updater/managed.rs	218	        krusty_mako,
+content	crates/mitsuro-core/src/updater/managed.rs	268	    write_mode(&stage.join("krusty"), &extracted.krusty, 0o555)?;
+content	crates/mitsuro-core/src/updater/managed.rs	272	    if let Some(compat) = &extracted.krusty_mako {
+content	crates/mitsuro-core/src/updater/managed.rs	273	        write_mode(&stage.join("krusty-mako"), compat, 0o555)?;
+content	crates/mitsuro-core/src/updater/managed.rs	340	    for name in ["mitsuro", "krusty", "mitsuro-hive", "krusty-mako"] {
+content	crates/mitsuro-core/src/updater/managed.rs	351	        } else if name == "mitsuro" || name == "krusty" {
+content	crates/mitsuro-core/src/updater/managed.rs	600	            krusty: b"krusty-bin".to_vec(),
+content	crates/mitsuro-core/src/updater/managed.rs	602	            krusty_mako: Some(b"mako-bin".to_vec()),
+content	crates/mitsuro-core/src/updater/managed.rs	667	            krusty_mako: None,
+content	docs/frontends/mobile-app.md	172	The existing App Store and Play identities remain on their compatibility bundle/package identifier, `io.krusty.mobile`, while product copy and deep links are Mitsuro-first. The EAS project ID ties builds to the Expo dashboard.
 content	crates/mitsuro-core/src/server_instance.rs	286	                identity: "krusty-server".to_string(),
 content	crates/mitsuro-core/src/server_instance.rs	312	            "/opt/krusty",
 content	crates/mitsuro-core/src/server_instance.rs	313	            "/opt/krusty-mako",

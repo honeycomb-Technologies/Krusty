@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::storage::{MemoryAclScope, MemoryNamespace};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LearningKind {
@@ -143,6 +145,13 @@ pub struct LearningCandidate {
     pub sensitivity: LearningSensitivity,
     pub status: LearningCandidateStatus,
     pub reason: String,
+    /// Memory destination frozen when the evidence was ingested. This keeps
+    /// Worker-private learning private even if the DM binding changes before
+    /// a user reviews the proposal.
+    pub memory_namespace: MemoryNamespace,
+    pub memory_namespace_id: Option<String>,
+    pub memory_acl_scope: MemoryAclScope,
+    pub memory_scope_resolved: bool,
     pub created_at: String,
     pub reviewed_at: Option<String>,
 }

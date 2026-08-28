@@ -28,6 +28,7 @@ mod hive_controller_events;
 mod hive_controllers;
 mod hive_daemon_leases;
 mod hive_deliveries;
+mod hive_group_worker_lanes;
 pub mod hive_groups;
 mod hive_home;
 mod hive_idempotency;
@@ -35,6 +36,10 @@ mod hive_profiles;
 mod hive_runs;
 mod hive_runtime_state;
 mod hive_schedules;
+mod hive_worker_conversations;
+mod hive_worker_governor;
+mod hive_worker_introductions;
+mod hive_worker_workflows;
 mod hive_workers;
 mod knowledge;
 mod learning_candidates;
@@ -93,6 +98,10 @@ pub use hive_deliveries::{
     HiveDeliveryPriority, HiveDeliveryStatus, HiveDeliveryStore, NewHiveDelivery,
     DEFAULT_HIVE_DELIVERY_MAX_ATTEMPTS, MAX_HIVE_DELIVERY_BODY_BYTES,
 };
+pub use hive_group_worker_lanes::{
+    load_group_worker_lane_with_conn, upsert_group_worker_lane_with_conn, HiveGroupWorkerLane,
+    HiveGroupWorkerLaneStore, NewHiveGroupWorkerLane,
+};
 pub use hive_groups::{
     parse_group_mentions, GroupMentionTarget, HiveGroup, HiveGroupExecutionMode, HiveGroupMember,
     HiveGroupMessage, HiveGroupRunContext, HiveGroupSenderKind, HiveGroupStatus, HiveGroupStore,
@@ -115,9 +124,18 @@ pub use hive_profiles::{
     HiveProfileMergeResult, HiveProfileOwner, HiveProfileOwnerError, HiveProfileSeed,
     HiveProfileSnapshot, HiveProfileStore, HiveProfileStoreError, MAX_HIVE_PROFILE_DOCUMENT_BYTES,
 };
+#[doc(hidden)]
+pub use hive_runs::reconcile_worker_introduction_review_in_transaction;
+pub(crate) use hive_runs::{
+    finalize_worker_conversation_after_governor_recovery_in_transaction,
+    reactivate_worker_conversation_controller_after_governor_recovery_in_transaction,
+    update_derived_state_for_run_in_transaction,
+};
 pub use hive_runs::{
     ClaimRunRequest, ClaimedHiveRun, DaemonFence, HiveRun, HiveRunAttempt, HiveRunAttemptOutcome,
-    HiveRunKind, HiveRunStore, LeaseReconciliation, ReconciledRun, RunCompletion,
+    HiveRunExecutionContextV1, HiveRunExecutionModeV1, HiveRunKind, HiveRunStore,
+    LeaseReconciliation, ReconciledRun, RunCompletion, WorkerIntroductionReviewRecovery,
+    HIVE_RUN_EXECUTION_CONTEXT_VERSION, WORKER_CONVERSATION_STOP_REQUESTED_REASON,
 };
 pub use hive_runtime_state::{
     HiveRunPriority, HiveRuntimeState, HiveRuntimeStateStatus, HiveRuntimeStateStore,
@@ -126,9 +144,96 @@ pub use hive_schedules::{
     HiveSchedule, HiveScheduleOccurrence, HiveScheduleOccurrenceStatus, HiveScheduleStatus,
     HiveScheduleStore, OverlapPolicy, OwnedHiveSchedule,
 };
+pub use hive_worker_conversations::{
+    accept_worker_conversation_input_in_transaction,
+    acknowledge_worker_conversation_governor_recovery_in_transaction,
+    acknowledge_worker_conversation_response_loss_in_transaction,
+    materialize_oldest_staged_input_in_transaction,
+    materialize_oldest_staged_input_with_authority_in_transaction,
+    stage_worker_conversation_input_in_transaction, AcceptWorkerConversationInput,
+    AcceptWorkerConversationInputResult, CommitWorkerConversationResponse,
+    HiveWorkerConversationInputStore, MaterializedWorkerConversationInput,
+    SqliteWorkerConversationResponseStore, StageWorkerConversationInput,
+    StageWorkerConversationInputResult, WorkerConversationGovernorRecovery,
+    WorkerConversationInput, WorkerConversationInputState, WorkerConversationPredecessorAuthority,
+    WorkerConversationResponseCommit, WorkerConversationResponseCommitDisposition,
+    WorkerConversationResponseCommitError, WORKER_DM_BLOCKED_BY_NON_CONVERSATION_RUN_PREFIX,
+};
+#[doc(hidden)]
+pub use hive_worker_governor::{
+    bind_worker_governor_recovery_grant_to_run_in_transaction,
+    grant_worker_governor_recovery_in_transaction,
+    refresh_worker_governor_recovery_run_binding_in_transaction,
+    transfer_worker_governor_recovery_grant_to_successor_in_transaction,
+    worker_governor_response_loss_recovery_required_in_transaction,
+    worker_has_unacknowledged_unresolved_provider_calls_in_transaction,
+};
+pub(crate) use hive_worker_governor::{
+    record_trusted_worker_idle_outcome_in_transaction,
+    unresolved_worker_governor_recovery_calls_belong_to_run_in_transaction,
+    validate_unbound_worker_governor_recovery_grant_in_transaction,
+    worker_governor_recovery_grant_covers_unresolved_in_transaction,
+};
+pub use hive_worker_governor::{
+    worker_local_day_window, worker_quiet_window_at, BeginWorkerProviderCall,
+    BeginWorkerProviderCallResult, FinishWorkerProviderCall, FinishWorkerProviderCallResult,
+    FrozenModelPriceSnapshot, GrantWorkerGovernorOverride, GrantWorkerGovernorRecoveryError,
+    HiveWorkerGovernorPolicy, HiveWorkerGovernorPolicyUpdate, HiveWorkerGovernorProjection,
+    HiveWorkerGovernorStore, ProviderCallRemoteAcceptance, ProviderCallTerminalState,
+    ReconcileUnknownProviderCall, RecordWorkerIdleOutcome, WorkerConversationLane,
+    WorkerGovernorCurrencyCost, WorkerGovernorDailyCostProjection, WorkerGovernorDailyUsage,
+    WorkerGovernorDecision, WorkerGovernorDisposition, WorkerGovernorGateReason,
+    WorkerGovernorIdleProjection, WorkerGovernorLaneDecisionProjection,
+    WorkerGovernorOverrideGrant, WorkerGovernorPolicyCas, WorkerGovernorRecoveryRunBinding,
+    WorkerIdleOutcome, WorkerLocalDayWindow, WorkerProviderCall, WorkerProviderCallOutcome,
+    WorkerQuietWindow, WorkerRunGovernorProjection, WorkerRunOrigin,
+    DEFAULT_WORKER_DAILY_CALL_LIMIT, DEFAULT_WORKER_DAILY_TOKEN_LIMIT,
+    DEFAULT_WORKER_GOVERNOR_TIMEZONE, DEFAULT_WORKER_IDLE_BASE_SECS, DEFAULT_WORKER_IDLE_MAX_SECS,
+    MAX_WORKER_DAILY_CALL_LIMIT, MAX_WORKER_DAILY_TOKEN_LIMIT, MAX_WORKER_IDLE_SECS,
+    WORKER_GOVERNOR_RECOVERY_GRANT_TTL_SECS,
+};
+#[cfg(test)]
+pub(crate) use hive_worker_introductions::NewWorkerIntroductionReviewClaim;
+pub use hive_worker_introductions::{
+    save_worker_introduction_opening_once, HiveWorkerIntroduction, HiveWorkerIntroductionStatus,
+    HiveWorkerIntroductionStore, WorkerIntroductionDecisionKind, WorkerIntroductionDecisionV1,
+    WorkerIntroductionEvidenceAxis, WorkerIntroductionEvidenceCoverage, WorkerIntroductionFactKind,
+    WorkerIntroductionProposalBasisV1, WorkerIntroductionProposalFactV1,
+    WorkerIntroductionProposalV1, WorkerIntroductionReviewProjection,
+    WorkerIntroductionReviewProjectionState, WorkerIntroductionReviewReadiness,
+    WorkerIntroductionReviewRecord, WorkerIntroductionReviewStatus,
+    WorkerIntroductionReviewerFactV1, WorkerIntroductionReviewerOutputV1,
+    WorkerIntroductionSelectedFactV1, MAX_WORKER_INTRODUCTION_FACTS,
+    WORKER_INTRODUCTION_PROPOSAL_VERSION,
+};
+pub(crate) use hive_worker_introductions::{
+    ReviewProposalPersistence, WorkerIntroductionReviewStore, MAX_AUTOMATIC_REVIEW_ATTEMPTS,
+};
+pub(crate) use hive_worker_workflows::{
+    committed_worker_goal_outcome_in_transaction,
+    pause_worker_workflow_after_uncertain_run_in_transaction,
+    pending_worker_goal_acceptance_exists_in_transaction,
+    terminalize_pending_worker_goal_acceptances_in_transaction,
+    worker_goal_outcome_is_accounted_in_transaction, WorkerGoalAcceptanceLifecycle,
+    WorkerGoalAcceptanceStageError,
+};
+pub use hive_worker_workflows::{
+    reconcile_worker_workflow_provider_boundary_in_transaction, SqliteWorkerGoalAcceptanceStore,
+    SqliteWorkerGoalOutcomeStore, WorkerGoalAcceptanceAssessment, WorkerGoalAcceptanceAuthority,
+    WorkerGoalAcceptanceCandidateRecord, WorkerGoalAcceptanceCandidateState,
+    WorkerGoalAcceptanceCommitDisposition, WorkerGoalAcceptanceContractV1,
+    WorkerGoalAcceptanceIntentV1, WorkerGoalAcceptanceReceipt, WorkerGoalAcceptanceReceiptKind,
+    WorkerGoalAcceptanceResolution, WorkerGoalAcceptanceResultRecord,
+    WorkerGoalAcceptanceSourceSummary, WorkerGoalAcceptanceStoreError,
+    WorkerGoalCriterionAcceptanceSpecV1, WorkerGoalOutcomeRecord, WorkerWorkflowProviderRecovery,
+    MAX_WORKER_GOAL_ACCEPTANCE_RECEIPTS, MAX_WORKER_GOAL_ACCEPTANCE_RECEIPT_DURATION_MILLIS,
+    MAX_WORKER_GOAL_ACCEPTANCE_RECEIPT_SUMMARY_BYTES, WORKER_GOAL_ACCEPTANCE_CONTRACT_VERSION,
+    WORKER_GOAL_ACCEPTANCE_INTENT_VERSION, WORKER_GOAL_AUTOMATIC_ACCEPTANCE_ENABLED,
+};
 pub use hive_workers::{
-    display_name_from_slug, load_worker_with_conn, resolve_worker_for_crew_slug_with_conn,
-    HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument, HiveWorkerDocumentKind,
+    display_name_from_slug, load_worker_with_conn, resolve_worker_conversation_with_conn,
+    resolve_worker_for_crew_slug_with_conn, HiveWorker, HiveWorkerAutonomy,
+    HiveWorkerConversationBinding, HiveWorkerDocument, HiveWorkerDocumentKind,
     HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore, NewHiveWorker,
     DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
 };
@@ -172,7 +277,7 @@ pub use recovery::{
     RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolArguments,
     RecoveryToolCall, SessionRecoveryState, REDACTED_ARGUMENT_VALUE,
 };
-pub use reports::{Report, ReportStore};
+pub use reports::{Report, ReportScope, ReportStore};
 pub use runtime_traces::{
     ReplayExpectations, ReplayGateResult, RuntimeTraceEvent, RuntimeTraceStore,
     RuntimeTraceSummary, TraceEventCount, TraceFailureCategory,

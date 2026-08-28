@@ -9,7 +9,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::client::AiClient;
+use crate::ai::client::{AiClient, RemoteAttemptPolicy};
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::RankedFile;
 
@@ -333,6 +333,63 @@ async fn generate_summary_inner(
         .iter()
         .any(|m| m.role == Role::User || m.role == Role::Assistant);
 
+    let governed_permit = if let Some((trace, operation)) = trace {
+        if let Some(governor) = trace.provider_governor() {
+            let conversation_bytes = serde_json::to_vec(conversation)
+                .map(|value| value.len())
+                .unwrap_or_default();
+            let auxiliary_bytes = preservation_hints
+                .map(str::len)
+                .unwrap_or_default()
+                .saturating_add(project_context.map(str::len).unwrap_or_default())
+                .saturating_add(file_contents.iter().fold(0usize, |total, (path, content)| {
+                    total
+                        .saturating_add(path.len())
+                        .saturating_add(content.len())
+                }))
+                .saturating_add(ranked_files.len().saturating_mul(256));
+            let reservation = super::bounded_reservation(
+                conversation_bytes
+                    .saturating_add(SUMMARIZATION_SYSTEM_PROMPT.len())
+                    .saturating_add(auxiliary_bytes)
+                    .saturating_add(2)
+                    .saturating_div(3)
+                    .saturating_add(128),
+                SUMMARIZATION_MAX_TOKENS,
+            );
+            let slot = super::WorkerProviderCallSlot::child(
+                super::WorkerProviderCallKind::CompactionSummary,
+                u32::try_from(trace.turn()).unwrap_or(u32::MAX),
+                0,
+                operation,
+            )?;
+            match governor.admit(slot, reservation)? {
+                super::WorkerProviderAdmission::Allowed(permit) => Some(permit),
+                super::WorkerProviderAdmission::Gated(decision) => {
+                    anyhow::bail!(
+                        "Hive Worker compaction provider call gated: {}",
+                        serde_json::to_string(&decision)?
+                    )
+                }
+                super::WorkerProviderAdmission::AlreadyStarted(call) => anyhow::bail!(
+                    "Hive Worker compaction provider call {} was already Started and was not replayed",
+                    call.provider_call_id
+                ),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let provider_call_id = governed_permit
+        .as_ref()
+        .map(|permit| permit.provider_call_id().to_string());
+    let attempt_policy = if governed_permit.is_some() {
+        RemoteAttemptPolicy::GovernedSingleAttempt
+    } else {
+        RemoteAttemptPolicy::ConfiguredRetries
+    };
     let started_at = std::time::Instant::now();
     let response = if has_conversation {
         let appended_message = build_summarization_user_message(
@@ -349,12 +406,13 @@ async fn generate_summary_inner(
         );
 
         client
-            .call_with_conversation_with_usage(
+            .call_with_conversation_with_usage_and_attempt_policy(
                 model,
                 SUMMARIZATION_SYSTEM_PROMPT,
                 conversation,
                 &appended_message,
                 SUMMARIZATION_MAX_TOKENS,
+                attempt_policy,
             )
             .await
     } else {
@@ -373,25 +431,45 @@ async fn generate_summary_inner(
         );
 
         client
-            .call_simple_with_usage(
+            .call_simple_with_usage_and_attempt_policy(
                 model,
                 SUMMARIZATION_SYSTEM_PROMPT,
                 &prompt,
                 SUMMARIZATION_MAX_TOKENS,
+                attempt_policy,
             )
             .await
     };
 
     if let Some((trace, operation)) = trace {
-        trace
-            .record_simple_call(
-                operation,
-                client.provider_id(),
-                model,
-                started_at,
-                &response,
-            )
-            .await;
+        if let Some(provider_call_id) = provider_call_id.clone() {
+            trace
+                .record_simple_call_with_id(
+                    provider_call_id,
+                    operation,
+                    client.provider_id(),
+                    model,
+                    started_at,
+                    &response,
+                )
+                .await;
+        } else {
+            trace
+                .record_simple_call(
+                    operation,
+                    client.provider_id(),
+                    model,
+                    started_at,
+                    &response,
+                )
+                .await;
+        }
+    }
+    if let (Some(permit), Ok(result)) = (governed_permit.as_ref(), response.as_ref()) {
+        permit.complete(super::WorkerProviderCompletion::acknowledged(
+            super::WorkerProviderTerminalOutcome::Completed,
+            result.usage.clone(),
+        ))?;
     }
 
     parse_summary_response(&response?.text)

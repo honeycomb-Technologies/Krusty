@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::body::{to_bytes, Body};
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::Json;
 use tokio::sync::{Mutex, RwLock};
+use tower::ServiceExt;
 
 use mitsuro_core::agent::{
     loop_events::LoopStopReason, AgentCancellation, DelegatedRunStage, LoopEvent, UserHookManager,
@@ -19,19 +21,25 @@ use mitsuro_core::paths;
 use mitsuro_core::process::ProcessRegistry;
 use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
-use mitsuro_core::storage::reports::CreateReportInput;
+use mitsuro_core::storage::reports::{CreateReportInput, ReportScope};
 use mitsuro_core::storage::{
     bootstrap_hive_home, refresh_current_snapshot, AutonomousTaskStore, Database, DelegatedRunRole,
-    DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore, HiveProfileDocumentKind,
-    HiveProfileOwner, HiveProfileStore, HiveRunPriority, HiveRuntimeStateStatus,
-    HiveRuntimeStateStore, MemoryStore, MemoryType, Preferences, ReportStore, RuntimeTraceEvent,
-    RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore, HiveGroupWorkerLaneStore,
+    HiveProfileDocumentKind, HiveProfileOwner, HiveProfileStore, HiveRunPriority,
+    HiveRuntimeStateStatus, HiveRuntimeStateStore, HiveWorkerStore, MemoryStore, MemoryType,
+    NewHiveGroupWorkerLane, Preferences, ReportStore, RuntimeTraceEvent, RuntimeTraceStore,
+    SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::SessionManager;
 
 use super::attention::{attention, AttentionQuery};
+use super::control_plane::{
+    cancel_schedule, create_schedule, pause_schedule, replace_schedule, resume_schedule,
+    ScheduleWriteRequest,
+};
 use super::current::current;
+use super::governor::{get_worker_governor, grant_worker_governor_recovery};
 use super::groups::{
     archive_group, create_group, get_group, get_group_turn, list_group_messages, list_groups,
     send_group_message, stop_group, update_group, CreateGroupRequest, ListGroupMessagesQuery,
@@ -44,13 +52,16 @@ use super::home::{
     update_crew_document, update_home_document, DocumentWriteRequest,
 };
 use super::sessions::{
-    dispatch, legacy_main_session, list_sessions, main_session, map_runtime_trace_event,
-    recover_daemon, schedule_session, session_status, set_priority, DispatchRequest,
-    PriorityRequest, ScheduleRequest,
+    cancel_session, dispatch, legacy_main_session, list_sessions, main_session,
+    map_runtime_trace_event, pause_session, recover_daemon, resume_session, schedule_session,
+    session_status, set_priority, DispatchRequest, PriorityRequest, ScheduleRequest,
 };
 use super::workers::{
-    archive_worker, create_worker, ensure_worker_dm, get_worker, list_workers, pause_worker,
-    resume_worker, update_worker, CreateWorkerRequest, UpdateWorkerRequest,
+    archive_worker, confirm_worker_introduction, create_worker, ensure_worker_dm, get_worker,
+    get_worker_by_session, keep_talking_worker_introduction, list_workers,
+    load_introduction_action_result, pause_worker, retry_worker_introduction,
+    skip_worker_introduction, update_worker, ConfirmWorkerIntroductionRequest, CreateWorkerRequest,
+    HiveWorkerSessionBindingResponse, KeepTalkingWorkerIntroductionRequest, UpdateWorkerRequest,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -1423,6 +1434,7 @@ async fn current_summarizes_knowledge_snapshot_health() {
             summary: "Updated project findings",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .expect("report should persist");
 
@@ -1804,7 +1816,13 @@ async fn groups_crud_lifecycle_is_exact_owner_scoped() {
         Err(AppError::NotFound(_))
     ));
     assert!(matches!(
-        archive_group(State(state.clone()), bob(), Path(group_id.clone())).await,
+        archive_group(
+            State(state.clone()),
+            bob(),
+            Path(group_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
         Err(AppError::NotFound(_))
     ));
     let Json(bob_list) = list_groups(State(state.clone()), bob())
@@ -1859,11 +1877,47 @@ async fn groups_crud_lifecycle_is_exact_owner_scoped() {
     assert_eq!(shrunk.group.members.len(), 1);
     assert!(shrunk.group.default_assignee_worker_id.is_none());
 
-    // Archive hides the group and blocks further edits.
-    let Json(archived) = archive_group(State(state.clone()), alice(), Path(group_id.clone()))
-        .await
-        .expect("archive should succeed");
-    assert!(archived.ok);
+    // A PATCH is one mutation boundary: invalid settings cannot commit an
+    // otherwise-valid roster replacement before the request is rejected.
+    assert!(matches!(
+        update_group(
+            State(state.clone()),
+            alice(),
+            Path(group_id.clone()),
+            Json(UpdateGroupRequest {
+                title: Some("   ".to_string()),
+                member_worker_ids: Some(vec![worker_ids[1].clone()]),
+                ..empty_update_group_request()
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+    let Json(after_rejected_update) =
+        get_group(State(state.clone()), alice(), Path(group_id.clone()))
+            .await
+            .expect("rejected update must leave the group readable");
+    assert_eq!(after_rejected_update.group.title, "War Room");
+    assert_eq!(after_rejected_update.group.members.len(), 1);
+    assert_eq!(
+        after_rejected_update.group.members[0].worker_id,
+        worker_ids[0]
+    );
+
+    // Archive is lifecycle control and fails closed without the daemon. Seed
+    // the read-only archived projection directly after proving that boundary.
+    let archive_error = archive_group(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect_err("embedded archive must require the daemon control plane");
+    assert!(app_error_description(archive_error).contains("daemon control plane"));
+    mitsuro_core::storage::HiveGroupStore::new(Database::new(&state.db_path).unwrap())
+        .set_status(&group_id, mitsuro_core::storage::HiveGroupStatus::Archived)
+        .unwrap();
     let Json(after_archive) = list_groups(State(state.clone()), alice())
         .await
         .expect("list should succeed");
@@ -1938,6 +1992,23 @@ async fn group_messages_and_turns_read_with_exact_ownership_and_cursors() {
         &turn,
     )
     .unwrap();
+
+    // A limited backlog advances only through the returned page. Returning a
+    // table-wide high-water mark here would make the event tail skip seq 2.
+    let Json(first_page) = list_group_messages(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        Query(ListGroupMessagesQuery {
+            after_seq: Some(0),
+            limit: Some(1),
+        }),
+    )
+    .await
+    .expect("limited message list should succeed");
+    assert_eq!(first_page.messages.len(), 1);
+    assert_eq!(first_page.messages[0].seq, 1);
+    assert_eq!(first_page.latest_seq, 1);
 
     // Cursor pagination returns strictly-after rows.
     let Json(page) = list_group_messages(
@@ -2143,10 +2214,20 @@ async fn group_sends_fail_closed_without_the_daemon_but_prepare_dm_lanes() {
         );
     }
 
-    // Archived groups refuse sends outright.
-    let _ = archive_group(State(state.clone()), alice(), Path(group_id.clone()))
-        .await
-        .expect("archive should succeed");
+    // Archived groups refuse sends outright. The embedded route cannot
+    // perform lifecycle control without the daemon, so seed the projection.
+    let archive_error = archive_group(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect_err("embedded archive must require the daemon control plane");
+    assert!(app_error_description(archive_error).contains("daemon control plane"));
+    mitsuro_core::storage::HiveGroupStore::new(Database::new(&state.db_path).unwrap())
+        .set_status(&group_id, mitsuro_core::storage::HiveGroupStatus::Archived)
+        .unwrap();
     assert!(matches!(
         send_group_message(
             State(state.clone()),
@@ -2178,8 +2259,85 @@ fn create_worker_request(slug: &str) -> CreateWorkerRequest {
     }
 }
 
+#[tokio::test]
+async fn every_public_worker_create_route_requires_assistant_first_idempotency() {
+    for (label, legacy_wire, path) in [
+        ("canonical collection", false, "/workers"),
+        (
+            "canonical introductions alias",
+            false,
+            "/workers/introductions",
+        ),
+        ("legacy collection", true, "/workers"),
+        ("legacy introductions alias", true, "/workers/introductions"),
+    ] {
+        let (state, _temp_dir) = create_test_state();
+        let router = if legacy_wire {
+            super::legacy_router()
+        } else {
+            super::router()
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "slug": "route-contract" }).to_string(),
+            ))
+            .expect("route contract request should build");
+
+        let response = router
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .expect("Worker create route should respond");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("Worker create rejection body should load");
+        let error: serde_json::Value =
+            serde_json::from_slice(&body).expect("Worker create rejection should be JSON");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{label} must require the assistant-first Idempotency-Key"
+        );
+        assert_eq!(
+            error["error"], "Idempotency-Key is required when creating and meeting a Worker",
+            "{label} must route through the atomic assistant-first handler"
+        );
+
+        let db = Database::new(&state.db_path).expect("route contract database should open");
+        let counts = db
+            .conn()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM hive_workers),
+                    (SELECT COUNT(*) FROM hive_worker_introductions),
+                    (SELECT COUNT(*) FROM sessions WHERE session_type = 'hive'),
+                    (SELECT COUNT(*) FROM messages)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("route contract counts should load");
+        assert_eq!(
+            counts,
+            (0, 0, 0, 0),
+            "{label} must not quiet-create a Worker, DM, Introduction, or fabricated user row"
+        );
+    }
+}
+
 fn empty_update_worker_request() -> UpdateWorkerRequest {
     UpdateWorkerRequest {
+        expected_revision: 1,
         display_name: None,
         avatar_color: None,
         model: None,
@@ -2192,8 +2350,805 @@ fn empty_update_worker_request() -> UpdateWorkerRequest {
     }
 }
 
+fn introduction_action_headers(key: &'static str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("idempotency-key", HeaderValue::from_static(key));
+    headers
+}
+
+fn worker_schedule_request(worker_id: Option<&str>) -> ScheduleWriteRequest {
+    serde_json::from_value(serde_json::json!({
+        "title": "Worker check-in",
+        "objective": "Review the current Worker objective",
+        "recurrence": {
+            "kind": "once",
+            "at": (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339(),
+        },
+        "timezone": "UTC",
+        "worker_id": worker_id,
+    }))
+    .expect("schedule request fixture should deserialize")
+}
+
+fn schedule_mutation_headers(key: &'static str) -> HeaderMap {
+    let mut headers = introduction_action_headers(key);
+    headers.insert("if-match", HeaderValue::from_static("\"0\""));
+    headers
+}
+
+fn worker_dm_control_snapshot(state: &AppState, session_id: &str) -> (i64, i64, i64, i64) {
+    Database::new(&state.db_path)
+        .expect("database should open")
+        .conn()
+        .query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM sessions WHERE id = ?1),
+                 (SELECT COUNT(*) FROM hive_runtime_state WHERE session_id = ?1),
+                 (SELECT COUNT(*) FROM hive_schedules schedule
+                    JOIN hive_controllers controller ON controller.id = schedule.controller_id
+                   WHERE controller.session_id = ?1),
+                 (SELECT COUNT(*) FROM hive_controller_events event
+                    JOIN hive_controllers controller ON controller.id = event.controller_id
+                   WHERE controller.session_id = ?1)",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("control snapshot should load")
+}
+
+fn assert_worker_control_conflict<T>(result: Result<T, AppError>, worker_id: &str) {
+    match result {
+        Err(AppError::Conflict(message)) => {
+            assert!(message.contains(worker_id));
+        }
+        _ => panic!("Worker DM generic control must fail with a conflict"),
+    }
+}
+
 #[tokio::test]
-async fn workers_crud_lifecycle_is_exact_owner_scoped() {
+async fn generic_session_controls_reject_worker_dm_and_hide_group_lane_without_mutation() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("control-fence")),
+    )
+    .await
+    .expect("Worker fixture should create");
+    let worker_id = created.worker.id;
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM fixture should create");
+    let before = worker_dm_control_snapshot(&state, &dm.session_id);
+
+    assert_worker_control_conflict(
+        pause_session(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        &worker_id,
+    );
+    assert_worker_control_conflict(
+        resume_session(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        &worker_id,
+    );
+    assert_worker_control_conflict(
+        schedule_session(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+            Json(ScheduleRequest {
+                start_at: (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339(),
+            }),
+        )
+        .await,
+        &worker_id,
+    );
+    assert_worker_control_conflict(
+        cancel_session(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        &worker_id,
+    );
+    assert_eq!(worker_dm_control_snapshot(&state, &dm.session_id), before);
+
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(create_group_request(
+            "Hidden control room",
+            vec![worker_id.clone()],
+        )),
+    )
+    .await
+    .expect("group fixture should create");
+    let hidden_lane =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"))
+            .create_session_for_user_with_config(
+                "Hidden Worker lane",
+                None,
+                None,
+                None,
+                WorkspaceMode::Neutral,
+                Some("alice"),
+                None,
+                SessionType::Hive,
+            )
+            .expect("hidden lane session should create");
+    HiveGroupWorkerLaneStore::new(Database::new(&state.db_path).expect("database should open"))
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.group.id,
+            worker_id,
+            hidden_lane.clone(),
+        ))
+        .expect("hidden group lane should bind");
+    let hidden_before = worker_dm_control_snapshot(&state, &hidden_lane);
+    assert!(matches!(
+        pause_session(
+            State(state.clone()),
+            alice(),
+            Path(hidden_lane.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        create_schedule(
+            State(state.clone()),
+            alice(),
+            Path(hidden_lane.clone()),
+            HeaderMap::new(),
+            Json(worker_schedule_request(None)),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        cancel_session(
+            State(state.clone()),
+            alice(),
+            Path(hidden_lane.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert_eq!(
+        worker_dm_control_snapshot(&state, &hidden_lane),
+        hidden_before
+    );
+}
+
+#[tokio::test]
+async fn worker_dm_schedule_controls_require_exact_worker_binding() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    configure_test_model(&state).await;
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(CreateWorkerRequest {
+            model: Some("gpt-5.5".into()),
+            ..create_worker_request("calendar-fence")
+        }),
+    )
+    .await
+    .expect("Worker fixture should create");
+    let worker_id = created.worker.id;
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM fixture should create");
+
+    assert_worker_control_conflict(
+        create_schedule(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+            Json(worker_schedule_request(None)),
+        )
+        .await,
+        &worker_id,
+    );
+    assert_worker_control_conflict(
+        create_schedule(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+            Json(worker_schedule_request(Some("different-worker"))),
+        )
+        .await,
+        &worker_id,
+    );
+    assert!(matches!(
+        create_schedule(
+            State(state.clone()),
+            alice(),
+            Path(dm.session_id.clone()),
+            HeaderMap::new(),
+            Json(worker_schedule_request(Some(&worker_id))),
+        )
+        .await,
+        Err(AppError::BadGateway(message)) if message.contains("daemon control plane")
+    ));
+
+    let controller_id = format!("calendar-controller-{worker_id}");
+    let now = chrono::Utc::now().to_rfc3339();
+    let recurrence = serde_json::json!({
+        "kind": "once",
+        "at": (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339(),
+    })
+    .to_string();
+    let db = Database::new(&state.db_path).expect("database should open");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_controllers (
+                 id, scope_key, user_id, session_id, status, timezone,
+                 max_concurrent_runs, created_at, updated_at, worker_id
+             ) VALUES (?1, ?2, 'alice', ?3, 'active', 'UTC', 1, ?4, ?4, ?5)",
+            (
+                controller_id.as_str(),
+                format!("worker-calendar:{worker_id}"),
+                dm.session_id.as_str(),
+                now.as_str(),
+                worker_id.as_str(),
+            ),
+        )
+        .expect("Worker controller fixture should persist");
+    for (schedule_id, bound_worker_id) in [
+        ("typed-worker-schedule", Some(worker_id.as_str())),
+        ("untyped-worker-schedule", None),
+    ] {
+        db.conn()
+            .execute(
+                "INSERT INTO hive_schedules (
+                     id, controller_id, title, summary, objective, recurrence_kind,
+                     recurrence_json, timezone, gap_policy, fold_policy, status,
+                     priority, misfire_policy, misfire_grace_secs, catch_up_limit,
+                     overlap_policy, max_attempts, retry_base_secs, retry_max_secs,
+                     retry_jitter, revision, created_by, created_at, updated_at,
+                     worker_id
+                 ) VALUES (
+                     ?1, ?2, 'Worker check-in', '', 'Review current objective', 'once',
+                     ?3, 'UTC', 'shift_forward', 'first', 'enabled', 0,
+                     'fire_once', 300, 1, 'queue_one', 3, 15, 900, 'full', 0,
+                     'alice', ?4, ?4, ?5
+                 )",
+                (
+                    schedule_id,
+                    controller_id.as_str(),
+                    recurrence.as_str(),
+                    now.as_str(),
+                    bound_worker_id,
+                ),
+            )
+            .expect("schedule fixture should persist");
+    }
+    drop(db);
+
+    assert_worker_control_conflict(
+        pause_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "untyped-worker-schedule".into())),
+            schedule_mutation_headers("pause-untyped-worker-schedule"),
+        )
+        .await,
+        &worker_id,
+    );
+    for result in [
+        pause_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "typed-worker-schedule".into())),
+            schedule_mutation_headers("pause-typed-worker-schedule"),
+        )
+        .await,
+        resume_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "typed-worker-schedule".into())),
+            schedule_mutation_headers("resume-typed-worker-schedule"),
+        )
+        .await,
+        cancel_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "typed-worker-schedule".into())),
+            schedule_mutation_headers("cancel-typed-worker-schedule"),
+        )
+        .await,
+    ] {
+        assert!(matches!(
+            result,
+            Err(AppError::BadGateway(message)) if message.contains("daemon control plane")
+        ));
+    }
+    assert_worker_control_conflict(
+        replace_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "typed-worker-schedule".into())),
+            schedule_mutation_headers("replace-mismatched-worker-schedule"),
+            Json(worker_schedule_request(Some("different-worker"))),
+        )
+        .await,
+        &worker_id,
+    );
+    assert!(matches!(
+        replace_schedule(
+            State(state.clone()),
+            alice(),
+            Path((dm.session_id.clone(), "typed-worker-schedule".into())),
+            schedule_mutation_headers("replace-typed-worker-schedule"),
+            Json(worker_schedule_request(Some(&worker_id))),
+        )
+        .await,
+        Err(AppError::BadGateway(message)) if message.contains("daemon control plane")
+    ));
+
+    let db = Database::new(&state.db_path).expect("database should reopen");
+    let unchanged: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_schedules
+             WHERE controller_id = ?1 AND status = 'enabled' AND revision = 0",
+            [&controller_id],
+            |row| row.get(0),
+        )
+        .expect("schedule state should load");
+    assert_eq!(
+        unchanged, 2,
+        "failed or rejected controls must not mutate schedules"
+    );
+}
+
+#[tokio::test]
+async fn worker_introduction_action_routes_require_replay_keys_and_hide_foreign_workers() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("introduction-guard")),
+    )
+    .await
+    .expect("legacy Worker fixture should create");
+    let worker_id = created.worker.id;
+
+    assert!(matches!(
+        retry_worker_introduction(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+    assert!(matches!(
+        skip_worker_introduction(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+    assert!(matches!(
+        confirm_worker_introduction(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+            Json(ConfirmWorkerIntroductionRequest {
+                proposal_id: "proposal-1".into(),
+                proposal_revision: 1,
+                selected_facts: vec![],
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+    assert!(matches!(
+        keep_talking_worker_introduction(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+            Json(KeepTalkingWorkerIntroductionRequest {
+                proposal_id: "proposal-1".into(),
+                proposal_revision: 1,
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+
+    // Ownership is resolved before the daemon call, so a foreign caller gets
+    // the same not-found surface whether it guesses retry or skip.
+    assert!(matches!(
+        retry_worker_introduction(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            introduction_action_headers("foreign-retry"),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        skip_worker_introduction(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            introduction_action_headers("foreign-skip"),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        confirm_worker_introduction(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            introduction_action_headers("foreign-confirm"),
+            Json(ConfirmWorkerIntroductionRequest {
+                proposal_id: "proposal-1".into(),
+                proposal_revision: 1,
+                selected_facts: vec![],
+            }),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        keep_talking_worker_introduction(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            introduction_action_headers("foreign-keep"),
+            Json(KeepTalkingWorkerIntroductionRequest {
+                proposal_id: "proposal-1".into(),
+                proposal_revision: 1,
+            }),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+
+    HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .set_status(
+            &worker_id,
+            mitsuro_core::storage::HiveWorkerStatus::Archived,
+        )
+        .expect("fixture should archive");
+    assert!(matches!(
+        skip_worker_introduction(
+            State(state.clone()),
+            alice(),
+            Path(worker_id),
+            introduction_action_headers("archived-skip"),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn worker_introduction_action_result_must_match_durable_run_and_eligibility() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("result-contract")),
+    )
+    .await
+    .expect("legacy Worker fixture should create");
+    let worker_id = created.worker.id;
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM fixture should create");
+    let now = chrono::Utc::now().to_rfc3339();
+    Database::new(&state.db_path)
+        .expect("database should open")
+        .conn()
+        .execute(
+            "INSERT INTO hive_worker_introductions (
+                 worker_id, run_id, status, prompt_version, created_at,
+                 updated_at, completed_at
+             ) VALUES (?1, NULL, 'skipped', 1, ?2, ?2, ?2)",
+            (worker_id.as_str(), now.as_str()),
+        )
+        .expect("explicit legacy skip fixture should persist");
+    let store = HiveWorkerStore::new(
+        Database::new(&state.db_path).expect("Worker store database should open"),
+    );
+    let accepted = mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+        worker_id: worker_id.clone(),
+        session_id: dm.session_id.clone(),
+        run_id: None,
+        status: "skipped".into(),
+        autonomy_eligible: true,
+        cancellation_requested: false,
+    };
+    let Json(detail) = load_introduction_action_result(
+        &state,
+        &store,
+        Some("alice"),
+        &worker_id,
+        accepted.clone(),
+    )
+    .expect("matching action response should project");
+    assert_eq!(
+        detail.introduction.as_ref().map(|row| row.status.as_str()),
+        Some("skipped")
+    );
+
+    let wrong_run = mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+        run_id: Some("wrong-run".into()),
+        ..accepted.clone()
+    };
+    assert!(matches!(
+        load_introduction_action_result(
+            &state,
+            &store,
+            Some("alice"),
+            &worker_id,
+            wrong_run,
+        ),
+        Err(AppError::Internal(message)) if message.contains("durable lifecycle run")
+    ));
+    let wrong_eligibility = mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+        autonomy_eligible: false,
+        ..accepted
+    };
+    assert!(matches!(
+        load_introduction_action_result(
+            &state,
+            &store,
+            Some("alice"),
+            &worker_id,
+            wrong_eligibility,
+        ),
+        Err(AppError::Internal(message)) if message.contains("durable lifecycle state")
+    ));
+
+    let db = Database::new(&state.db_path).expect("database should open");
+    let confirmed_proposal = serde_json::json!({
+        "schema_version": 1,
+        "proposal_id": "confirmed-proposal",
+        "revision": 1,
+        "worker_id": worker_id.clone(),
+        "session_id": dm.session_id,
+        "basis": {
+            "opening_message_id": 1,
+            "through_message_id": 3,
+            "user_message_ids": [2],
+            "transcript_digest": "digest"
+        },
+        "base_identity_digest": "identity",
+        "base_soul_digest": "soul",
+        "facts": [{
+            "fact_id": "fact-1",
+            "kind": "purpose",
+            "statement": "Help with runtime reliability.",
+            "evidence_message_id": 2,
+            "evidence_excerpt": "runtime reliability"
+        }]
+    });
+    db.conn()
+        .execute(
+            "UPDATE hive_worker_introductions
+             SET status = 'confirmed', proposal_json = ?2,
+                 proposal_revision = 1, completed_at = ?3, updated_at = ?3
+             WHERE worker_id = ?1",
+            (
+                worker_id.as_str(),
+                confirmed_proposal.to_string(),
+                now.as_str(),
+            ),
+        )
+        .expect("confirmed fixture should persist");
+    let Json(confirmed) = load_introduction_action_result(
+        &state,
+        &store,
+        Some("alice"),
+        &worker_id,
+        mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+            worker_id: worker_id.clone(),
+            session_id: dm.session_id.clone(),
+            run_id: None,
+            status: "confirmed".into(),
+            autonomy_eligible: true,
+            cancellation_requested: false,
+        },
+    )
+    .expect("confirmed review decision should project");
+    assert_eq!(
+        confirmed
+            .introduction
+            .as_ref()
+            .map(|row| row.status.as_str()),
+        Some("confirmed")
+    );
+
+    db.conn()
+        .execute(
+            "UPDATE hive_worker_introductions
+             SET status = 'awaiting_context', proposal_json = NULL,
+                 completed_at = NULL, updated_at = ?2
+             WHERE worker_id = ?1",
+            (worker_id.as_str(), now.as_str()),
+        )
+        .expect("return-to-context fixture should persist");
+    let Json(returned) = load_introduction_action_result(
+        &state,
+        &store,
+        Some("alice"),
+        &worker_id,
+        mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+            worker_id: worker_id.clone(),
+            session_id: dm.session_id.clone(),
+            run_id: None,
+            status: "awaiting_context".into(),
+            autonomy_eligible: false,
+            cancellation_requested: false,
+        },
+    )
+    .expect("return decision should project its current durable lifecycle");
+    assert_eq!(
+        returned
+            .introduction
+            .as_ref()
+            .map(|row| row.status.as_str()),
+        Some("awaiting_context")
+    );
+
+    // A retry commits queued, but the scheduler is free to advance that exact
+    // run before the route reloads its response projection.
+    db.conn()
+        .execute(
+            "DELETE FROM hive_worker_introductions WHERE worker_id = ?1",
+            [&worker_id],
+        )
+        .expect("skipped fixture should clear");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_controllers (
+                 id, scope_key, user_id, session_id, status, timezone,
+                 max_concurrent_runs, created_at, updated_at, worker_id
+             ) VALUES (
+                 'projection-controller', 'worker:projection', 'alice', ?1,
+                 'active', 'UTC', 1, ?2, ?2, ?3
+             )",
+            (dm.session_id.as_str(), now.as_str(), worker_id.as_str()),
+        )
+        .expect("controller fixture should persist");
+    let projection_context = serde_json::to_string(
+        &mitsuro_core::storage::HiveRunExecutionContextV1::worker_conversation_neutral(
+            worker_id.clone(),
+            1,
+            mitsuro_core::storage::WorkerConversationLane::DirectMessage,
+        )
+        .expect("Introduction context"),
+    )
+    .expect("serialized Introduction context");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_runs (
+                 id, controller_id, session_id, kind, objective, config_json,
+                 status, available_at, max_attempts, created_at, updated_at,
+                 worker_id, governor_origin, governor_lane_key,
+                 execution_context_json
+             ) VALUES (
+                 'projection-run', 'projection-controller', ?1,
+                 'worker_introduction', 'introduce', '{}', 'running', ?2,
+                 1, ?2, ?2, ?3, 'user_lifecycle_action', 'dm', ?4
+            )",
+            (
+                dm.session_id.as_str(),
+                now.as_str(),
+                worker_id.as_str(),
+                projection_context,
+            ),
+        )
+        .expect("running retry fixture should persist");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_worker_introductions (
+                 worker_id, run_id, status, prompt_version, created_at, updated_at
+             ) VALUES (?1, 'projection-run', 'running', 1, ?2, ?2)",
+            (worker_id.as_str(), now.as_str()),
+        )
+        .expect("running lifecycle fixture should persist");
+    drop(db);
+    let queued_response = mitsuro_hive_protocol::WorkerIntroductionActionResponse {
+        worker_id: worker_id.clone(),
+        session_id: dm.session_id,
+        run_id: Some("projection-run".into()),
+        status: "queued".into(),
+        autonomy_eligible: false,
+        cancellation_requested: false,
+    };
+    let Json(advanced) =
+        load_introduction_action_result(&state, &store, Some("alice"), &worker_id, queued_response)
+            .expect("queued retry should accept an already-running durable projection");
+    assert_eq!(
+        advanced
+            .introduction
+            .as_ref()
+            .map(|introduction| introduction.status.as_str()),
+        Some("running")
+    );
+}
+
+#[tokio::test]
+async fn worker_detail_fails_closed_on_malformed_review_ready_proposal() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("malformed-proposal")),
+    )
+    .await
+    .expect("Worker fixture should create");
+    let worker_id = created.worker.id;
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM fixture should create");
+    assert_eq!(dm.worker_id, worker_id);
+    let now = chrono::Utc::now().to_rfc3339();
+    Database::new(&state.db_path)
+        .expect("database should open")
+        .conn()
+        .execute(
+            "INSERT INTO hive_worker_introductions (
+                 worker_id, run_id, status, prompt_version, proposal_json,
+                 proposal_revision, created_at, updated_at
+             ) VALUES (?1, NULL, 'review_ready', 1, '{\"schema_version\":1}',
+                       1, ?2, ?2)",
+            (worker_id.as_str(), now.as_str()),
+        )
+        .expect("malformed typed proposal fixture should persist as valid JSON");
+
+    assert!(matches!(
+        get_worker(State(state.clone()), alice(), Path(worker_id)).await,
+        Err(AppError::Internal(message))
+            if message.contains("proposal is not strict V1")
+    ));
+}
+
+#[tokio::test]
+async fn workers_crud_and_mutation_boundaries_are_exact_owner_scoped() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     create_test_user(&state, "bob");
@@ -2266,6 +3221,7 @@ async fn workers_crud_lifecycle_is_exact_owner_scoped() {
             State(state.clone()),
             bob(),
             Path(worker_id.clone()),
+            introduction_action_headers("foreign-update"),
             Json(empty_update_worker_request()),
         )
         .await,
@@ -2283,51 +3239,76 @@ async fn workers_crud_lifecycle_is_exact_owner_scoped() {
     assert_eq!(alice_list.workers.len(), 1);
     assert_eq!(alice_list.workers[0].id, worker_id);
 
-    // Profile and document updates round-trip.
-    let Json(updated) = update_worker(
-        State(state.clone()),
-        alice(),
-        Path(worker_id.clone()),
-        Json(UpdateWorkerRequest {
-            display_name: Some("Lead Researcher".to_string()),
-            autonomy: Some(
-                serde_json::from_value(serde_json::json!("always_on"))
-                    .expect("autonomy should parse"),
-            ),
-            heartbeat_interval_secs: Some(900),
-            soul: Some("Curious and rigorous.".to_string()),
-            ..empty_update_worker_request()
-        }),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "worker update should succeed: {}",
-            app_error_description(error)
+    // Every mutation requires both a revision and a replay key before the
+    // server will approach the independently supervised daemon.
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+            Json(empty_update_worker_request()),
         )
-    });
-    assert_eq!(updated.worker.display_name, "Lead Researcher");
-    assert_eq!(updated.worker.autonomy, "always_on");
-    assert_eq!(updated.worker.heartbeat_interval_secs, Some(900));
-    assert_eq!(updated.soul.as_deref(), Some("Curious and rigorous."));
-    assert_eq!(updated.identity.as_deref(), Some("You research deeply."));
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+    assert!(matches!(
+        pause_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+            Json(super::workers::SetWorkerStatusRequest {
+                expected_revision: created.worker.revision,
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+    assert!(matches!(
+        archive_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+            Json(super::workers::SetWorkerStatusRequest {
+                expected_revision: created.worker.revision,
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
 
-    // Pause and resume flip status without touching identity.
-    let Json(paused) = pause_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+    // The route unit harness intentionally has no daemon. A replay-keyed
+    // request must fail without partially mutating local state.
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            introduction_action_headers("update-without-daemon"),
+            Json(UpdateWorkerRequest {
+                display_name: Some("Lead Researcher".to_string()),
+                ..empty_update_worker_request()
+            }),
+        )
+        .await,
+        Err(AppError::BadGateway(_))
+    ));
+    let Json(unchanged) = get_worker(State(state.clone()), alice(), Path(worker_id.clone()))
         .await
-        .expect("pause should succeed");
-    assert_eq!(paused.status, "paused");
-    let Json(resumed) = resume_worker(State(state.clone()), alice(), Path(worker_id.clone()))
-        .await
-        .expect("resume should succeed");
-    assert_eq!(resumed.status, "active");
+        .expect("failed daemon mutation must leave the Worker readable");
+    assert_eq!(unchanged.worker.display_name, "Deep Researcher");
+    assert_eq!(unchanged.worker.revision, 1);
 
-    // Delete archives instead of destroying, frees the slug, and blocks writes.
-    let Json(archive_response) =
-        archive_worker(State(state.clone()), alice(), Path(worker_id.clone()))
-            .await
-            .expect("archive should succeed");
-    assert!(archive_response.ok);
+    // Archive projection remains non-destructive and frees the slug. The
+    // daemon's atomic lifecycle transition itself is covered in runtime tests.
+    HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .set_status(
+            &worker_id,
+            mitsuro_core::storage::HiveWorkerStatus::Archived,
+        )
+        .expect("fixture should archive");
     let Json(after_archive) = list_workers(State(state.clone()), alice())
         .await
         .expect("list should succeed");
@@ -2342,6 +3323,7 @@ async fn workers_crud_lifecycle_is_exact_owner_scoped() {
             State(state.clone()),
             alice(),
             Path(worker_id.clone()),
+            introduction_action_headers("archived-update"),
             Json(empty_update_worker_request()),
         )
         .await,
@@ -2358,6 +3340,77 @@ async fn workers_crud_lifecycle_is_exact_owner_scoped() {
     )
     .await
     .expect("archived slug should be reusable");
+}
+
+#[tokio::test]
+async fn worker_governor_is_read_only_exact_owner_and_exact_dm_scoped() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("governed-worker")),
+    )
+    .await
+    .expect("Worker fixture should create");
+    let worker_id = created.worker.id.clone();
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM should create");
+
+    let Json(projection) =
+        get_worker_governor(State(state.clone()), alice(), Path(worker_id.clone()))
+            .await
+            .expect("exact owner should read governor projection");
+    assert_eq!(projection.schema_version, 1);
+    assert_eq!(projection.worker_id, worker_id);
+    assert_eq!(projection.worker_revision, created.worker.revision);
+    assert_eq!(projection.dm_session_id, dm.session_id);
+    assert_eq!(projection.policy.worker_id, projection.worker_id);
+    assert_eq!(projection.daily.calls_used, 0);
+    assert_eq!(projection.daily.tokens_used_or_reserved, 0);
+    assert_eq!(projection.autonomous_dm.lane_key, "dm");
+    assert_eq!(projection.foreground_dm.lane_key, "dm");
+    assert_eq!(projection.unresolved_started_count, 0);
+    assert!(!projection.response_loss_recovery_required);
+
+    assert!(matches!(
+        grant_worker_governor_recovery(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key")
+    ));
+
+    let public_shape = serde_json::to_value(&projection).expect("projection should serialize");
+    let public_shape = public_shape.to_string();
+    assert!(!public_shape.contains("request_body"));
+    assert!(!public_shape.contains("prompt"));
+    assert!(!public_shape.contains("output"));
+
+    assert!(matches!(
+        get_worker_governor(State(state.clone()), bob(), Path(worker_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    let (_, Json(unbound)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("unbound-governor")),
+    )
+    .await
+    .expect("unbound Worker fixture should create");
+    assert!(matches!(
+        get_worker_governor(State(state.clone()), alice(), Path(unbound.worker.id)).await,
+        Err(AppError::NotFound(_))
+    ));
 }
 
 #[tokio::test]
@@ -2441,7 +3494,111 @@ async fn worker_dm_ensure_is_idempotent_and_freezes_worker_model() {
 }
 
 #[tokio::test]
-async fn worker_model_patch_propagates_to_dm_session_row() {
+async fn worker_lookup_by_session_includes_archived_dm_and_hides_foreign_or_group_lanes() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+
+    // Establish the primary relationship thread before any Worker DM exists,
+    // then prove that the typed lookup distinguishes the two surfaces.
+    let Json(primary) = main_session(State(state.clone()), alice())
+        .await
+        .expect("primary Hive session should exist");
+    let Json(primary_binding) = get_worker_by_session(
+        State(state.clone()),
+        alice(),
+        Path(primary.session_id.clone()),
+    )
+    .await
+    .expect("primary Hive lookup should succeed");
+    assert!(matches!(
+        primary_binding,
+        HiveWorkerSessionBindingResponse::PrimaryHive { session_id }
+            if session_id == primary.session_id
+    ));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("archived-friend")),
+    )
+    .await
+    .expect("Worker fixture should create");
+    let worker_id = created.worker.id;
+    let Json(dm) = ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("Worker DM should exist");
+
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(create_group_request(
+            "Private room",
+            vec![worker_id.clone()],
+        )),
+    )
+    .await
+    .expect("group fixture should create");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let hidden_lane = session_manager
+        .create_session_for_user_with_config(
+            "Hidden Worker lane",
+            None,
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .expect("hidden lane session should create");
+    HiveGroupWorkerLaneStore::new(Database::new(&state.db_path).expect("database should open"))
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.group.id,
+            worker_id.clone(),
+            hidden_lane.clone(),
+        ))
+        .expect("hidden group lane should bind");
+    assert!(matches!(
+        get_worker_by_session(State(state.clone()), alice(), Path(hidden_lane)).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .set_status(
+            &worker_id,
+            mitsuro_core::storage::HiveWorkerStatus::Archived,
+        )
+        .expect("fixture should archive Worker");
+    let Json(binding) =
+        get_worker_by_session(State(state.clone()), alice(), Path(dm.session_id.clone()))
+            .await
+            .expect("archived Worker DM should remain resolvable");
+    let HiveWorkerSessionBindingResponse::WorkerDm { session_id, worker } = binding else {
+        panic!("archived direct session must remain a Worker DM")
+    };
+    assert_eq!(session_id, dm.session_id);
+    assert_eq!(worker.worker.id, worker_id);
+    assert_eq!(worker.worker.status, "archived");
+
+    let Json(roster) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("roster should load");
+    assert!(
+        roster.workers.is_empty(),
+        "archived Worker stays out of roster"
+    );
+    assert!(matches!(
+        get_worker_by_session(State(state.clone()), bob(), Path(dm.session_id)).await,
+        Err(AppError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn worker_model_patch_without_daemon_rolls_back_worker_and_dm() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     configure_test_model(&state).await;
@@ -2471,31 +3628,32 @@ async fn worker_model_patch_propagates_to_dm_session_row() {
     assert!(before.model.as_deref().unwrap_or("").is_empty());
     assert!(before.model_key.is_none());
 
-    let Json(updated) = update_worker(
-        State(state.clone()),
-        alice(),
-        Path(created.worker.id.clone()),
-        Json(UpdateWorkerRequest {
-            model: Some("gpt-5.5".to_string()),
-            ..empty_update_worker_request()
-        }),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "worker model update should succeed: {}",
-            app_error_description(error)
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            alice(),
+            Path(created.worker.id.clone()),
+            introduction_action_headers("model-update-without-daemon"),
+            Json(UpdateWorkerRequest {
+                expected_revision: created.worker.revision,
+                model: Some("gpt-5.5".to_string()),
+                ..empty_update_worker_request()
+            }),
         )
-    });
-    assert_eq!(updated.worker.model.as_deref(), Some("gpt-5.5"));
+        .await,
+        Err(AppError::BadGateway(_))
+    ));
+    let worker = HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .get(&created.worker.id)
+        .expect("Worker should load")
+        .expect("Worker should remain");
+    assert!(worker.model.is_none());
+    assert_eq!(worker.revision, created.worker.revision);
 
     let after = session_manager
         .get_session(&dm.session_id)
         .expect("session lookup should succeed")
         .expect("dm session should exist");
-    assert_eq!(after.model.as_deref(), Some("gpt-5.5"));
-    assert_eq!(
-        after.model_key.as_ref().map(|key| key.model_id.as_str()),
-        Some("gpt-5.5")
-    );
+    assert!(after.model.as_deref().unwrap_or("").is_empty());
+    assert!(after.model_key.is_none());
 }

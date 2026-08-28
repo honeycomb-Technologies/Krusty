@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 
 use crate::storage::{
-    CanonicalMemoryInput, LearningCandidate, LearningKind, LearningSensitivity, MemoryNamespace,
-    MemorySensitivity, MemorySource, MemoryType,
+    CanonicalMemoryInput, LearningCandidate, LearningKind, LearningSensitivity, MemoryAclScope,
+    MemoryNamespace, MemorySensitivity, MemorySource, MemoryType,
 };
 
 use super::LearningScope;
@@ -26,6 +26,7 @@ pub(super) fn scope_for_candidate(candidate: &LearningCandidate) -> LearningScop
 pub(super) fn canonical_input_for_candidate(
     candidate: &LearningCandidate,
 ) -> Result<CanonicalMemoryInput> {
+    validate_candidate_memory_scope(candidate)?;
     if candidate.sensitivity != LearningSensitivity::Normal {
         bail!("sensitive or prohibited candidates cannot become canonical memory");
     }
@@ -59,7 +60,9 @@ pub(super) fn canonical_input_for_candidate(
     );
     input.project_dir = candidate.project_dir.clone();
     input.user_id = candidate.user_id.clone();
-    input.namespace = MemoryNamespace::Shared;
+    input.namespace = candidate.memory_namespace;
+    input.namespace_id = candidate.memory_namespace_id.clone();
+    input.acl_scope = candidate.memory_acl_scope;
     input.source = if candidate.explicit {
         MemorySource::User
     } else {
@@ -70,6 +73,29 @@ pub(super) fn canonical_input_for_candidate(
     input.confidence = candidate.confidence;
     input.sensitivity = MemorySensitivity::Normal;
     Ok(input)
+}
+
+pub(super) fn validate_candidate_memory_scope(candidate: &LearningCandidate) -> Result<()> {
+    if !candidate.memory_scope_resolved {
+        bail!("learning candidate memory scope was not resolved at evidence ingest");
+    }
+    match candidate.memory_namespace {
+        MemoryNamespace::Crew => {
+            if candidate.memory_namespace_id.is_none()
+                || candidate.memory_acl_scope != MemoryAclScope::Worker
+            {
+                bail!("Worker learning candidate has an invalid private memory scope");
+            }
+        }
+        MemoryNamespace::Shared | MemoryNamespace::Hive => {
+            if candidate.memory_namespace_id.is_some()
+                || candidate.memory_acl_scope != MemoryAclScope::Owner
+            {
+                bail!("owner learning candidate has an invalid memory scope");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn readable_key(key: &str) -> String {

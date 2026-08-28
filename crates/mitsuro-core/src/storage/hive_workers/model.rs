@@ -118,6 +118,8 @@ pub struct HiveWorkerDocument {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HiveWorker {
     pub id: String,
+    /// Monotonic optimistic-concurrency token for every Worker mutation.
+    pub revision: u64,
     /// Exact owner; NULL means the local single-tenant profile.
     pub user_id: Option<String>,
     pub slug: String,
@@ -142,6 +144,19 @@ pub struct HiveWorker {
     pub memory_namespace_id: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// The Worker identity bound to one private conversation session.
+///
+/// `group_id = None` is the Worker's direct-message lane. A non-`None`
+/// value is the implementation-only lane for that Worker in exactly one
+/// group room. Keeping this resolution typed lets context, learning, and
+/// tools apply the same namespace boundary instead of guessing from a Hive
+/// session id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HiveWorkerConversationBinding {
+    pub worker: HiveWorker,
+    pub group_id: Option<String>,
 }
 
 /// Input for creating a Worker. `display_name` defaults to a titled form of

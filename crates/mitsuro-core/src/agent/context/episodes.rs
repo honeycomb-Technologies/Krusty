@@ -16,6 +16,7 @@ pub(super) fn build_episode_context(
     db_path: &Path,
     project_dir: Option<&str>,
     user_id: Option<&str>,
+    worker_id: Option<&str>,
     current_session_id: &str,
     conversation: &[ModelMessage],
 ) -> String {
@@ -33,6 +34,7 @@ pub(super) fn build_episode_context(
     let store = EpisodeStore::new(&db);
     let mut search = EpisodeSearch::new(&objective, user_id);
     search.project_dir = project_dir;
+    search.worker_id = worker_id;
     search.limit = MAX_EPISODES + 2;
     let episodes = match store.search(&search) {
         Ok(episodes) => episodes,

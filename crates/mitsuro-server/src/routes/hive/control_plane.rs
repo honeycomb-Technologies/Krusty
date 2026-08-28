@@ -15,7 +15,9 @@ use mitsuro_core::storage::{
 };
 use mitsuro_hive_protocol::ScheduleDefinition;
 
-use super::super::session_access::{current_user_id, load_owned_session_of_type};
+use super::super::session_access::{
+    current_user_id, load_owned_hive_session_control_scope, load_owned_session_of_type,
+};
 use super::{idempotency_key_from_headers, open_session_manager, resolve_hive_model};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -107,7 +109,8 @@ pub(super) async fn create_schedule(
     headers: HeaderMap,
     Json(request): Json<ScheduleWriteRequest>,
 ) -> Result<Response, AppError> {
-    ensure_owned_hive_session(&state, user.as_ref(), &session_id)?;
+    owned_hive_control_scope(&state, user.as_ref(), &session_id)?
+        .require_exact_worker_schedule(request.worker_id.as_deref())?;
     let definition = schedule_definition(&state, user.as_ref(), &session_id, request).await?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let result = state
@@ -142,7 +145,8 @@ pub(super) async fn replace_schedule(
     headers: HeaderMap,
     Json(request): Json<ScheduleWriteRequest>,
 ) -> Result<Response, AppError> {
-    ensure_owned_hive_session(&state, user.as_ref(), &session_id)?;
+    owned_hive_control_scope(&state, user.as_ref(), &session_id)?
+        .require_exact_worker_schedule(request.worker_id.as_deref())?;
     let expected_revision = required_if_match(&headers)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let definition = schedule_definition(&state, user.as_ref(), &session_id, request).await?;
@@ -167,7 +171,10 @@ pub(super) async fn cancel_schedule(
     Path((session_id, schedule_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    ensure_owned_hive_session(&state, user.as_ref(), &session_id)?;
+    let controller = require_owned_controller(&state, user.as_ref(), &session_id)?;
+    let schedule = owned_schedule(&state, &controller, &schedule_id)?;
+    owned_hive_control_scope(&state, user.as_ref(), &session_id)?
+        .require_exact_worker_schedule(schedule.worker_id.as_deref())?;
     let expected_revision = required_if_match(&headers)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let result = state
@@ -211,7 +218,10 @@ async fn set_schedule_status(
     headers: HeaderMap,
     status: &'static str,
 ) -> Result<Response, AppError> {
-    ensure_owned_hive_session(&state, user.as_ref(), &session_id)?;
+    let controller = require_owned_controller(&state, user.as_ref(), &session_id)?;
+    let schedule = owned_schedule(&state, &controller, &schedule_id)?;
+    owned_hive_control_scope(&state, user.as_ref(), &session_id)?
+        .require_exact_worker_schedule(schedule.worker_id.as_deref())?;
     let expected_revision = required_if_match(&headers)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     let result = state
@@ -310,6 +320,14 @@ fn ensure_owned_hive_session(
         user,
     )?;
     Ok(())
+}
+
+fn owned_hive_control_scope(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    session_id: &str,
+) -> Result<super::super::session_access::HiveSessionControlScope, AppError> {
+    load_owned_hive_session_control_scope(state, &open_session_manager(state)?, session_id, user)
 }
 
 fn owned_controller(

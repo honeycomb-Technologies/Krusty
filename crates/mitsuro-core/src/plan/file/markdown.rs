@@ -364,7 +364,7 @@ fn parse_markdown_task_line(phase: &mut PlanPhase, line: &str, trimmed: &str) {
     phase.tasks.push(task);
 }
 
-fn parse_checkbox_line(trimmed: &str) -> Option<(TaskStatus, bool, &str)> {
+pub(super) fn parse_checkbox_line(trimmed: &str) -> Option<(TaskStatus, bool, &str)> {
     if trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") {
         Some((
             TaskStatus::Completed,

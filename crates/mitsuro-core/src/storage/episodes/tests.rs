@@ -2,7 +2,10 @@ use chrono::Utc;
 use tempfile::TempDir;
 
 use super::{EpisodeSearch, EpisodeStore};
-use crate::storage::Database;
+use crate::storage::{
+    Database, HiveGroupStore, HiveGroupWorkerLaneStore, HiveWorkerStore, NewHiveGroup,
+    NewHiveGroupWorkerLane, NewHiveWorker,
+};
 
 fn setup() -> (TempDir, Database) {
     let temp = TempDir::new().expect("tempdir");
@@ -158,4 +161,92 @@ fn search_filters_by_session_type_and_conversation() {
     let scoped_results = store.search(&scoped).expect("conversation search");
     assert_eq!(scoped_results.len(), 1);
     assert_eq!(scoped_results[0].session_id, chat);
+}
+
+#[test]
+fn owner_wide_episode_search_excludes_worker_dm_and_group_lanes_by_default() {
+    let (temp, db) = setup();
+    let db_path = temp.path().join("episodes.db");
+    let ordinary = create_session(&db, Some("alice"), "/work/isolation");
+    let worker_a_dm = create_session(&db, Some("alice"), "/work/isolation");
+    let worker_b_dm = create_session(&db, Some("alice"), "/work/isolation");
+    let worker_a_group = create_session(&db, Some("alice"), "/work/isolation");
+    let workers = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let worker_a = workers
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(worker_a_dm.clone()),
+            ..NewHiveWorker::new("worker-a")
+        })
+        .unwrap();
+    let worker_b = workers
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(worker_b_dm.clone()),
+            ..NewHiveWorker::new("worker-b")
+        })
+        .unwrap();
+    let group = HiveGroupStore::new(Database::new(&db_path).unwrap())
+        .create(&NewHiveGroup {
+            user_id: Some("alice".into()),
+            title: "Isolation Room".into(),
+            member_worker_ids: vec![worker_a.id.clone(), worker_b.id.clone()],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+    HiveGroupWorkerLaneStore::new(Database::new(&db_path).unwrap())
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.id,
+            worker_a.id.clone(),
+            worker_a_group.clone(),
+        ))
+        .unwrap();
+
+    let store = EpisodeStore::new(&db);
+    let now = Utc::now().to_rfc3339();
+    for (session, label) in [
+        (&ordinary, "ORDINARY-EPISODE"),
+        (&worker_a_dm, "WORKER-A-DM-EPISODE"),
+        (&worker_b_dm, "WORKER-B-DM-EPISODE"),
+        (&worker_a_group, "WORKER-A-GROUP-EPISODE"),
+    ] {
+        let content = serde_json::json!([{
+            "type": "text",
+            "text": format!("isolation_canary {label}")
+        }])
+        .to_string();
+        let message_id = create_message(&db, session, "user", &content, &now);
+        store
+            .record_message(session, message_id, "user", &content, &now)
+            .unwrap();
+    }
+
+    let mut default_search = EpisodeSearch::new("isolation_canary", Some("alice"));
+    default_search.project_dir = Some("/work/isolation");
+    let default_results = store.search(&default_search).unwrap();
+    assert_eq!(default_results.len(), 1);
+    assert_eq!(default_results[0].session_id, ordinary);
+
+    let mut worker_a_search = default_search.clone();
+    worker_a_search.worker_id = Some(&worker_a.id);
+    let worker_a_results = store.search(&worker_a_search).unwrap();
+    let worker_a_sessions = worker_a_results
+        .iter()
+        .map(|episode| episode.session_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(worker_a_sessions.len(), 2);
+    assert!(worker_a_sessions.contains(worker_a_dm.as_str()));
+    assert!(worker_a_sessions.contains(worker_a_group.as_str()));
+    assert!(!worker_a_sessions.contains(worker_b_dm.as_str()));
+    assert!(!worker_a_sessions.contains(ordinary.as_str()));
+
+    let mut worker_b_search = default_search.clone();
+    worker_b_search.worker_id = Some(&worker_b.id);
+    let worker_b_results = store.search(&worker_b_search).unwrap();
+    assert_eq!(worker_b_results.len(), 1);
+    assert_eq!(worker_b_results[0].session_id, worker_b_dm);
+
+    default_search.include_worker_sessions = true;
+    let diagnostic_results = store.search(&default_search).unwrap();
+    assert_eq!(diagnostic_results.len(), 4);
 }

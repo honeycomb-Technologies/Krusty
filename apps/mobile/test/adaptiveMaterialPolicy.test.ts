@@ -7,6 +7,7 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
+  readTextFile(path: URL): Promise<string>;
 };
 
 function assertEquals<T>(actual: T, expected: T) {
@@ -48,7 +49,7 @@ Deno.test("uses blur for iOS API fallback and web", () => {
   );
 });
 
-Deno.test("uses a solid surface for accessibility and unsupported platforms", () => {
+Deno.test("uses a solid surface when transparency is reduced", () => {
   assertEquals(
     resolveAdaptiveMaterialMode({
       platform: "ios",
@@ -61,11 +62,23 @@ Deno.test("uses a solid surface for accessibility and unsupported platforms", ()
   assertEquals(
     resolveAdaptiveMaterialMode({
       platform: "android",
-      reduceTransparency: false,
+      reduceTransparency: true,
       glassApiAvailable: false,
       liquidGlassAvailable: false,
     }),
     "solid",
+  );
+});
+
+Deno.test("uses Material blur on Android when transparency is allowed", () => {
+  assertEquals(
+    resolveAdaptiveMaterialMode({
+      platform: "android",
+      reduceTransparency: false,
+      glassApiAvailable: false,
+      liquidGlassAvailable: false,
+    }),
+    "blur",
   );
 });
 
@@ -120,6 +133,29 @@ Deno.test("blur fallback uses translucent glass fills, not opaque scrims", () =>
     resolveAdaptiveMaterialOverlayColor("blur", "strong", surfaces),
     "glass-pressed",
   );
+});
+
+Deno.test("liquid glass preserves tone, lifecycle, and FAB interaction policy", async () => {
+  const material = await Deno.readTextFile(
+    new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
+  );
+  if (
+    !material.includes('glassEffectStyle={tone === "strong" ? "regular" : "clear"}')
+  ) {
+    throw new Error(
+      "chat chrome must use platform clear glass, not the gray regular frost",
+    );
+  }
+  if (!material.includes("if (!active) return null")) {
+    throw new Error(
+      "inactive AdaptiveMaterial must unmount the GlassView instead of hiding it",
+    );
+  }
+  if (!material.includes("isInteractive={interactive}")) {
+    throw new Error(
+      "FAB glass must be able to use the iOS interactive press/glint",
+    );
+  }
 });
 
 Deno.test("liquid glass stays lightly tinted per tone", () => {

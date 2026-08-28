@@ -3,9 +3,13 @@
 //! Implements RFC 7636 for OAuth 2.0 PKCE, which provides protection
 //! against authorization code interception attacks.
 
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use url::Url;
+
+use super::types::OAuthConfig;
 
 /// PKCE code verifier - a cryptographically random string
 ///
@@ -80,6 +84,36 @@ impl std::fmt::Display for PkceChallenge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Build a PKCE authorization URL. Callers supply only the redirect URI.
+pub(crate) fn build_pkce_authorization_url(
+    config: &OAuthConfig,
+    redirect_uri: &str,
+    verifier: &PkceVerifier,
+    state: &str,
+) -> Result<Url> {
+    let challenge = verifier.challenge();
+    let mut url =
+        Url::parse(&config.authorization_url).context("Failed to parse authorization URL")?;
+
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &config.client_id)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("scope", &config.scopes.join(" "))
+            .append_pair("state", state)
+            .append_pair("code_challenge", challenge.as_str())
+            .append_pair("code_challenge_method", challenge.method());
+
+        for (key, value) in &config.extra_auth_params {
+            pairs.append_pair(key, value);
+        }
+    }
+
+    Ok(url)
 }
 
 #[cfg(test)]

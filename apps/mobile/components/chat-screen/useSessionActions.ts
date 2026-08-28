@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
+import { type MutableRefObject, useCallback, useEffect, useRef } from "react";
 import { Alert, Platform } from "react-native";
 
 import type { ModelInfo, SessionResponse, SessionType } from "@mitsuro/api";
 import {
+  type Attachment as SessionAttachment,
   beginMitsuroPerformanceSpan,
   resolveHiveSendTarget,
-  type Attachment as SessionAttachment,
+  type SendMessageOptions,
+  type StopStreamingOptions,
 } from "@mitsuro/state";
 import type { useConnection } from "../../hooks/useConnection";
 import type { useStores } from "../../hooks/useStores";
@@ -23,14 +25,26 @@ import {
 } from "../../platform/identity-storage";
 import {
   findCodeSessionForProject,
-  resolveSendIntent,
   type ResolvedSendIntent,
+  resolveSendIntent,
 } from "./sendIntent";
 import { createSessionCreationCoordinator } from "./sessionCreationCoordinator";
 import {
   createLatestIntentScheduler,
   type LatestIntentScheduler,
 } from "../navigation/latestIntentScheduler";
+import { runGenericSessionDeleteIfAllowed } from "./hiveSessionDeleteFence";
+import {
+  isCurrentSessionNavigationIntent,
+  isCurrentSessionSendIntent,
+} from "../navigation/sessionNavigationIntentFence";
+import {
+  beginAllModeSessionDeletionAdmission,
+  clearDeletedSessionFromModeStoreGraphs,
+  rollbackSessionDeletionAdmissions,
+  runSessionDeletionBatch,
+  type SessionDeletionAdmission,
+} from "./sessionDeletionAdmission";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -64,7 +78,9 @@ function confirmDestructiveAction(
     // react-native-web intentionally implements Alert.alert as a no-op. Use
     // the browser's real confirmation boundary so destructive callbacks are
     // reachable in the shared web preview.
-    if (typeof window !== "undefined" && window.confirm(`${title}\n\n${message}`)) {
+    if (
+      typeof window !== "undefined" && window.confirm(`${title}\n\n${message}`)
+    ) {
       void onConfirm();
     }
     return;
@@ -94,8 +110,10 @@ interface UseSessionActionsArgs {
   modeStores: ModeStores;
   sessions: SessionResponse[];
   models: ModelInfo[];
+  onSharedModelSelect?: (model: ModelInfo) => void;
   suppressCompletionRef: { current: boolean };
   lastSessionIdByTypeRef: MutableRefObject<Record<SessionType, string | null>>;
+  navigationIntentGenerationRef: MutableRefObject<number>;
 }
 
 export function useSessionActions({
@@ -112,8 +130,10 @@ export function useSessionActions({
   modeStores,
   sessions,
   models,
+  onSharedModelSelect,
   suppressCompletionRef,
   lastSessionIdByTypeRef,
+  navigationIntentGenerationRef,
 }: UseSessionActionsArgs) {
   const sessionCreationCoordinatorRef = useRef(
     createSessionCreationCoordinator<SessionResponse | null>(),
@@ -142,10 +162,17 @@ export function useSessionActions({
       onFlush: (intent) => admitSessionSelectionRef.current(intent),
     });
   }
+  const deletionBoundaryActiveRef = useRef(true);
+  const deletionModeStoresRef = useRef(modeStores);
+  const deletionSessionsStoreRef = useRef(sessionsStore);
+  deletionModeStoresRef.current = modeStores;
+  deletionSessionsStoreRef.current = sessionsStore;
   useEffect(() => {
+    deletionBoundaryActiveRef.current = true;
     const scheduler = sessionSelectionSchedulerRef.current;
     return () => {
       scheduler?.cancel();
+      deletionBoundaryActiveRef.current = false;
     };
   }, []);
   const scheduleSessionSelection = useCallback(
@@ -158,10 +185,13 @@ export function useSessionActions({
     sessionSelectionSchedulerRef.current?.cancel();
   }, []);
   const stopCurrentStream = useCallback(
-    (suppressCompletion = true) => {
+    (
+      suppressCompletion = true,
+      stopOptions?: StopStreamingOptions,
+    ) => {
       if (sessionStore.getState().isStreaming) {
         suppressCompletionRef.current = suppressCompletion;
-        sessionStore.getState().stopStreaming();
+        sessionStore.getState().stopStreaming(stopOptions);
       }
       setActiveToolCallId(null);
     },
@@ -208,9 +238,9 @@ export function useSessionActions({
         );
 
       if (currentModel) {
-        const modelInfo = currentModelInfo
-          ?? models.find((candidate) => candidate.id === currentModel)
-          ?? null;
+        const modelInfo = currentModelInfo ??
+          models.find((candidate) => candidate.id === currentModel) ??
+          null;
         // Keep create path local-first; setModel may persist, but we already
         // have a usable model for the empty composer.
         target.session
@@ -347,97 +377,104 @@ export function useSessionActions({
    * Used when opening the Hive tab, for New in hive mode, and as the send
    * fallback when no hive session is loaded yet.
    */
-  const ensureHiveCompanionSession = useCallback(async (): Promise<string | null> => {
-    if (!client) {
-      return null;
-    }
-    return sessionStore.getState().ensureHiveMainSession();
-  }, [client, sessionStore]);
-
-  const ensureSessionForSend = useCallback(async (): Promise<ResolvedSendIntent | null> => {
-    // Hive never precreates ad-hoc sessions from the composer. Send to the
-    // hive session that is already loaded (the durable companion or a Worker
-    // DM); only ensure the companion when nothing is loaded yet.
-    if (activeTab === 2 || sessionTypeForTab(activeTab) === "hive") {
-      const hiveState = sessionStore.getState();
-      const target = resolveHiveSendTarget({
-        sessionId: hiveState.sessionId,
-        sessionType: hiveState.sessionType,
-      });
-      if (target.kind === "ensure-companion") {
-        const mainId = await ensureHiveCompanionSession();
-        if (!mainId) {
-          return null;
-        }
-      }
-      return {
-        shouldPrecreate: false,
-        sendOptions: { sessionType: "hive" },
-      };
-    }
-
-    const currentSessionId = sessionStore.getState().sessionId;
-    const wsState = workspace.getState();
-    const intent = resolveSendIntent({
-      activeTab,
-      currentSessionId,
-      workspaceDirectory: wsState.directory,
-      workspaceMode: wsState.mode,
-      targetBranch: wsState.targetBranch,
-    });
-
-    if (!intent.shouldPrecreate) {
-      return intent;
-    }
-
-    if (!client) {
-      return null;
-    }
-
-    try {
-      const precreate = intent.precreate;
-      const targetType = precreate?.sessionType ?? sessionTypeForTab(activeTab);
-      const session = await sessionCreationCoordinatorRef.current.run(
-        targetType,
-        async (isCurrent) => {
-          const finishBindSpan = beginMitsuroPerformanceSpan(
-            "new_chat.session_bind",
-            targetType,
-          );
-          try {
-            const created = await client.createSession(
-              undefined,
-              precreate?.projectDir ?? undefined,
-              precreate?.targetBranch ?? undefined,
-              precreate?.workspaceMode,
-              targetType,
-              sessionStore.getState().permissionMode,
-            );
-            if (!isCurrent()) return null;
-            await bootstrapSession(created);
-            if (!isCurrent()) return null;
-            lastSessionIdByTypeRef.current[created.session_type] = created.id;
-            return created;
-          } finally {
-            finishBindSpan();
-          }
-        },
-      );
-      if (!session) {
+  const ensureHiveCompanionSession = useCallback(
+    async (): Promise<string | null> => {
+      if (!client) {
         return null;
       }
-      return { ...intent, sendOptions: undefined };
-    } catch {
-      return null;
-    }
-  }, [
-    activeTab,
-    bootstrapSession,
-    client,
-    lastSessionIdByTypeRef,
-    sessionStore,
-    workspace,
-  ]);
+      return sessionStore.getState().ensureHiveMainSession();
+    },
+    [client, sessionStore],
+  );
+
+  const ensureSessionForSend = useCallback(
+    async (): Promise<ResolvedSendIntent | null> => {
+      // Hive never precreates ad-hoc sessions from the composer. Send to the
+      // hive session that is already loaded (the durable companion or a Worker
+      // DM); only ensure the companion when nothing is loaded yet.
+      if (activeTab === 2 || sessionTypeForTab(activeTab) === "hive") {
+        const hiveState = sessionStore.getState();
+        const target = resolveHiveSendTarget({
+          sessionId: hiveState.sessionId,
+          sessionType: hiveState.sessionType,
+        });
+        if (target.kind === "ensure-companion") {
+          const mainId = await ensureHiveCompanionSession();
+          if (!mainId) {
+            return null;
+          }
+        }
+        return {
+          shouldPrecreate: false,
+          sendOptions: { sessionType: "hive" },
+        };
+      }
+
+      const currentSessionId = sessionStore.getState().sessionId;
+      const wsState = workspace.getState();
+      const intent = resolveSendIntent({
+        activeTab,
+        currentSessionId,
+        workspaceDirectory: wsState.directory,
+        workspaceMode: wsState.mode,
+        targetBranch: wsState.targetBranch,
+      });
+
+      if (!intent.shouldPrecreate) {
+        return intent;
+      }
+
+      if (!client) {
+        return null;
+      }
+
+      try {
+        const precreate = intent.precreate;
+        const targetType = precreate?.sessionType ??
+          sessionTypeForTab(activeTab);
+        const session = await sessionCreationCoordinatorRef.current.run(
+          targetType,
+          async (isCurrent) => {
+            const finishBindSpan = beginMitsuroPerformanceSpan(
+              "new_chat.session_bind",
+              targetType,
+            );
+            try {
+              const created = await client.createSession(
+                undefined,
+                precreate?.projectDir ?? undefined,
+                precreate?.targetBranch ?? undefined,
+                precreate?.workspaceMode,
+                targetType,
+                sessionStore.getState().permissionMode,
+              );
+              if (!isCurrent()) return null;
+              await bootstrapSession(created);
+              if (!isCurrent()) return null;
+              lastSessionIdByTypeRef.current[created.session_type] = created.id;
+              return created;
+            } finally {
+              finishBindSpan();
+            }
+          },
+        );
+        if (!session) {
+          return null;
+        }
+        return { ...intent, sendOptions: undefined };
+      } catch {
+        return null;
+      }
+    },
+    [
+      activeTab,
+      bootstrapSession,
+      client,
+      lastSessionIdByTypeRef,
+      sessionStore,
+      workspace,
+    ],
+  );
 
   const loadSession = useCallback(
     async (session: SessionResponse) => {
@@ -559,7 +596,17 @@ export function useSessionActions({
   const handleNewSession = useCallback(async (sessionType?: SessionType) => {
     // Hive has one durable companion — never create a fresh peer chat from "new".
     if (sessionType === "hive" || (sessionType == null && activeTab === 2)) {
-      await ensureHiveCompanionSession();
+      const navigationIntentGeneration = navigationIntentGenerationRef.current;
+      const ensuredSessionId = await ensureHiveCompanionSession();
+      if (!ensuredSessionId) return;
+      if (
+        !isCurrentSessionNavigationIntent(
+          navigationIntentGeneration,
+          navigationIntentGenerationRef.current,
+          ensuredSessionId,
+          modeStores.hive.session.getState().sessionId,
+        )
+      ) return;
       setActiveTab(2);
       setDrawerOpen(false);
       return;
@@ -569,6 +616,8 @@ export function useSessionActions({
     activeTab,
     createSessionForCurrentTab,
     ensureHiveCompanionSession,
+    modeStores,
+    navigationIntentGenerationRef,
     setActiveTab,
     setDrawerOpen,
   ]);
@@ -581,35 +630,126 @@ export function useSessionActions({
   );
 
   const handleDeleteSession = useCallback(
-    (id: string, onDeleted?: () => void) => {
-      confirmDestructiveAction("Delete Session", "Delete this session?", async () => {
-        const activeEntry = (["chat", "code", "hive"] as const).find(
-          (mode) => modeStores[mode].session.getState().sessionId === id,
-        );
-        const targetStore = activeEntry
-          ? modeStores[activeEntry].session
-          : null;
+    (
+      id: string,
+      sessionType: SessionType,
+      onDeleted?: () => void,
+      onFailed?: () => void,
+    ) => {
+      void runGenericSessionDeleteIfAllowed(
+        {
+          sessionId: id,
+          sessionType,
+          resolveHiveBinding: client
+            ? (sessionId) => client.getHiveWorkerBySession(sessionId)
+            : undefined,
+        },
+        () => {
+          confirmDestructiveAction(
+            "Delete Session",
+            "Delete this session?",
+            async () => {
+              const isCurrentDeletionBoundary = () =>
+                deletionBoundaryActiveRef.current &&
+                deletionModeStoresRef.current === modeStores &&
+                deletionSessionsStoreRef.current === sessionsStore;
+              if (!isCurrentDeletionBoundary()) return;
+              let admission: SessionDeletionAdmission;
+              try {
+                admission = await beginAllModeSessionDeletionAdmission(
+                  modeStores,
+                  id,
+                );
+              } catch (scrubError) {
+                if (!isCurrentDeletionBoundary()) return;
+                showActionMessage(
+                  "Delete unavailable",
+                  scrubError instanceof Error
+                    ? scrubError.message
+                    : "Queued recovery could not be cleared safely.",
+                );
+                return;
+              }
+              if (!isCurrentDeletionBoundary()) {
+                try {
+                  await admission.rollback();
+                } catch (rollbackError) {
+                  console.error(
+                    "Failed to restore session recovery after the deletion boundary changed.",
+                    rollbackError,
+                  );
+                }
+                return;
+              }
+              try {
+                onDeleted?.();
+              } catch (optimisticError) {
+                let deleteError: unknown = optimisticError;
+                try {
+                  await admission.rollback();
+                } catch (rollbackError) {
+                  deleteError = rollbackError;
+                }
+                onFailed?.();
+                if (isCurrentDeletionBoundary()) {
+                  showActionMessage(
+                    "Delete unavailable",
+                    deleteError instanceof Error
+                      ? deleteError.message
+                      : "The conversation list could not be updated safely.",
+                  );
+                }
+                return;
+              }
 
-        if (targetStore?.getState().isStreaming) {
-          targetStore.getState().stopStreaming();
-        }
+              let deleted = false;
+              let deleteError: unknown = null;
+              try {
+                deleted = await sessionsStore.getState().deleteSession(
+                  id,
+                );
+              } catch (error) {
+                deleteError = error;
+              }
+              if (deleted) {
+                const cleared = clearDeletedSessionFromModeStoreGraphs(
+                  modeStores,
+                  deletionModeStoresRef.current,
+                  id,
+                );
+                admission.commit();
+                if (cleared) setActiveToolCallId(null);
+                if (!isCurrentDeletionBoundary()) {
+                  // Remove only the optimistic override installed above. The
+                  // replacement graph now owns its own session projection.
+                  onFailed?.();
+                  return;
+                }
+                void sessionsStore.getState().loadSessions();
+                return;
+              }
 
-        const deleted = await sessionsStore.getState().deleteSession(id);
-        if (!deleted) {
-          return;
-        }
-
-        if (targetStore) {
-          targetStore.getState().clearSession();
-          setActiveToolCallId(null);
-        }
-
-        onDeleted?.();
-
-        void sessionsStore.getState().loadSessions();
-      });
+              try {
+                await admission.rollback();
+              } catch (rollbackError) {
+                deleteError = rollbackError;
+              }
+              onFailed?.();
+              if (deleteError && isCurrentDeletionBoundary()) {
+                showActionMessage(
+                  "Delete incomplete",
+                  deleteError instanceof Error
+                    ? deleteError.message
+                    : "Session recovery could not be restored safely.",
+                );
+              }
+              return;
+            },
+          );
+        },
+      );
     },
-    [modeStores, sessionsStore, setActiveToolCallId],
+    [client, modeStores, sessionsStore, setActiveToolCallId],
   );
 
   const handleSetSessionPinned = useCallback(
@@ -633,16 +773,23 @@ export function useSessionActions({
   const handleSetSessionArchived = useCallback(
     async (id: string, archived: boolean): Promise<boolean> => {
       if (!client) return false;
+      const previous =
+        sessionsStore.getState().sessions.find((session) =>
+          session.id === id
+        ) ?? null;
+      sessionsStore.getState().setSessionArchived(id, archived);
       try {
         const updated = await client.updateSession(id, { archived });
-        if (!archived) {
-          sessionsStore.getState().upsertSession(updated);
-        }
-        await sessionsStore.getState().loadSessions();
+        sessionsStore.getState().upsertSession(updated);
         return true;
       } catch {
+        if (previous) {
+          sessionsStore.getState().revertSession(previous);
+        }
         showActionMessage(
-          archived ? "Couldn’t archive conversation" : "Couldn’t restore conversation",
+          archived
+            ? "Couldn’t archive conversation"
+            : "Couldn’t restore conversation",
           "The conversation was not changed. Please try again.",
         );
         return false;
@@ -677,11 +824,30 @@ export function useSessionActions({
   const handleSetProjectArchived = useCallback(
     async (ids: string[], archived: boolean): Promise<boolean> => {
       if (!client || ids.length === 0) return false;
+      const previous = ids
+        .map((id) =>
+          sessionsStore.getState().sessions.find((session) =>
+            session.id === id
+          ) ?? null
+        )
+        .filter((session): session is NonNullable<typeof session> =>
+          session != null
+        );
+      for (const id of ids) {
+        sessionsStore.getState().setSessionArchived(id, archived);
+      }
       try {
-        await Promise.all(ids.map((id) => client.updateSession(id, { archived })));
-        await sessionsStore.getState().loadSessions();
+        const updated = await Promise.all(
+          ids.map((id) => client.updateSession(id, { archived })),
+        );
+        for (const session of updated) {
+          sessionsStore.getState().upsertSession(session);
+        }
         return true;
       } catch {
+        for (const session of previous) {
+          sessionsStore.getState().revertSession(session);
+        }
         await sessionsStore.getState().loadSessions();
         showActionMessage(
           archived ? "Couldn’t archive project" : "Couldn’t restore project",
@@ -694,40 +860,152 @@ export function useSessionActions({
   );
 
   const handleDeleteProjectSessions = useCallback(
-    (projectName: string, ids: string[], onDeleted?: () => void) => {
-      if (ids.length === 0) return;
+    (
+      projectName: string,
+      ids: string[],
+      onDeleted?: () => void,
+      onFailed?: (failedIds: string[]) => void,
+    ) => {
+      const deletionIds = [...new Set(ids)];
+      if (deletionIds.length === 0) return;
       confirmDestructiveAction(
         "Delete project conversations?",
-        `Delete ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} from ${projectName}? The project folder and its files will not be deleted.`,
+        `Delete ${deletionIds.length} ${
+          deletionIds.length === 1 ? "conversation" : "conversations"
+        } from ${projectName}? The project folder and its files will not be deleted.`,
         async () => {
-          let failed = 0;
-          for (const id of ids) {
-            const activeEntry = (["chat", "code", "hive"] as const).find(
-              (mode) => modeStores[mode].session.getState().sessionId === id,
+          const isCurrentDeletionBoundary = () =>
+            deletionBoundaryActiveRef.current &&
+            deletionModeStoresRef.current === modeStores &&
+            deletionSessionsStoreRef.current === sessionsStore;
+          if (!isCurrentDeletionBoundary()) return;
+          const admissionResults = await Promise.allSettled(
+            deletionIds.map((id) =>
+              beginAllModeSessionDeletionAdmission(modeStores, id)
+            ),
+          );
+          const admissions = new Map<string, SessionDeletionAdmission>();
+          admissionResults.forEach((result, index) => {
+            if (result.status === "fulfilled") {
+              admissions.set(deletionIds[index], result.value);
+            }
+          });
+          const rollbackOutstandingAdmissions = async (): Promise<
+            unknown | null
+          > => {
+            try {
+              await rollbackSessionDeletionAdmissions(admissions);
+              admissions.clear();
+              return null;
+            } catch (rollbackError) {
+              // Core retains admission and requires a later begin to finish
+              // the failed restore before it may acquire a fresh transport
+              // lease. Keep the unresolved entries intact for this result.
+              return rollbackError;
+            }
+          };
+          if (
+            admissionResults.some((result) => result.status === "rejected")
+          ) {
+            const admissionError = admissionResults.find((result) =>
+              result.status === "rejected"
             );
-            const targetStore = activeEntry ? modeStores[activeEntry].session : null;
-            if (targetStore?.getState().isStreaming) {
-              targetStore.getState().stopStreaming();
+            const rollbackError = await rollbackOutstandingAdmissions();
+            if (isCurrentDeletionBoundary()) {
+              showActionMessage(
+                "Delete unavailable",
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : admissionError?.status === "rejected" &&
+                      admissionError.reason instanceof Error
+                  ? admissionError.reason.message
+                  : "Queued recovery could not be cleared safely. No conversations were deleted.",
+              );
             }
-            const deleted = await sessionsStore.getState().deleteSession(id);
-            if (!deleted) {
-              failed += 1;
-              continue;
-            }
-            if (targetStore) {
-              targetStore.getState().clearSession();
-              setActiveToolCallId(null);
-            }
-          }
-          await sessionsStore.getState().loadSessions();
-          if (failed > 0) {
-            showActionMessage(
-              "Some conversations weren’t deleted",
-              `${failed} ${failed === 1 ? "conversation remains" : "conversations remain"}.`,
-            );
             return;
           }
-          onDeleted?.();
+          if (!isCurrentDeletionBoundary()) {
+            const rollbackError = await rollbackOutstandingAdmissions();
+            if (rollbackError) {
+              console.error(
+                "Failed to restore project recovery after the deletion boundary changed.",
+                rollbackError,
+              );
+            }
+            return;
+          }
+          try {
+            onDeleted?.();
+          } catch (optimisticError) {
+            const rollbackError = await rollbackOutstandingAdmissions();
+            onFailed?.(deletionIds);
+            if (isCurrentDeletionBoundary()) {
+              showActionMessage(
+                "Delete unavailable",
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : optimisticError instanceof Error
+                  ? optimisticError.message
+                  : "The conversation list could not be updated safely.",
+              );
+            }
+            return;
+          }
+
+          const result = await runSessionDeletionBatch(
+            deletionIds,
+            admissions,
+            (id) => sessionsStore.getState().deleteSession(id),
+            isCurrentDeletionBoundary,
+            (id) => {
+              if (
+                clearDeletedSessionFromModeStoreGraphs(
+                  modeStores,
+                  deletionModeStoresRef.current,
+                  id,
+                )
+              ) {
+                setActiveToolCallId(null);
+              }
+            },
+          );
+          if (result.boundaryChanged) {
+            // Undo this operation's stale optimistic overrides. The replacement
+            // graph must project its own account/session list from scratch.
+            onFailed?.(deletionIds);
+            if (result.error) {
+              console.error(
+                "Failed to restore project recovery after the deletion boundary changed.",
+                result.error,
+              );
+            }
+            return;
+          }
+          if (!isCurrentDeletionBoundary()) {
+            // The batch completed against the captured graph, but a replacement
+            // became current before this continuation resumed. Remove every
+            // operation-owned override so it cannot hide the replacement UI.
+            onFailed?.(deletionIds);
+            return;
+          }
+          if (result.remainingIds.length > 0) {
+            onFailed?.(result.remainingIds);
+          }
+          await sessionsStore.getState().loadSessions();
+          if (
+            isCurrentDeletionBoundary() && result.remainingIds.length > 0
+          ) {
+            showActionMessage(
+              "Some conversations weren’t deleted",
+              result.error instanceof Error
+                ? result.error.message
+                : `${result.remainingIds.length} ${
+                  result.remainingIds.length === 1
+                    ? "conversation remains"
+                    : "conversations remain"
+                }. No further conversations were deleted.`,
+            );
+          }
         },
       );
     },
@@ -735,9 +1013,12 @@ export function useSessionActions({
   );
 
   const handleInteractiveToolResult = useCallback(
-    async (toolCallId: string, result: string) => {
+    async (targetSessionId: string, toolCallId: string, result: string) => {
       const currentSessionId = sessionStore.getState().sessionId;
-      if (!currentSessionId || activeToolCallId) {
+      if (
+        !currentSessionId || currentSessionId !== targetSessionId ||
+        activeToolCallId
+      ) {
         return;
       }
 
@@ -745,7 +1026,9 @@ export function useSessionActions({
       try {
         await sessionStore.getState().submitToolResult(toolCallId, result);
       } catch {
-        await sessionStore.getState().loadSession(currentSessionId, true);
+        if (sessionStore.getState().sessionId === targetSessionId) {
+          await sessionStore.getState().loadSession(targetSessionId, true);
+        }
       } finally {
         setActiveToolCallId(null);
       }
@@ -754,51 +1037,113 @@ export function useSessionActions({
   );
 
   const handlePlanConfirm = useCallback(
-    async (toolCallId: string, choice: "execute" | "abandon") => {
+    async (
+      targetSessionId: string,
+      toolCallId: string,
+      choice: "execute" | "abandon",
+    ) => {
+      if (sessionStore.getState().sessionId !== targetSessionId) return;
       if (choice === "execute") {
         sessionStore.getState().setMode("build");
       }
-      await handleInteractiveToolResult(toolCallId, JSON.stringify({ choice }));
+      await handleInteractiveToolResult(
+        targetSessionId,
+        toolCallId,
+        JSON.stringify({ choice }),
+      );
     },
     [handleInteractiveToolResult, sessionStore],
   );
 
   const handleSend = useCallback(
-    async (content: string, attachments: SessionAttachment[] = []) => {
+    async (
+      content: string,
+      attachments: SessionAttachment[] = [],
+      targetFence?: {
+        assertCurrent: () => void;
+        skipModelReadiness?: boolean;
+        rethrowErrors?: boolean;
+        sendOptions?: Partial<SendMessageOptions>;
+      },
+    ) => {
       const trimmed = content.trim();
       if (!client || (!trimmed && attachments.length === 0)) {
         return;
       }
 
-      const resolvedModel = await ensureModelReady();
-      if (!resolvedModel) {
-        sessionStore.setState({
-          error:
-            "No model is available yet. Check your model settings and try again.",
-        });
-        return;
+      const originatingNavigationIntentGeneration =
+        navigationIntentGenerationRef.current;
+      const originatingSessionId = sessionStore.getState().sessionId;
+      const isCurrentOriginatingSelection = () =>
+        targetFence != null ||
+        isCurrentSessionNavigationIntent(
+          originatingNavigationIntentGeneration,
+          navigationIntentGenerationRef.current,
+          originatingSessionId,
+          sessionStore.getState().sessionId,
+        );
+
+      targetFence?.assertCurrent();
+      if (!targetFence?.skipModelReadiness) {
+        const resolvedModel = await ensureModelReady();
+        targetFence?.assertCurrent();
+        if (!isCurrentOriginatingSelection()) return;
+        if (!resolvedModel) {
+          sessionStore.setState({
+            error:
+              "No model is available yet. Check your model settings and try again.",
+          });
+          return;
+        }
       }
 
       const sendIntent = await ensureSessionForSend();
+      targetFence?.assertCurrent();
       if (!sendIntent) {
         return;
       }
+      const transportSessionId = sessionStore.getState().sessionId;
+      const isCurrentSendTarget = () =>
+        targetFence != null ||
+        isCurrentSessionSendIntent(
+          originatingNavigationIntentGeneration,
+          navigationIntentGenerationRef.current,
+          originatingSessionId,
+          transportSessionId,
+          sessionStore.getState().sessionId,
+        );
+      if (!isCurrentSendTarget()) return;
 
       try {
+        const exactSendOptions = targetFence?.sendOptions
+          ? { ...sendIntent.sendOptions, ...targetFence.sendOptions }
+          : sendIntent.sendOptions;
         await sessionStore
           .getState()
           .sendMessage(
             trimmed,
             attachments,
-            sendIntent.sendOptions,
+            exactSendOptions,
           );
       } catch (err) {
+        if (targetFence) {
+          try {
+            targetFence.assertCurrent();
+          } catch {
+            // The originating Worker is no longer active. Let its composer
+            // restore the draft without projecting A's error onto B.
+            throw err;
+          }
+        } else if (!isCurrentSendTarget()) {
+          // Generic sends historically resolve their composer promise after a
+          // failure. Preserve that behavior, but never project A's late error
+          // onto the newer session that now owns this store.
+          return;
+        }
         sessionStore.setState({
-          error:
-            err instanceof Error
-              ? err.message
-              : "Failed to send message.",
+          error: err instanceof Error ? err.message : "Failed to send message.",
         });
+        if (targetFence?.rethrowErrors) throw err;
       }
     },
     [
@@ -806,33 +1151,36 @@ export function useSessionActions({
       client,
       ensureModelReady,
       ensureSessionForSend,
+      navigationIntentGenerationRef,
       sessionStore,
       workspace,
     ],
   );
 
   const handleModelSelect = useCallback(
-    (modelId: string) => {
-      const modelInfo = models.find((candidate) => candidate.id === modelId);
+    (modelInfo: ModelInfo) => {
+      if (sessionStore === modeStores.hive.session) return;
+      const modelId = modelInfo.id;
+      onSharedModelSelect?.(modelInfo);
       sessionStore.setState({ error: null });
       sessionStore
         .getState()
-        .setModel(modelId, modelInfo?.provider ?? null, modelInfo ?? null);
+        .setModel(modelId, modelInfo.provider ?? null, modelInfo);
       void writeCanonicalAsyncValue(
         SecureStore,
         IDENTITY_STORAGE_KEYS.selectedModel,
         modelId,
       );
     },
-    [models, sessionStore],
+    [modeStores.hive.session, onSharedModelSelect, sessionStore],
   );
 
   const handleFastModeToggle = useCallback(() => {
     const currentModel = sessionStore.getState().model;
     if (currentModel) {
-      const modelInfo = sessionStore.getState().modelInfo
-        ?? models.find((candidate) => candidate.id === currentModel)
-        ?? null;
+      const modelInfo = sessionStore.getState().modelInfo ??
+        models.find((candidate) => candidate.id === currentModel) ??
+        null;
       sessionStore
         .getState()
         .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);

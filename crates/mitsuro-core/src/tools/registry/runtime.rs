@@ -21,6 +21,28 @@ use super::{tool_policy_for_call, DelegationPolicy, ToolContext, ToolRequestPoli
 const BASH_TIMEOUT_CLEANUP_MARGIN: Duration = Duration::from_secs(25);
 const MAX_BASH_REQUESTED_TIMEOUT_MS: u64 = 600_000;
 
+/// Which agent-extension stages may observe one registry execution.
+///
+/// Standard pre/post hooks are deliberately outside this policy: safety,
+/// permission, logging, and lifecycle hooks remain authoritative even when an
+/// isolated Worker run excludes the optional extension subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentExtensionDispatch {
+    BeforeAndAfter,
+    AfterOnly,
+    Disabled,
+}
+
+impl AgentExtensionDispatch {
+    fn runs_before(self) -> bool {
+        matches!(self, Self::BeforeAndAfter)
+    }
+
+    fn runs_after(self) -> bool {
+        matches!(self, Self::BeforeAndAfter | Self::AfterOnly)
+    }
+}
+
 fn requested_bash_timeout(params: &Value) -> Option<Duration> {
     let raw = params.get("timeout")?;
     let timeout_ms = raw.as_u64().or_else(|| {
@@ -279,7 +301,8 @@ impl ToolRegistry {
         params: Value,
         ctx: &ToolContext,
     ) -> Option<ToolResult> {
-        self.execute_inner(name, params, ctx, true).await
+        self.execute_inner(name, params, ctx, AgentExtensionDispatch::BeforeAndAfter)
+            .await
     }
 
     /// Execute an agent-loop call whose extension interception already ran
@@ -291,7 +314,21 @@ impl ToolRegistry {
         params: Value,
         ctx: &ToolContext,
     ) -> Option<ToolResult> {
-        self.execute_inner(name, params, ctx, false).await
+        self.execute_inner(name, params, ctx, AgentExtensionDispatch::AfterOnly)
+            .await
+    }
+
+    /// Execute an isolated Worker call without exposing its arguments or
+    /// result to optional agent extensions. Canonical pre/post hooks still run
+    /// and the ordinary timeout and tool policy remain unchanged.
+    pub(crate) async fn execute_without_extensions(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> Option<ToolResult> {
+        self.execute_inner(name, params, ctx, AgentExtensionDispatch::Disabled)
+            .await
     }
 
     async fn execute_inner(
@@ -299,13 +336,13 @@ impl ToolRegistry {
         name: &str,
         params: Value,
         ctx: &ToolContext,
-        run_extension_intercept: bool,
+        extension_dispatch: AgentExtensionDispatch,
     ) -> Option<ToolResult> {
         tracing::info!(tool = name, "ToolRegistry: execute called");
         let tool = self.get(name).await?;
         tracing::info!(tool = name, "ToolRegistry: tool found, executing");
         let mut params = params;
-        let extension_manager = if run_extension_intercept {
+        let extension_manager = if extension_dispatch.runs_before() {
             self.agent_extension_manager()
         } else {
             None
@@ -368,8 +405,10 @@ impl ToolRegistry {
                 .await;
         }
 
-        if let Some(manager) = self.agent_extension_manager() {
-            manager.after_tool(name, &params, &result, ctx).await;
+        if extension_dispatch.runs_after() {
+            if let Some(manager) = self.agent_extension_manager() {
+                manager.after_tool(name, &params, &result, ctx).await;
+            }
         }
 
         Some(result)
@@ -426,4 +465,127 @@ pub(super) fn policy_block_result(name: &str, params: &Value, reason: String) ->
             })
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+
+    use super::{AgentExtensionDispatch, Tool, ToolRegistry};
+    use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
+    use crate::tools::registry::{ToolContext, ToolResult};
+
+    struct CountingTool(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn description(&self) -> &str {
+            "count executions"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success("executed")
+        }
+    }
+
+    struct CountingPreHook(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PreToolHook for CountingPreHook {
+        async fn before_execute(
+            &self,
+            _name: &str,
+            _params: &Value,
+            _ctx: &ToolContext,
+        ) -> HookResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            HookResult::Continue
+        }
+    }
+
+    struct CountingPostHook(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PostToolHook for CountingPostHook {
+        async fn after_execute(
+            &self,
+            _name: &str,
+            _params: &Value,
+            _result: &ToolResult,
+            _duration: Duration,
+            _ctx: &ToolContext,
+        ) -> HookResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            HookResult::Continue
+        }
+    }
+
+    #[test]
+    fn isolated_dispatch_exposes_neither_extension_stage() {
+        assert!(AgentExtensionDispatch::BeforeAndAfter.runs_before());
+        assert!(AgentExtensionDispatch::BeforeAndAfter.runs_after());
+        assert!(!AgentExtensionDispatch::AfterOnly.runs_before());
+        assert!(AgentExtensionDispatch::AfterOnly.runs_after());
+        assert!(!AgentExtensionDispatch::Disabled.runs_before());
+        assert!(!AgentExtensionDispatch::Disabled.runs_after());
+    }
+
+    #[tokio::test]
+    async fn execute_without_extensions_retains_canonical_hooks_and_tool_execution() {
+        let temp_dir = TempDir::new().expect("temp directory should be created");
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let pre_hook_calls = Arc::new(AtomicUsize::new(0));
+        let post_hook_calls = Arc::new(AtomicUsize::new(0));
+        let extension_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = ToolRegistry::new();
+        registry.add_pre_hook(Arc::new(CountingPreHook(Arc::clone(&pre_hook_calls))));
+        registry.add_post_hook(Arc::new(CountingPostHook(Arc::clone(&post_hook_calls))));
+        registry
+            .register(Arc::new(CountingTool(Arc::clone(&tool_calls))))
+            .await;
+
+        let manager = crate::extensions::AgentExtensionManager::new_with_paths(
+            temp_dir.path(),
+            temp_dir.path().join("extension-runtime"),
+            temp_dir.path().join("global-extensions"),
+        );
+        manager.set_test_tool_interceptor({
+            let extension_calls = Arc::clone(&extension_calls);
+            move |_name, params| {
+                extension_calls.fetch_add(1, Ordering::SeqCst);
+                crate::extensions::AgentExtensionToolIntercept {
+                    params,
+                    block_reason: Some("extension must not run".to_string()),
+                }
+            }
+        });
+        registry.set_agent_extension_manager(manager);
+
+        let result = registry
+            .execute_without_extensions("counting", json!({}), &ToolContext::default())
+            .await
+            .expect("registered tool should produce a result");
+
+        assert!(!result.is_error);
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pre_hook_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(post_hook_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(extension_calls.load(Ordering::SeqCst), 0);
+    }
 }

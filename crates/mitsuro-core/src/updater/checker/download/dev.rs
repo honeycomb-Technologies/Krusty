@@ -14,6 +14,7 @@ pub(super) async fn download_update_dev(
 ) -> Result<()> {
     let _ = progress_tx.send(UpdateStatus::Downloading {
         progress: "Pulling latest changes...".into(),
+        fraction: None,
     });
 
     let pull = tokio::process::Command::new("git")
@@ -29,6 +30,7 @@ pub(super) async fn download_update_dev(
 
     let _ = progress_tx.send(UpdateStatus::Downloading {
         progress: "Building release binary...".into(),
+        fraction: None,
     });
 
     let build = tokio::process::Command::new("cargo")
@@ -44,6 +46,7 @@ pub(super) async fn download_update_dev(
 
     let _ = progress_tx.send(UpdateStatus::Downloading {
         progress: "Preparing update...".into(),
+        fraction: None,
     });
 
     ensure_pending_update_dir()?;

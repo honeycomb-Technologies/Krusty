@@ -24,14 +24,15 @@ use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::{
     Database, DelegatedRunAgentSnapshot, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
-    DelegatedRunStartInput, DelegatedRunStore, PartialAssistantState, PendingInteractionSnapshot,
-    PendingPlanTaskSnapshot, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
-    RecoveryToolCall, RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType,
-    WorkspaceMode,
+    DelegatedRunStartInput, DelegatedRunStore, HiveGroupStore, HiveGroupWorkerLaneStore,
+    HiveWorkerStore, NewHiveGroup, NewHiveGroupWorkerLane, NewHiveWorker, PartialAssistantState,
+    PendingInteractionSnapshot, PendingPlanTaskSnapshot, RecoveryDecision,
+    RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall, RuntimeTraceEvent,
+    RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::workflow::{
-    CreateGoalInput, CriterionInput, PlanProposalInput, StepProposalInput,
+    CreateGoalInput, CriterionInput, PlanProposalInput, StepProposalInput, WorkflowManager,
 };
 
 use super::crud::{GetSessionQuery, ListSessionsQuery};
@@ -282,6 +283,386 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
         snapshot.expect("workflow should exist").aggregate_revision,
         activated.snapshot.aggregate_revision
     );
+}
+
+#[tokio::test]
+async fn worker_dm_generic_workflow_commands_are_fenced_before_mutation_or_wake() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Worker DM",
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .expect("Worker DM should create");
+    session_manager
+        .update_session_work_mode(&session_id, mitsuro_core::storage::WorkMode::Plan)
+        .expect("test should enter Plan mode");
+    HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(session_id.clone()),
+            ..NewHiveWorker::new("workflow-worker")
+        })
+        .expect("Worker should create");
+    let user = || Some(current_user("alice", state.working_dir.as_ref()));
+    let denied_create = execute_workflow_command(
+        State(state.clone()),
+        user(),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::CreateGoal {
+            operation_id: "worker-goal-create".into(),
+            goal: CreateGoalInput {
+                title: "Worker-owned Goal".into(),
+                objective: "Never enter the generic Agent loop".into(),
+                constraints: vec![],
+                criteria: vec![CriterionInput {
+                    description: "Daemon owns execution".into(),
+                    required: true,
+                }],
+                token_budget: None,
+            },
+        }),
+    )
+    .await;
+    assert!(matches!(
+        denied_create,
+        Err(AppError::Conflict(message)) if message.contains("/hive/workers/")
+    ));
+    assert!(WorkflowManager::new(state.db_path.as_ref().clone())
+        .unwrap()
+        .get_snapshot(&session_id)
+        .unwrap()
+        .is_none());
+
+    let created = WorkflowManager::new(state.db_path.as_ref().clone())
+        .unwrap()
+        .create_goal_with_plan(
+            &session_id,
+            CreateGoalInput {
+                title: "Worker-owned Goal".into(),
+                objective: "Never enter the generic Agent loop".into(),
+                constraints: vec![],
+                criteria: vec![CriterionInput {
+                    description: "Daemon owns execution".into(),
+                    required: true,
+                }],
+                token_budget: None,
+            },
+            PlanProposalInput {
+                title: "Worker plan".into(),
+                rationale: None,
+                source_message_id: None,
+                predecessor_id: None,
+                legacy_markdown: None,
+                steps: vec![StepProposalInput {
+                    display_key: "1".into(),
+                    description: "Use the Worker control plane".into(),
+                    context: None,
+                    parent_display_key: None,
+                    dependencies: vec![],
+                    acceptance_criteria: vec!["No generic wake".into()],
+                    required: true,
+                }],
+            },
+            "worker-goal-test-fixture",
+            "test",
+        )
+        .expect("Worker Goal fixture should create atomically");
+    let original_revision = created.snapshot.aggregate_revision;
+    let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), workflow_tx);
+
+    let denied = execute_workflow_command(
+        State(state.clone()),
+        user(),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ActivateGoal {
+            operation_id: "generic-worker-activate".into(),
+            goal_id: created.snapshot.goal.id.clone(),
+            expected_revision: original_revision,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        denied,
+        Err(AppError::Conflict(message)) if message.contains("/hive/workers/")
+    ));
+    assert!(
+        workflow_rx.try_recv().is_err(),
+        "no generic wake may escape"
+    );
+    assert_eq!(
+        session_manager
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .work_mode,
+        mitsuro_core::storage::WorkMode::Plan
+    );
+    let Json(after) = get_workflow(State(state.clone()), user(), Path(session_id))
+        .await
+        .expect("Worker Goal should remain readable");
+    let after = after.expect("Worker Goal should still exist");
+    assert_eq!(after.aggregate_revision, original_revision);
+    assert_eq!(after.goal.status, mitsuro_core::workflow::GoalStatus::Draft);
+}
+
+#[tokio::test]
+async fn every_worker_dm_generic_command_is_rejected_while_primary_hive_is_unchanged() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let neutral_dm = session_manager
+        .create_session_for_user_with_config(
+            "Neutral Worker DM",
+            None,
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .expect("neutral DM should create");
+    HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(neutral_dm.clone()),
+            ..NewHiveWorker::new("neutral-worker")
+        })
+        .expect("Worker should create");
+    let goal = CreateGoalInput {
+        title: "Workspace-first Goal".into(),
+        objective: "Attach one exact workspace first".into(),
+        constraints: vec![],
+        criteria: vec![CriterionInput {
+            description: "Workspace is explicit".into(),
+            required: true,
+        }],
+        token_budget: None,
+    };
+    let denied = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(neutral_dm.clone()),
+        Json(WorkflowCommand::CreateGoal {
+            operation_id: "neutral-worker-create".into(),
+            goal: goal.clone(),
+        }),
+    )
+    .await;
+    assert!(matches!(
+        denied,
+        Err(AppError::Conflict(message)) if message.contains("/hive/workers/")
+    ));
+    assert!(WorkflowManager::new(state.db_path.as_ref().clone())
+        .unwrap()
+        .get_snapshot(&neutral_dm)
+        .unwrap()
+        .is_none());
+
+    let primary_hive = session_manager
+        .create_session_for_user_with_config(
+            "Primary Hive",
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .expect("primary Hive should create");
+    let primary = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(primary_hive),
+        Json(WorkflowCommand::CreateGoal {
+            operation_id: "primary-hive-create".into(),
+            goal,
+        }),
+    )
+    .await;
+    assert!(
+        primary.is_ok(),
+        "primary Hive compatibility must remain unchanged"
+    );
+}
+
+#[tokio::test]
+async fn generic_worker_dm_delete_fails_closed_without_daemon_or_mutation() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let worker_dm = session_manager
+        .create_session_for_user_with_config(
+            "Durable Worker DM",
+            None,
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .expect("Worker DM should create");
+    let worker = HiveWorkerStore::new(Database::new(&state.db_path).expect("database should open"))
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(worker_dm.clone()),
+            ..NewHiveWorker::new("durable-worker")
+        })
+        .expect("Worker should create");
+
+    for guarded in [
+        state
+            .hive_runtime
+            .pause_session_for_user(&state, &worker_dm, Some("alice"), None)
+            .await,
+        state
+            .hive_runtime
+            .schedule_session_for_user(
+                &state,
+                worker_dm.clone(),
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+                "test_worker_wake",
+                "test worker sleep",
+                Some("alice"),
+                None,
+            )
+            .await,
+        state
+            .hive_runtime
+            .resume_session_for_user(state.clone(), worker_dm.clone(), Some("alice"), None)
+            .await,
+    ] {
+        assert!(matches!(
+            crate::hive_runtime::control_plane_app_error(
+                guarded.expect_err("generic Worker control must fail closed")
+            ),
+            AppError::Conflict(message) if message.contains("typed Worker")
+        ));
+    }
+    let stop_error = state
+        .hive_runtime
+        .cancel_session_for_user(&state, &worker_dm, Some("alice"), None)
+        .await
+        .expect_err("Worker Stop must fail closed without the daemon");
+    assert!(matches!(
+        crate::hive_runtime::control_plane_app_error(stop_error),
+        AppError::BadGateway(message) if message.contains("daemon control plane")
+    ));
+    let send_error = state
+        .hive_runtime
+        .send_message_for_user(
+            state.clone(),
+            worker_dm.clone(),
+            "must not persist",
+            Some("alice"),
+            None,
+        )
+        .await
+        .expect_err("Worker send must fail closed without the daemon");
+    let steer_error = state
+        .hive_runtime
+        .steer_for_user(
+            &state,
+            &worker_dm,
+            "pending-stop-test",
+            Vec::new(),
+            Some("alice"),
+            None,
+        )
+        .await
+        .expect_err("Worker steering must fail closed without the daemon");
+    let response_error = state
+        .hive_runtime
+        .user_response_and_subscribe_for_user(
+            &state,
+            &worker_dm,
+            "run-stop-test",
+            "tool-stop-test",
+            "must not persist",
+            Some("alice"),
+            None,
+        )
+        .await
+        .expect_err("Worker response must fail closed without the daemon");
+    for error in [send_error, steer_error, response_error] {
+        assert!(error.to_string().contains("daemon control plane"));
+    }
+
+    let manager_error = state
+        .hive_runtime
+        .delete_session_for_user(&state, &worker_dm, Some("alice"), None)
+        .await
+        .expect_err("manager defense must reject generic Worker deletion");
+    assert!(matches!(
+        crate::hive_runtime::control_plane_app_error(manager_error),
+        AppError::Conflict(message) if message.contains("/api/hive/workers")
+    ));
+    let route_error = delete_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(worker_dm.clone()),
+    )
+    .await
+    .expect_err("route defense must reject generic Worker deletion");
+    assert!(matches!(
+        route_error,
+        AppError::Conflict(message) if message.contains("/api/hive/workers")
+    ));
+
+    let database = Database::new(&state.db_path).expect("database should reopen");
+    assert!(SessionManager::new(Database::new(&state.db_path).unwrap())
+        .get_session(&worker_dm)
+        .unwrap()
+        .is_some());
+    let persisted_binding: Option<String> = database
+        .conn()
+        .query_row(
+            "SELECT dm_session_id FROM hive_workers WHERE id = ?1",
+            [worker.id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("Worker binding should remain");
+    assert_eq!(persisted_binding.as_deref(), Some(worker_dm.as_str()));
+    let controller_count: i64 = database
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_controllers WHERE session_id = ?1",
+            [worker_dm.as_str()],
+            |row| row.get(0),
+        )
+        .expect("controller count should load");
+    assert_eq!(
+        controller_count, 0,
+        "rejection must not create a controller"
+    );
+    let message_count: i64 = database
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            [worker_dm.as_str()],
+            |row| row.get(0),
+        )
+        .expect("message count should load");
+    assert_eq!(message_count, 0, "rejection must not persist content");
 }
 
 #[tokio::test]
@@ -837,6 +1218,105 @@ async fn load_owned_session_rejects_authenticated_session_for_local_actor() {
     let result = super::load_owned_session(&session_manager, &session_id, None);
 
     assert!(matches!(result, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn internal_group_worker_lanes_are_hidden_from_generic_session_surfaces() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user = current_user("alice", &temp_dir);
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let dm_session_id = session_manager
+        .create_session_for_user_with_config(
+            "Researcher DM",
+            Some("test:model"),
+            Some(temp_dir.to_string_lossy().as_ref()),
+            Some(temp_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .unwrap();
+    let lane_session_id = session_manager
+        .create_session_for_user_with_config(
+            "Researcher in Release Room",
+            Some("test:model"),
+            Some(temp_dir.to_string_lossy().as_ref()),
+            Some(temp_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .unwrap();
+    let worker = HiveWorkerStore::new(Database::new(&state.db_path).unwrap())
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(dm_session_id.clone()),
+            ..NewHiveWorker::new("researcher")
+        })
+        .unwrap();
+    let group = HiveGroupStore::new(Database::new(&state.db_path).unwrap())
+        .create(&NewHiveGroup {
+            user_id: Some("alice".into()),
+            title: "Release Room".into(),
+            member_worker_ids: vec![worker.id.clone()],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+    HiveGroupWorkerLaneStore::new(Database::new(&state.db_path).unwrap())
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.id,
+            worker.id,
+            lane_session_id.clone(),
+        ))
+        .unwrap();
+    session_manager
+        .set_agent_state(&lane_session_id, "streaming")
+        .unwrap();
+
+    assert!(matches!(
+        super::load_owned_session(&session_manager, &lane_session_id, Some(&user)),
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        delete_session(
+            State(state.clone()),
+            Some(current_user("alice", &temp_dir)),
+            Path(lane_session_id.clone()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(session_manager
+        .get_session(&lane_session_id)
+        .unwrap()
+        .is_some());
+    let Json(sessions) = list_sessions(
+        State(state),
+        Some(user),
+        HeaderMap::new(),
+        Query(ListSessionsQuery {
+            working_dir: None,
+            include_archived: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(sessions.iter().any(|session| session.id == dm_session_id));
+    assert!(sessions.iter().all(|session| session.id != lane_session_id));
+    assert!(session_manager
+        .list_active_sessions()
+        .unwrap()
+        .iter()
+        .all(|(session_id, _)| session_id != &lane_session_id));
+    assert!(session_manager
+        .list_active_session_details_for_user(Some("alice"))
+        .unwrap()
+        .iter()
+        .all(|(session, _)| session.id != lane_session_id));
 }
 
 #[tokio::test]

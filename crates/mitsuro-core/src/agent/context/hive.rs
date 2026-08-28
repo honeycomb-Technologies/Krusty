@@ -5,9 +5,9 @@ use tracing::warn;
 use crate::paths;
 use crate::storage::hive_groups;
 use crate::storage::{
-    HiveCrewProfileDocumentKind, HiveGroupRunContext, HiveGroupSenderKind, HiveHomeProfile,
-    HiveProfileDocumentKind, HiveProfileSnapshot, HiveWorker, HiveWorkerDocument,
-    HiveWorkerDocumentKind, HiveWorkerStore,
+    resolve_worker_conversation_with_conn, HiveCrewProfileDocumentKind, HiveGroupRunContext,
+    HiveGroupSenderKind, HiveHomeProfile, HiveProfileDocumentKind, HiveProfileSnapshot, HiveWorker,
+    HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerStore,
 };
 
 use super::project::discover_named_file;
@@ -28,15 +28,38 @@ const MAX_GROUP_ROOM_MESSAGE_BYTES: usize = 1200;
 
 /// Persona material for a session that is a Hive Worker's private DM lane.
 pub(super) struct HiveWorkerPersona {
+    /// Stable Worker id used to scope Worker-authored reports and learning.
+    pub(super) worker_id: String,
+    /// Profile revision frozen into the claimed Worker run.
+    pub(super) worker_revision: u64,
     /// Memory namespace granted to this Worker (Shared + this namespace).
     pub(super) memory_namespace_id: String,
     /// Rendered `[HIVE WORKER ...]` sections replacing the crew treatment.
     pub(super) sections: Vec<String>,
 }
 
+pub(super) enum HiveWorkerConversationLookup {
+    /// An ordinary primary-Hive or legacy crew session, not a Worker lane.
+    Primary,
+    /// A validated direct or group lane with its exact Worker identity.
+    Worker(HiveWorkerPersona),
+    /// A session claimed to be a Worker lane, but its durable binding could
+    /// not be proven. Callers must omit private context rather than falling
+    /// back to the primary Hive namespace.
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WorkerConversationKind {
+    Direct,
+    Group,
+    Goal,
+}
+
 /// Resolve the Worker whose DM lane is this session, if any. The session
 /// itself is ownership-checked upstream; the owner comparison here keeps a
 /// mis-bound row from leaking another owner's persona or memory namespace.
+#[cfg(test)]
 pub(super) fn load_worker_persona(
     db_path: &Path,
     session_id: &str,
@@ -59,47 +82,151 @@ pub(super) fn load_worker_persona(
         );
         return None;
     }
+    Some(load_worker_persona_from_store(
+        &store,
+        worker,
+        WorkerConversationKind::Direct,
+        "loading Hive worker DM documents",
+    ))
+}
+
+/// Resolve the exact Worker conversation binding used at the prompt boundary.
+/// Group claims must match the durable `(group, Worker) -> session` lane; a
+/// missing/mismatched binding is denied instead of inheriting primary Hive
+/// memory.
+pub(super) fn resolve_worker_conversation_persona(
+    db_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+    group_run: Option<&HiveGroupRunContext>,
+) -> HiveWorkerConversationLookup {
+    let Some(db) = open_context_database(db_path, "resolving Hive Worker conversation") else {
+        return HiveWorkerConversationLookup::Denied;
+    };
+    let binding = match resolve_worker_conversation_with_conn(db.conn(), session_id) {
+        Ok(binding) => binding,
+        Err(error) => {
+            warn!(session_id, error = %error, "Failed to resolve Hive Worker conversation binding");
+            return HiveWorkerConversationLookup::Denied;
+        }
+    };
+    let Some(binding) = binding else {
+        return if group_run.is_some() {
+            HiveWorkerConversationLookup::Denied
+        } else {
+            HiveWorkerConversationLookup::Primary
+        };
+    };
+    let group_matches = match (group_run, binding.group_id.as_deref()) {
+        (None, None) => true,
+        (Some(run), Some(group_id)) => {
+            run.worker_id == binding.worker.id && run.group_id == group_id
+        }
+        _ => false,
+    };
+    if !group_matches || binding.worker.user_id.as_deref() != user_id {
+        warn!(
+            session_id,
+            worker_id = %binding.worker.id,
+            "Hive Worker conversation binding does not match the requested scope; denying private context"
+        );
+        return HiveWorkerConversationLookup::Denied;
+    }
+
+    let conversation_kind = if binding.group_id.is_some() {
+        WorkerConversationKind::Group
+    } else {
+        WorkerConversationKind::Direct
+    };
+    let store = HiveWorkerStore::new(db);
+    HiveWorkerConversationLookup::Worker(load_worker_persona_from_store(
+        &store,
+        binding.worker,
+        conversation_kind,
+        "loading Hive Worker conversation documents",
+    ))
+}
+
+/// Resolve an exact direct Worker lane for one durable Workflow Goal.
+///
+/// Unlike conversation resolution, this path never accepts a hidden group
+/// lane and renders a Goal-specific posture rather than DM chat semantics.
+pub(super) fn resolve_worker_goal_persona(
+    db_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+) -> HiveWorkerConversationLookup {
+    let Some(db) = open_context_database(db_path, "resolving Hive Worker Goal identity") else {
+        return HiveWorkerConversationLookup::Denied;
+    };
+    let binding = match resolve_worker_conversation_with_conn(db.conn(), session_id) {
+        Ok(binding) => binding,
+        Err(error) => {
+            warn!(session_id, error = %error, "Failed to resolve Hive Worker Goal binding");
+            return HiveWorkerConversationLookup::Denied;
+        }
+    };
+    let Some(binding) = binding else {
+        return HiveWorkerConversationLookup::Denied;
+    };
+    if binding.group_id.is_some() || binding.worker.user_id.as_deref() != user_id {
+        warn!(
+            session_id,
+            worker_id = %binding.worker.id,
+            "Hive Worker Goal is not bound to the exact owned direct lane; denying private context"
+        );
+        return HiveWorkerConversationLookup::Denied;
+    }
+
+    let store = HiveWorkerStore::new(db);
+    HiveWorkerConversationLookup::Worker(load_worker_persona_from_store(
+        &store,
+        binding.worker,
+        WorkerConversationKind::Goal,
+        "loading Hive Worker Goal documents",
+    ))
+}
+
+fn load_worker_persona_from_store(
+    store: &HiveWorkerStore,
+    worker: HiveWorker,
+    conversation_kind: WorkerConversationKind,
+    operation: &'static str,
+) -> HiveWorkerPersona {
     let documents = match store.documents(&worker.id) {
         Ok(documents) => documents,
         Err(error) => {
-            warn!(worker_id = %worker.id, error = %error, "Failed to load Hive worker documents");
+            warn!(worker_id = %worker.id, error = %error, operation, "Failed to load Hive worker documents");
             Vec::new()
         }
     };
-    Some(HiveWorkerPersona {
-        sections: build_worker_persona_sections(&worker, &documents),
+    let sections = build_worker_persona_sections(&worker, &documents, conversation_kind);
+    HiveWorkerPersona {
+        worker_id: worker.id,
+        worker_revision: worker.revision,
         memory_namespace_id: worker.memory_namespace_id,
-    })
-}
-
-/// Resolve a Worker's memory namespace for a group member run that may not
-/// be executing on that Worker's DM session.
-pub(super) fn load_worker_memory_namespace(
-    db_path: &Path,
-    worker_id: &str,
-    user_id: Option<&str>,
-) -> Option<String> {
-    let db = open_context_database(db_path, "loading Hive worker memory namespace")?;
-    let store = HiveWorkerStore::new(db);
-    let worker = match store.get(worker_id) {
-        Ok(worker) => worker?,
-        Err(error) => {
-            warn!(worker_id, error = %error, "Failed to resolve Hive worker for group memory scope");
-            return None;
-        }
-    };
-    if worker.user_id.as_deref() != user_id {
-        return None;
+        sections,
     }
-    Some(worker.memory_namespace_id)
 }
 
 fn build_worker_persona_sections(
     worker: &HiveWorker,
     documents: &[HiveWorkerDocument],
+    conversation_kind: WorkerConversationKind,
 ) -> Vec<String> {
+    let lane_description = match conversation_kind {
+        WorkerConversationKind::Direct => {
+            "This session is your private DM lane with the user; speak and act as this Worker."
+        }
+        WorkerConversationKind::Group => {
+            "This session is your private working lane for a group room; act as this Worker. Follow the group-room context for what becomes public."
+        }
+        WorkerConversationKind::Goal => {
+            "This is one bounded durable Workflow Goal attempt in the attached workspace; act as this Worker without treating the run as ordinary chat or inferring unseen conversation history."
+        }
+    };
     let mut sections = vec![format!(
-        "[HIVE WORKER - {slug}]\n\nYou are {name} (@{slug}), a dedicated Hive Worker. This session is your private DM lane with the user; speak and act as this Worker.\n\n[END HIVE WORKER]",
+        "[HIVE WORKER - {slug}]\n\nYou are {name} (@{slug}), a dedicated Hive Worker. {lane_description}\n\n[END HIVE WORKER]",
         slug = worker.slug,
         name = worker.display_name,
     )];

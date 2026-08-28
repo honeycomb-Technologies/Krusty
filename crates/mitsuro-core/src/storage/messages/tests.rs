@@ -49,6 +49,264 @@ fn test_save_and_load_messages() {
 }
 
 #[test]
+fn save_message_once_adopts_the_first_canonical_payload_and_repairs_its_projection() {
+    let (db, _temp) = create_test_db();
+    let store = MessageStore::new(&db);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, 'Introduction', ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )
+        .unwrap();
+
+    let first = store
+        .save_message_once(
+            &session_id,
+            "assistant",
+            r#"[{"type":"text","text":"Who should I become?"}]"#,
+            "worker-introduction:worker-1:v1",
+        )
+        .expect("save opening");
+    // Simulate a lost best-effort projection after the canonical commit. The
+    // retry must adopt the same message and restore the episode row from the
+    // canonical payload, not the conflicting retry body.
+    db.conn()
+        .execute(
+            "DELETE FROM conversation_episodes WHERE source_message_id = ?1",
+            [first],
+        )
+        .unwrap();
+    let adopted = store
+        .save_message_once(
+            &session_id,
+            "assistant",
+            r#"[{"type":"text","text":"conflicting retry"}]"#,
+            "worker-introduction:worker-1:v1",
+        )
+        .expect("adopt opening");
+
+    assert_eq!(adopted, first);
+    let (count, content): (i64, String) = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*), content FROM messages
+             WHERE session_id = ?1 AND idempotency_key = ?2",
+            rusqlite::params![session_id, "worker-introduction:worker-1:v1"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(content.contains("Who should I become?"));
+    assert!(!content.contains("conflicting retry"));
+    let episode_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_episodes WHERE source_message_id = ?1",
+            [first],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(episode_count, 1);
+}
+
+#[test]
+fn save_message_once_scopes_keys_to_the_session() {
+    let (db, _temp) = create_test_db();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES
+                 ('session-a', 'A', ?1, ?1),
+                 ('session-b', 'B', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+    let store = MessageStore::new(&db);
+    let a = store
+        .save_message_once("session-a", "assistant", "[]", "opening:v1")
+        .unwrap();
+    let b = store
+        .save_message_once("session-b", "assistant", "[]", "opening:v1")
+        .unwrap();
+
+    assert_ne!(a, b);
+}
+
+#[test]
+fn concurrent_save_message_once_calls_return_one_canonical_id() {
+    let (db, temp) = create_test_db();
+    let path = temp.path().join("test.db");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, 'Introduction', ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )
+        .unwrap();
+    // Initialize both connections before synchronizing the writers so schema
+    // migration itself is not part of the contention being tested.
+    let databases = [
+        Database::new(&path).expect("first writer database"),
+        Database::new(&path).expect("second writer database"),
+    ];
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = databases
+        .into_iter()
+        .enumerate()
+        .map(|(index, database)| {
+            let barrier = Arc::clone(&barrier);
+            let session_id = session_id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                MessageStore::new(&database)
+                    .save_message_once(
+                        &session_id,
+                        "assistant",
+                        &format!(r#"[{{"type":"text","text":"writer {index}"}}]"#),
+                        "opening:v1",
+                    )
+                    .expect("concurrent save once")
+            })
+        })
+        .collect::<Vec<_>>();
+    let ids = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("join message writer"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids[0], ids[1]);
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE session_id = ?1 AND idempotency_key = 'opening:v1'",
+            [&session_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn save_first_assistant_once_is_first_and_adopts_its_canonical_payload() {
+    let (db, _temp) = create_test_db();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, 'Introduction', ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )
+        .unwrap();
+    let store = MessageStore::new(&db);
+
+    let first = store
+        .save_first_assistant_once(
+            &session_id,
+            r#"[{"type":"text","text":"What are we here to build?"}]"#,
+            "opening:v1",
+        )
+        .unwrap();
+    store
+        .save_message(
+            &session_id,
+            "user",
+            r#"[{"type":"text","text":"A compiler"}]"#,
+        )
+        .unwrap();
+    let adopted = store
+        .save_first_assistant_once(
+            &session_id,
+            r#"[{"type":"text","text":"conflicting retry"}]"#,
+            "opening:v1",
+        )
+        .unwrap();
+
+    assert_eq!(adopted, first);
+    let rows = store.load_session_messages(&session_id).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "assistant");
+    assert!(rows[0].1.contains("What are we here to build?"));
+    assert_eq!(rows[1].0, "user");
+
+    let keyed = store
+        .load_message_by_idempotency_key(&session_id, "opening:v1")
+        .unwrap()
+        .expect("keyed opening");
+    assert_eq!(keyed.id, first);
+    assert_eq!(keyed.role, "assistant");
+    assert!(keyed.content_json.contains("What are we here to build?"));
+    assert!(store
+        .load_message_by_idempotency_key(&session_id, "missing")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn racing_user_message_blocks_a_late_first_assistant() {
+    let (db, temp) = create_test_db();
+    let path = temp.path().join("test.db");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, 'Introduction', ?2, ?2)",
+            rusqlite::params![session_id, now],
+        )
+        .unwrap();
+    let introduction_db = Database::new(&path).unwrap();
+    let user_db = Database::new(&path).unwrap();
+    let user_tx = rusqlite::Transaction::new_unchecked(
+        user_db.conn(),
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    user_tx
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES (?1, 'user', '[]', ?2)",
+            rusqlite::params![session_id, now],
+        )
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let writer_barrier = Arc::clone(&barrier);
+    let writer_session_id = session_id.clone();
+    let writer = std::thread::spawn(move || {
+        writer_barrier.wait();
+        MessageStore::new(&introduction_db).save_first_assistant_once(
+            &writer_session_id,
+            r#"[{"type":"text","text":"Too late"}]"#,
+            "opening:v1",
+        )
+    });
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(100));
+    user_tx.commit().unwrap();
+
+    let error = writer
+        .join()
+        .expect("join introduction writer")
+        .expect_err("the committed user must win the first-message race");
+    assert!(
+        error.to_string().contains("already has messages"),
+        "{error}"
+    );
+    let rows = MessageStore::new(&db)
+        .load_session_messages(&session_id)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "user");
+}
+
+#[test]
 fn test_update_last_message_preserves_created_at() {
     let (db, _temp) = create_test_db();
     let store = MessageStore::new(&db);

@@ -2,14 +2,19 @@ import type {
 	AgentMemory,
 	ApnsRegisterResponse,
 	ApnsStatusResponse,
+	ApproveHiveWorkerGoalRequest,
 	BrowserAction,
 	BrowserActionResponse,
 	BrowserAgentRequest,
 	BrowserAgentResponse,
 	BrowserSession,
 	BrowserSessionListResponse,
-	CreateBrowserSessionRequest,
 	ChatRequest,
+	ConfirmHiveWorkerIntroductionRequest,
+	CreateBrowserSessionRequest,
+	CreateHiveGroupRequest,
+	CreateHiveWorkerGoalRequest,
+	CreateHiveWorkerRequest,
 	DelegatedProgressEvent,
 	DelegationEventResponse,
 	GitBranchesResponse,
@@ -23,9 +28,15 @@ import type {
 	HiveCrewDocumentKind,
 	HiveCrewResponse,
 	HiveCurrentResponse,
+	HiveDeliveryStatus,
 	HiveDispatchOptions,
 	HiveDispatchResponse,
 	HiveGlobalSchedule,
+	HiveGroupDetail,
+	HiveGroupEvent,
+	HiveGroupMessagesResponse,
+	HiveGroupsResponse,
+	HiveGroupTurn,
 	HiveHomeDocumentKind,
 	HiveHomeResponse,
 	HiveMainResponse,
@@ -37,22 +48,15 @@ import type {
 	HiveSessionStatus,
 	HiveSessionSummary,
 	HiveWorker,
-	HiveWorkerDetail,
 	HiveWorkerDeliveriesResponse,
+	HiveWorkerDetail,
 	HiveWorkerDmResponse,
+	HiveWorkerGoalProjection,
+	HiveWorkerGovernorProjection,
+	HiveWorkerGovernorRecoveryResponse,
+	HiveWorkerSessionBindingResponse,
 	HiveWorkersResponse,
-	HiveDeliveryStatus,
-	CreateHiveWorkerRequest,
-	UpdateHiveWorkerRequest,
-	HiveGroupDetail,
-	HiveGroupEvent,
-	HiveGroupMessagesResponse,
-	HiveGroupTurn,
-	HiveGroupsResponse,
-	CreateHiveGroupRequest,
-	SendHiveGroupMessageRequest,
-	SendHiveGroupMessageResponse,
-	UpdateHiveGroupRequest,
+	KeepTalkingHiveWorkerIntroductionRequest,
 	McpServerResponse,
 	McpToolResponse,
 	MemorySnapshotResponse,
@@ -61,6 +65,7 @@ import type {
 	MobileDiagnosticUploadResponse,
 	ModelKey,
 	ModelsResponse,
+	MutateHiveWorkerGoalRequest,
 	OAuthExchangeResponse,
 	OAuthStartResponse,
 	OAuthStatusResponse,
@@ -72,12 +77,16 @@ import type {
 	ProviderStatus,
 	Report,
 	ReportSummary,
+	ResolveHiveWorkerGoalAcceptanceRequest,
+	SendHiveGroupMessageRequest,
+	SendHiveGroupMessageResponse,
 	ServerAccessResponse,
 	SessionPresenceResponse,
 	SessionResponse,
 	SessionStateResponse,
 	SessionType,
 	SessionWithMessagesResponse,
+	SetHiveWorkerWorkspaceRequest,
 	SimpleOkResponse,
 	SkillInfo,
 	SteerRequest,
@@ -85,7 +94,10 @@ import type {
 	StreamCallbacks,
 	StreamEvent,
 	ToolResultRequest,
+	TransitionHiveWorkerGoalRequest,
 	TreeEntry,
+	UpdateHiveGroupRequest,
+	UpdateHiveWorkerRequest,
 	UsageMetrics,
 	WorkflowCommand,
 	WorkflowMutation,
@@ -992,9 +1004,15 @@ export class MitsuroClient {
 	}
 
 	// Tools
-	async steerSession(request: SteerRequest): Promise<SteerResponse> {
+	async steerSession(
+		request: SteerRequest,
+		options?: { idempotencyKey?: string },
+	): Promise<SteerResponse> {
 		return this.request("/chat/steer", {
 			method: "POST",
+			headers: options?.idempotencyKey
+				? { "Idempotency-Key": options.idempotencyKey }
+				: undefined,
 			body: JSON.stringify(request),
 		});
 	}
@@ -1453,38 +1471,261 @@ export class MitsuroClient {
 
 	async createHiveWorker(
 		request: CreateHiveWorkerRequest,
+		options: { idempotencyKey: string },
 	): Promise<HiveWorkerDetail> {
 		return this.request("/hive/workers", {
 			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
 			body: JSON.stringify(request),
 		});
 	}
 
-	async getHiveWorker(id: string): Promise<HiveWorkerDetail> {
-		return this.request(`/hive/workers/${id}`);
+	async getHiveWorker(
+		id: string,
+		options?: { signal?: AbortSignal },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}`, { signal: options?.signal });
+	}
+
+	async getHiveWorkerBySession(
+		sessionId: string,
+		options?: { signal?: AbortSignal },
+	): Promise<HiveWorkerSessionBindingResponse> {
+		return this.request(
+			`/hive/workers/by-session/${encodeURIComponent(sessionId)}`,
+			{ signal: options?.signal },
+		);
+	}
+
+	async getHiveWorkerGovernor(
+		id: string,
+		options?: { signal?: AbortSignal },
+	): Promise<HiveWorkerGovernorProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/governor`,
+			{ signal: options?.signal },
+		);
+	}
+
+	async grantHiveWorkerGovernorRecovery(
+		id: string,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGovernorRecoveryResponse> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/governor/recovery`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+			},
+		);
+	}
+
+	async getHiveWorkerGoal(
+		id: string,
+		options?: { signal?: AbortSignal },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow`,
+			{ signal: options?.signal },
+		);
+	}
+
+	async approveHiveWorkerGoal(
+		id: string,
+		request: ApproveHiveWorkerGoalRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow/approve`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async createHiveWorkerGoal(
+		id: string,
+		request: CreateHiveWorkerGoalRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async activateHiveWorkerGoal(
+		id: string,
+		request: MutateHiveWorkerGoalRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow/activate`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async pauseHiveWorkerGoal(
+		id: string,
+		request: TransitionHiveWorkerGoalRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow/pause`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async cancelHiveWorkerGoal(
+		id: string,
+		request: TransitionHiveWorkerGoalRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow/cancel`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async resolveHiveWorkerGoalAcceptance(
+		id: string,
+		request: ResolveHiveWorkerGoalAcceptanceRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workflow/acceptance`,
+			{
+				method: "POST",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async setHiveWorkerWorkspace(
+		id: string,
+		request: SetHiveWorkerWorkspaceRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerGoalProjection> {
+		return this.request(
+			`/hive/workers/${encodeURIComponent(id)}/workspace`,
+			{
+				method: "PUT",
+				headers: { "Idempotency-Key": options.idempotencyKey },
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async retryHiveWorkerIntroduction(
+		id: string,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/introduction/retry`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+		});
+	}
+
+	async skipHiveWorkerIntroduction(
+		id: string,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/introduction/skip`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+		});
+	}
+
+	async confirmHiveWorkerIntroduction(
+		id: string,
+		request: ConfirmHiveWorkerIntroductionRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/introduction/confirm`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+			body: JSON.stringify(request),
+		});
+	}
+
+	async keepTalkingHiveWorkerIntroduction(
+		id: string,
+		request: KeepTalkingHiveWorkerIntroductionRequest,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/introduction/keep-talking`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+			body: JSON.stringify(request),
+		});
 	}
 
 	async updateHiveWorker(
 		id: string,
 		request: UpdateHiveWorkerRequest,
+		options: { idempotencyKey: string },
 	): Promise<HiveWorkerDetail> {
 		return this.request(`/hive/workers/${id}`, {
 			method: "PATCH",
+			headers: { "Idempotency-Key": options.idempotencyKey },
 			body: JSON.stringify(request),
 		});
 	}
 
-	async pauseHiveWorker(id: string): Promise<HiveWorker> {
-		return this.request(`/hive/workers/${id}/pause`, { method: "POST" });
+	async pauseHiveWorker(
+		id: string,
+		expectedRevision: number,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/pause`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+			body: JSON.stringify({ expected_revision: expectedRevision }),
+		});
 	}
 
-	async resumeHiveWorker(id: string): Promise<HiveWorker> {
-		return this.request(`/hive/workers/${id}/resume`, { method: "POST" });
+	async resumeHiveWorker(
+		id: string,
+		expectedRevision: number,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}/resume`, {
+			method: "POST",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+			body: JSON.stringify({ expected_revision: expectedRevision }),
+		});
 	}
 
 	/** Archive (never hard-delete); the Worker's history and DM survive. */
-	async archiveHiveWorker(id: string): Promise<SimpleOkResponse> {
-		return this.request(`/hive/workers/${id}`, { method: "DELETE" });
+	async archiveHiveWorker(
+		id: string,
+		expectedRevision: number,
+		options: { idempotencyKey: string },
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}`, {
+			method: "DELETE",
+			headers: { "Idempotency-Key": options.idempotencyKey },
+			body: JSON.stringify({ expected_revision: expectedRevision }),
+		});
 	}
 
 	/** Ensure the Worker's private DM session exists and return its summary. */
@@ -1645,13 +1886,21 @@ export class MitsuroClient {
 		request: ChatRequest,
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
+		options?: { idempotencyKey?: string },
 	): Promise<void> {
 		const body = await this.encodeRequestIdentityForServer(
 			request as ChatRequest & Record<string, unknown>,
 			request.session_type,
 			signal,
 		);
-		return this.streamSSERequest("/chat", "POST", body, callbacks, signal);
+		return this.streamSSERequest(
+			"/chat",
+			"POST",
+			body,
+			callbacks,
+			signal,
+			options,
+		);
 	}
 
 	async streamToolResult(
@@ -1674,6 +1923,7 @@ export class MitsuroClient {
 		body: object | undefined,
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
+		options?: { idempotencyKey?: string },
 	): Promise<void> {
 		const diagnosticName = "api.stream";
 		const startedAt = monotonicNow();
@@ -1685,6 +1935,9 @@ export class MitsuroClient {
 				headers: {
 					...this.headers(),
 					Accept: "text/event-stream",
+					...(options?.idempotencyKey
+						? { "Idempotency-Key": options.idempotencyKey }
+						: {}),
 				},
 				body: body ? JSON.stringify(body) : undefined,
 				signal,
@@ -1906,6 +2159,15 @@ export class MitsuroClient {
 				break;
 			case "steering_injected":
 				callbacks.onSteeringInjected?.(event.pending_id, event.message);
+				break;
+			case "worker_input_staged":
+				callbacks.onWorkerInputStaged?.(event);
+				break;
+			case "worker_response_pending":
+				callbacks.onWorkerResponsePending?.(event);
+				break;
+			case "worker_response_committed":
+				callbacks.onWorkerResponseCommitted?.(event);
 				break;
 			case "turn_complete":
 				callbacks.onTurnComplete?.(event.turn, event.has_more);

@@ -58,6 +58,57 @@ function clientFor(response: Response): MitsuroClient {
 }
 
 describe("MitsuroClient streaming lifecycle", () => {
+	test("sends an optional chat idempotency key without changing ordinary callers", async () => {
+		const keys: Array<string | null> = [];
+		const client = new MitsuroClient({
+			baseUrl: "https://mitsuro.test",
+			fetchImpl: (async (_input, init) => {
+				keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+				return streamResponse(
+					'data: {"type":"finish","session_id":"worker-dm","stop_reason":"completed"}\n\n',
+				);
+			}) as typeof fetch,
+		});
+
+		await client.streamChat(
+			{ session_id: "worker-dm", message: "inspect the failure" },
+			createCallbacks(),
+			undefined,
+			{ idempotencyKey: "worker-chat-key" },
+		);
+		await client.streamChat(
+			{ session_id: "ordinary-chat", message: "hello" },
+			createCallbacks(),
+		);
+
+		expect(keys).toEqual(["worker-chat-key", null]);
+	});
+
+	test("sends an optional steering idempotency key without changing ordinary callers", async () => {
+		const keys: Array<string | null> = [];
+		const client = new MitsuroClient({
+			baseUrl: "https://mitsuro.test",
+			fetchImpl: (async (_input, init) => {
+				keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+				return Response.json({
+					status: "accepted",
+					pending_id: `pending-${keys.length}`,
+				});
+			}) as typeof fetch,
+		});
+
+		await client.steerSession(
+			{ session_id: "worker-dm", message: "change direction" },
+			{ idempotencyKey: "worker-steer-key" },
+		);
+		await client.steerSession({
+			session_id: "ordinary-chat",
+			message: "change direction",
+		});
+
+		expect(keys).toEqual(["worker-steer-key", null]);
+	});
+
 	test("sends an exact model key when a chat stream starts", async () => {
 		const modelKey: ModelKey = {
 			provider: "grok",
@@ -173,6 +224,57 @@ describe("MitsuroClient streaming lifecycle", () => {
 		);
 
 		expect(steering).toEqual([["steer-1", "change direction"]]);
+	});
+
+	test("delivers staged Worker identity and its durable successor", async () => {
+		const staged: Array<[string, string | null | undefined]> = [];
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"worker_input_staged","worker_id":"worker-1","session_id":"worker-dm","active_run_id":"run-1","staged_input_id":"input-1","successor_run_id":null}\n\n' +
+					'data: {"type":"worker_input_staged","worker_id":"worker-1","session_id":"worker-dm","active_run_id":"run-1","staged_input_id":"input-1","successor_run_id":"run-2"}\n\n' +
+					'data: {"type":"finish","session_id":"worker-dm","stop_reason":"end_turn"}\n\n',
+			),
+		);
+
+		await client.streamChat(
+			{ message: "hello" },
+			createCallbacks({
+				onWorkerInputStaged: (event) =>
+					staged.push([event.staged_input_id, event.successor_run_id]),
+			}),
+		);
+
+		expect(staged).toEqual([
+			["input-1", null],
+			["input-1", "run-2"],
+		]);
+	});
+
+	test("delivers exact Worker response pending and commit boundaries", async () => {
+		const boundaries: string[] = [];
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"worker_response_pending","worker_id":"worker-1","session_id":"worker-dm","run_id":"run-2"}\n\n' +
+					'data: {"type":"text_delta","delta":"provisional"}\n\n' +
+					'data: {"type":"worker_response_committed","worker_id":"worker-1","session_id":"worker-dm","run_id":"run-2"}\n\n' +
+					'data: {"type":"finish","session_id":"worker-dm","stop_reason":"completed"}\n\n',
+			),
+		);
+
+		await client.streamChat(
+			{ message: "hello" },
+			createCallbacks({
+				onWorkerResponsePending: (event) =>
+					boundaries.push(`pending:${event.worker_id}:${event.run_id}`),
+				onWorkerResponseCommitted: (event) =>
+					boundaries.push(`committed:${event.worker_id}:${event.run_id}`),
+			}),
+		);
+
+		expect(boundaries).toEqual([
+			"pending:worker-1:run-2",
+			"committed:worker-1:run-2",
+		]);
 	});
 
 	test("delivers bounded tool argument preparation progress", async () => {

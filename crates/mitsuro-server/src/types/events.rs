@@ -305,6 +305,31 @@ pub enum AgenticEvent {
         pending_id: Option<String>,
         message: String,
     },
+    /// A Worker DM input was durably staged behind an exact active run. The
+    /// same event is emitted again with `successor_run_id` once the durable
+    /// one-at-a-time materializer assigns its response run.
+    WorkerInputStaged {
+        worker_id: String,
+        session_id: String,
+        active_run_id: String,
+        staged_input_id: String,
+        successor_run_id: Option<String>,
+    },
+    /// A neutral Worker response has started streaming, but none of its
+    /// assistant text is canonical until the matching committed event.
+    WorkerResponsePending {
+        worker_id: String,
+        session_id: String,
+        run_id: String,
+    },
+    /// The exact neutral Worker response passed its durable response writer
+    /// and provider-accounting fence. Clients may finalize the matching draft
+    /// only when this is followed by a completed terminal event.
+    WorkerResponseCommitted {
+        worker_id: String,
+        session_id: String,
+        run_id: String,
+    },
     /// Error occurred
     Error { error: String },
     /// A background agent was started

@@ -79,6 +79,7 @@ export function DesktopShell({
             <SessionList
               {...sessionListProps}
               activeTab={activeTab}
+              onSelectHiveView={onSelectHiveView}
               onNewSession={onNewSession}
               onNewSessionWithDir={(path) => { setPickerVisible(false); onNewSessionWithDir(path); }}
               showPicker={pickerVisible}

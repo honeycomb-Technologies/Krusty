@@ -188,7 +188,7 @@ mod tests {
     use mitsuro_core::skills::SkillsManager;
     use mitsuro_core::storage::{
         credentials::CredentialStore, is_current_snapshot, reports::CreateReportInput, Database,
-        MemoryStore, MemoryType, ReportStore,
+        MemoryStore, MemoryType, ReportScope, ReportStore,
     };
     use mitsuro_core::tools::registry::ToolRegistry;
     use mitsuro_core::SessionManager;
@@ -289,6 +289,7 @@ mod tests {
                 summary: "summary",
                 tags: &[],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .expect("report should create")
     }

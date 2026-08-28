@@ -231,6 +231,24 @@ export const styles = StyleSheet.create({
     lineHeight: 18,
     fontWeight: "500",
   },
+  errorBannerActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  errorBannerAction: {
+    minHeight: 36,
+    minWidth: 76,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+  },
+  errorBannerActionText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
   stubTitle: {
     fontSize: 24,
     fontWeight: "700",

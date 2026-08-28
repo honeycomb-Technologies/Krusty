@@ -29,9 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::Utc;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::ai::client::{AiClient, CallOptions};
+use crate::ai::client::{AiClient, CallOptions, RemoteAttemptPolicy};
 use crate::ai::retry::is_retryable_error_message;
 use crate::ai::transport_policy::StreamTransportPolicy;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
@@ -41,7 +42,7 @@ use crate::skills::SkillsManager;
 use crate::storage::{
     Database, DelegatedRunRecord, DelegatedRunStore, HiveGroupRunContext, HiveProfileSnapshot,
     PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
-    SessionManager, SessionType, WorkMode,
+    SessionManager, SessionType, WorkMode, WorkerConversationResponseCommitError,
 };
 use crate::tools::registry::{
     agent_call_action, agent_call_is_research, agent_call_requests_write, effective_tool_call,
@@ -68,16 +69,22 @@ use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopInputInbox, LoopStopReason};
 use super::progress::{DelegationCheckpoint, DelegationNudgeTracker, LoopGuard};
+use super::run_spec::RunContextMode;
 use super::state::{RunBudget, RunBudgetResolution};
 use super::stream;
 use super::subagent::AgentCapability;
-use super::DelegatedProgressEvent;
+use super::{
+    bounded_reservation, DelegatedProgressEvent, WorkerConversationResponseCommitInput,
+    WorkerGoalAttemptOutcome, WorkerGoalEffectSummary, WorkerGoalEvidence, WorkerGoalEvidenceKind,
+    WorkerGoalOutcomeCommitError, WorkerGoalOutcomeCommitInput, WorkerGoalOutcomeCommitter,
+    WorkerGoalOutcomeCounters, WorkerGoalOutcomeInputError, WorkerProviderAdmission,
+    WorkerProviderCallKind, WorkerProviderCallSlot, WorkerProviderCompletion,
+    WorkerProviderTerminalOutcome, MAX_WORKER_GOAL_EVIDENCE_ITEMS,
+    MAX_WORKER_GOAL_PROVIDER_CALL_IDS,
+};
 
 use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
-use self::persistence::{
-    clear_recovery_state, persist_context_state, persist_recovery_state,
-    persist_required_recovery_state, save_message, set_agent_state, update_token_count,
-};
+use self::persistence::{persist_context_state, save_message, set_agent_state};
 use self::recovery::{
     build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
     continuation_recovery_message,
@@ -92,6 +99,245 @@ const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
 const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
 const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
 const LOOP_GUARD_LANDING_FALLBACK: &str = "I stopped this run after the loop guard detected repeated work without enough new evidence. The evidence gathered so far remains available; a new instruction can steer a different approach.";
+
+/// Canonical Chat/Code/Hive-session persistence is not the durable record for
+/// a WorkerGoal run. Its trigger, assistant stream, and tool protocol belong
+/// to the fenced Hive run/outcome transaction, so this boundary drops every
+/// generic session context, recovery, transcript, and token-accounting write
+/// while leaving provider governance, LoopEvents, traces, cancellation, and
+/// tool side effects intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanonicalSessionPersistenceBoundary {
+    enabled: bool,
+}
+
+impl CanonicalSessionPersistenceBoundary {
+    fn for_context_mode(context_mode: &RunContextMode) -> Self {
+        Self {
+            enabled: !context_mode.is_worker_goal(),
+        }
+    }
+
+    fn persist_context_state(self, db_path: &Path, session_id: &str, ledger: &ContextLedger) {
+        if self.enabled {
+            persistence::persist_context_state(db_path, session_id, ledger);
+        }
+    }
+
+    fn persist_recovery_state(
+        self,
+        db_path: &Path,
+        session_id: &str,
+        recovery: &crate::storage::SessionRecoveryState,
+    ) {
+        if self.enabled {
+            persistence::persist_recovery_state(db_path, session_id, recovery);
+        }
+    }
+
+    fn persist_required_recovery_state(
+        self,
+        db_path: &Path,
+        session_id: &str,
+        recovery: &crate::storage::SessionRecoveryState,
+    ) -> anyhow::Result<()> {
+        if self.enabled {
+            persistence::persist_required_recovery_state(db_path, session_id, recovery)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn clear_recovery_state(self, db_path: &Path, session_id: &str) {
+        if self.enabled {
+            persistence::clear_recovery_state(db_path, session_id);
+        }
+    }
+
+    fn save_message(self, db_path: &Path, session_id: &str, message: &ModelMessage) {
+        if self.enabled {
+            persistence::save_message(db_path, session_id, message);
+        }
+    }
+
+    fn update_token_count(self, db_path: &Path, session_id: &str, count: usize) {
+        if self.enabled {
+            persistence::update_token_count(db_path, session_id, count);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WorkerGoalOutcomeJournal {
+    provider_call_ids: Vec<String>,
+    evidence: Vec<WorkerGoalEvidence>,
+    counters: WorkerGoalOutcomeCounters,
+    workspace_mutated: bool,
+    overflowed: bool,
+}
+
+impl WorkerGoalOutcomeJournal {
+    fn record_provider_call(&mut self, provider_call_id: String) {
+        self.counters.provider_calls = self.counters.provider_calls.saturating_add(1);
+        self.counters.turns = self.counters.turns.saturating_add(1);
+        if self.provider_call_ids.len() >= MAX_WORKER_GOAL_PROVIDER_CALL_IDS {
+            self.overflowed = true;
+            return;
+        }
+        self.provider_call_ids.push(provider_call_id);
+    }
+
+    fn record_tool_results(&mut self, calls: &[AiToolCall], results: &[Content]) {
+        for result in results {
+            let Content::ToolResult {
+                tool_use_id,
+                output,
+                is_error,
+            } = result
+            else {
+                continue;
+            };
+            self.counters.tool_calls = self.counters.tool_calls.saturating_add(1);
+            let failed = is_error.unwrap_or(false)
+                || output
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+            if failed {
+                self.counters.failed_tool_calls = self.counters.failed_tool_calls.saturating_add(1);
+            } else {
+                self.counters.successful_tool_calls =
+                    self.counters.successful_tool_calls.saturating_add(1);
+            }
+
+            let mut matching_calls = calls.iter().filter(|call| call.id == *tool_use_id);
+            let matching_call = matching_calls.next();
+            if matching_call.is_none() || matching_calls.next().is_some() {
+                // Tool-use ids are model supplied and therefore only an
+                // internal correlation hint. Ambiguous correlation makes the
+                // journal ineligible for canonical progress.
+                self.overflowed = true;
+            }
+            let tool = matching_call
+                .map(|call| effective_tool_call(&call.name, &call.arguments).0)
+                .unwrap_or("workspace_tool");
+            let changed = output.get("changed").and_then(serde_json::Value::as_bool);
+            let mutation_tool = matches!(tool, "apply_patch" | "edit" | "multiedit" | "write");
+            if !failed && mutation_tool && changed == Some(true) {
+                self.workspace_mutated = true;
+            }
+            let kind = if failed {
+                WorkerGoalEvidenceKind::ToolFailure
+            } else if mutation_tool && changed == Some(true) {
+                WorkerGoalEvidenceKind::WorkspaceMutation
+            } else if (mutation_tool && changed == Some(false))
+                || matches!(tool, "read" | "grep" | "glob" | "list")
+            {
+                WorkerGoalEvidenceKind::WorkspaceObservation
+            } else {
+                WorkerGoalEvidenceKind::Runtime
+            };
+            let summary = if failed {
+                format!("Governed workspace tool {tool} returned an error")
+            } else if mutation_tool && changed == Some(true) {
+                format!("Governed workspace tool {tool} reported a workspace change")
+            } else if mutation_tool && changed == Some(false) {
+                format!("Governed workspace tool {tool} completed without a workspace change")
+            } else if mutation_tool {
+                format!("Governed workspace tool {tool} completed without a trusted change status")
+            } else {
+                format!("Governed workspace tool {tool} completed successfully")
+            };
+            if self.evidence.len() < MAX_WORKER_GOAL_EVIDENCE_ITEMS {
+                if let Ok(evidence) = WorkerGoalEvidence::new(kind, summary) {
+                    self.evidence.push(evidence);
+                } else {
+                    self.overflowed = true;
+                }
+            }
+        }
+    }
+
+    fn can_commit_outcome(&self) -> bool {
+        !self.overflowed
+            && self.counters.failed_tool_calls == 0
+            && self.counters.successful_tool_calls > 0
+            && !self.evidence.is_empty()
+    }
+
+    fn record_research_actions(&mut self, count: usize) {
+        let Ok(count) = u32::try_from(count) else {
+            self.overflowed = true;
+            return;
+        };
+        let Some(total) = self.counters.research_actions.checked_add(count) else {
+            self.overflowed = true;
+            return;
+        };
+        self.counters.research_actions = total;
+    }
+
+    fn attempt_outcome(&self) -> WorkerGoalAttemptOutcome {
+        // This loop can prove governed effects, not acceptance. A separate
+        // typed verifier may promote the exact frozen step later.
+        WorkerGoalAttemptOutcome::Progressed
+    }
+
+    fn effect_summary(&self) -> Result<WorkerGoalEffectSummary, WorkerGoalOutcomeInputError> {
+        WorkerGoalEffectSummary::new(
+            format!(
+                "Observed {} successful governed workspace tool calls, {} failed calls, and {} research actions; explicit workspace mutation reported: {}. Acceptance was not evaluated by this runner.",
+                self.counters.successful_tool_calls,
+                self.counters.failed_tool_calls,
+                self.counters.research_actions,
+                self.workspace_mutated
+            ),
+            self.workspace_mutated,
+        )
+    }
+}
+
+enum WorkerGoalOutcomeFinalize {
+    Committed,
+    ProvenStale,
+    Ambiguous(WorkerGoalOutcomeCommitError),
+    ProviderAccountingUncertain {
+        outcome_committed: bool,
+        error: anyhow::Error,
+    },
+}
+
+/// Persist/adopt the canonical Goal outcome before terminalizing the final
+/// no-tool provider permit. Conflict or transaction uncertainty deliberately
+/// leave the provider call Started for fenced crash recovery.
+fn commit_worker_goal_outcome_before_provider_completion<F>(
+    committer: &dyn WorkerGoalOutcomeCommitter,
+    input: &WorkerGoalOutcomeCommitInput,
+    complete_provider: F,
+) -> WorkerGoalOutcomeFinalize
+where
+    F: FnOnce(WorkerProviderTerminalOutcome) -> anyhow::Result<()>,
+{
+    match committer.commit_outcome(input) {
+        Ok(_) => match complete_provider(WorkerProviderTerminalOutcome::Completed) {
+            Ok(()) => WorkerGoalOutcomeFinalize::Committed,
+            Err(error) => WorkerGoalOutcomeFinalize::ProviderAccountingUncertain {
+                outcome_committed: true,
+                error,
+            },
+        },
+        Err(error) if error.is_proven_stale() => {
+            match complete_provider(WorkerProviderTerminalOutcome::CanonicalCommitStale) {
+                Ok(()) => WorkerGoalOutcomeFinalize::ProvenStale,
+                Err(error) => WorkerGoalOutcomeFinalize::ProviderAccountingUncertain {
+                    outcome_committed: false,
+                    error,
+                },
+            }
+        }
+        Err(error) => WorkerGoalOutcomeFinalize::Ambiguous(error),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct LoopGuardLanding {
@@ -142,6 +388,21 @@ fn empty_completion_action(
     }
 }
 
+/// Only an explicit, pre-write stale-fence rejection proves that no canonical
+/// response can have committed. Conflicts and commit-uncertain failures keep
+/// the append-only provider call Started for exact takeover/adoption.
+fn worker_response_commit_terminal_outcome(
+    error: &WorkerConversationResponseCommitError,
+) -> Option<WorkerProviderTerminalOutcome> {
+    match error {
+        WorkerConversationResponseCommitError::StaleRejected(_) => {
+            Some(WorkerProviderTerminalOutcome::CanonicalCommitStale)
+        }
+        WorkerConversationResponseCommitError::ConflictOrCorrupt(_)
+        | WorkerConversationResponseCommitError::CommitUncertain(_) => None,
+    }
+}
+
 fn split_single_pending_ask_user_call<'a>(
     calls: &'a [&'a AiToolCall],
 ) -> Option<(&'a AiToolCall, &'a [&'a AiToolCall])> {
@@ -156,6 +417,57 @@ fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'st
         LoopStopReason::ProviderError | LoopStopReason::PinchFailed => "error",
         _ => "idle",
     }
+}
+
+fn finish_worker_governor_gate(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    decision: &crate::storage::WorkerGovernorDecision,
+) {
+    let reason = serde_json::to_string(decision)
+        .map(|decision| format!("Hive Worker provider call gated: {decision}"))
+        .unwrap_or_else(|_| "Hive Worker provider call gated by durable policy".to_string());
+    if let Some(next_eligible_at) = decision
+        .next_eligible_at
+        .as_deref()
+        .and_then(|value| crate::hive::parse_utc_timestamp(value).ok())
+    {
+        let duration_secs = next_eligible_at
+            .signed_duration_since(Utc::now())
+            .num_seconds()
+            .max(1) as u64;
+        set_agent_state(db_path, session_id, "sleeping");
+        let _ = event_tx.send(LoopEvent::AgentSleeping {
+            duration_secs,
+            reason,
+        });
+        let _ = event_tx.send(LoopEvent::Finished {
+            session_id: session_id.to_string(),
+            stop_reason: LoopStopReason::Sleeping,
+        });
+    } else {
+        set_agent_state(db_path, session_id, "awaiting_input");
+        let _ = event_tx.send(LoopEvent::Error { error: reason });
+        let _ = event_tx.send(LoopEvent::Finished {
+            session_id: session_id.to_string(),
+            stop_reason: LoopStopReason::AwaitingInput,
+        });
+    }
+}
+
+fn finish_worker_provider_attention(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    error: String,
+) {
+    set_agent_state(db_path, session_id, "awaiting_input");
+    let _ = event_tx.send(LoopEvent::Error { error });
+    let _ = event_tx.send(LoopEvent::Finished {
+        session_id: session_id.to_string(),
+        stop_reason: LoopStopReason::AwaitingInput,
+    });
 }
 
 fn active_goal_for_run(db_path: &Path, session_id: &str) -> bool {
@@ -605,6 +917,10 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) hive_group_run: Option<HiveGroupRunContext>,
     /// Database-owned Mako identity frozen once at run start.
     pub(crate) hive_profile: Option<Arc<HiveProfileSnapshot>>,
+    /// Typed prompt/capability boundary. The default retains ordinary
+    /// workspace-aware orchestration; neutral Worker conversations use only
+    /// their exact durable persona and conversation continuity.
+    pub(crate) context_mode: RunContextMode,
     pub(crate) session_type: SessionType,
     pub(crate) permission_mode: PermissionMode,
     /// Optional explicit per-turn execution capability. `None` preserves the
@@ -625,6 +941,10 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) generate_title: bool,
     /// Optional explore delegated progress channel for external surfaces.
     pub(crate) delegated_progress_tx: Option<mpsc::UnboundedSender<DelegatedProgressEvent>>,
+    /// Exact claimed Worker/run provider capability. This lives on RunSpec's
+    /// immutable configuration rather than global services so non-Worker
+    /// callers and existing service construction remain unchanged.
+    pub(crate) provider_governor: Option<Arc<super::WorkerProviderCallGovernor>>,
 }
 
 impl Default for OrchestratorConfig {
@@ -636,6 +956,7 @@ impl Default for OrchestratorConfig {
             hive_crew_slug: None,
             hive_group_run: None,
             hive_profile: None,
+            context_mode: RunContextMode::Standard,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             execution_tool_allowlist: None,
@@ -646,6 +967,7 @@ impl Default for OrchestratorConfig {
             initial_work_mode: WorkMode::default(),
             generate_title: false,
             delegated_progress_tx: None,
+            provider_governor: None,
         }
     }
 }
@@ -766,7 +1088,9 @@ impl AgenticOrchestrator {
         let trace_db_path = self.services.db_path.clone();
         let trace_session_id = self.config.session_id.clone();
         let trace_run_id = super::observability::new_runtime_trace_run_id();
-        let extension_dispatch =
+        let extension_dispatch = if self.config.context_mode.is_isolated_worker() {
+            None
+        } else {
             self.services
                 .tool_registry
                 .agent_extension_manager()
@@ -780,7 +1104,8 @@ impl AgenticOrchestrator {
                         matches!(self.config.initial_work_mode, WorkMode::Plan),
                     );
                     (manager, context)
-                });
+                })
+        };
 
         tokio::spawn(async move {
             super::observability::forward_runtime_traces(
@@ -827,6 +1152,7 @@ impl AgenticOrchestrator {
             hive_crew_slug,
             hive_group_run,
             hive_profile,
+            context_mode,
             session_type,
             permission_mode,
             execution_tool_allowlist,
@@ -837,13 +1163,50 @@ impl AgenticOrchestrator {
             initial_work_mode,
             generate_title,
             delegated_progress_tx,
+            provider_governor,
         } = self.config;
 
-        // Load per-project settings from .krusty/settings.json
-        let project_settings =
-            ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
+        let canonical_session_persistence =
+            CanonicalSessionPersistenceBoundary::for_context_mode(&context_mode);
+        // Keep the existing call sites structurally identical while routing
+        // every generic session write through the WorkerGoal isolation gate.
+        let persist_context_state = |db_path: &Path, session_id: &str, ledger: &ContextLedger| {
+            canonical_session_persistence.persist_context_state(db_path, session_id, ledger);
+        };
+        let persist_recovery_state =
+            |db_path: &Path, session_id: &str, recovery: &crate::storage::SessionRecoveryState| {
+                canonical_session_persistence.persist_recovery_state(db_path, session_id, recovery);
+            };
+        let persist_required_recovery_state =
+            |db_path: &Path, session_id: &str, recovery: &crate::storage::SessionRecoveryState| {
+                canonical_session_persistence
+                    .persist_required_recovery_state(db_path, session_id, recovery)
+            };
+        let clear_recovery_state = |db_path: &Path, session_id: &str| {
+            canonical_session_persistence.clear_recovery_state(db_path, session_id);
+        };
+        let save_message = |db_path: &Path, session_id: &str, message: &ModelMessage| {
+            canonical_session_persistence.save_message(db_path, session_id, message);
+        };
+        let update_token_count = |db_path: &Path, session_id: &str, count: usize| {
+            canonical_session_persistence.update_token_count(db_path, session_id, count);
+        };
 
-        let active_goal_at_start = active_goal_for_run(&db_path, &session_id);
+        // Load per-project settings from .krusty/settings.json
+        let project_settings = if context_mode.is_isolated_worker() {
+            ProjectSettings::default()
+        } else {
+            ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir))
+        };
+
+        // WorkerGoal carries a frozen Workflow attempt, but the ordinary
+        // session orchestrator is not its lifecycle authority. The Hive run
+        // host must settle that exact binding through its typed outcome and
+        // evidence transaction rather than letting generic session helpers
+        // select or mutate live Goal rows by session id.
+        let manages_workflow_lifecycle = matches!(&context_mode, RunContextMode::Standard);
+        let active_goal_at_start =
+            manages_workflow_lifecycle && active_goal_for_run(&db_path, &session_id);
         let run_budget = if active_goal_at_start {
             RunBudgetResolution::resolve_goal_attempt(run_budget, project_settings.run_limits)
         } else {
@@ -873,7 +1236,8 @@ impl AgenticOrchestrator {
             ai_client.as_ref(),
             permission_mode,
             work_mode,
-            has_active_workflow_or_plan(&db_path, &session_id),
+            !context_mode.is_isolated_worker()
+                && has_active_workflow_or_plan(&db_path, &session_id),
             project_settings
                 .disabled_tools
                 .as_deref()
@@ -890,6 +1254,7 @@ impl AgenticOrchestrator {
         let mut goal_tool_call_count = 0usize;
         let mut goal_research_action_count = 0usize;
         let mut attempt_progress_tracker = AttemptProgressTracker::default();
+        let mut worker_goal_outcome_journal = WorkerGoalOutcomeJournal::default();
         let mut loop_guard_landing = None::<LoopGuardLanding>;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
@@ -934,8 +1299,9 @@ impl AgenticOrchestrator {
             max_turns: run_budget.budget.max_turns,
             source: run_budget.source,
         });
-        if let Some(mutation) =
-            ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode)
+        if let Some(mutation) = active_goal_at_start
+            .then(|| ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode))
+            .flatten()
         {
             let _ = event_tx.send(LoopEvent::WorkflowUpdated {
                 goal_id: mutation.snapshot.goal.id,
@@ -946,7 +1312,17 @@ impl AgenticOrchestrator {
 
         loop {
             input_inbox.collect_ready();
-            emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
+            if context_mode.is_isolated_worker() {
+                // Worker conversation inputs are accepted and sequenced by
+                // the durable Hive input table. Live steering/workflow wakes
+                // must not splice a second user boundary into this claimed
+                // one-response run. Dropping delivery here leaves any staged
+                // durable input unpromoted for the next run.
+                let _ = input_inbox.take_steering();
+                let _ = input_inbox.take_workflow_updates();
+            } else {
+                emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
+            }
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -956,13 +1332,17 @@ impl AgenticOrchestrator {
                 });
                 return;
             }
-            let injected_steering = inject_pending_steering(
-                &mut input_inbox,
-                &mut conversation,
-                &mut context_ledger,
-                &db_path,
-                &session_id,
-            );
+            let injected_steering = if context_mode.is_isolated_worker() {
+                Vec::new()
+            } else {
+                inject_pending_steering(
+                    &mut input_inbox,
+                    &mut conversation,
+                    &mut context_ledger,
+                    &db_path,
+                    &session_id,
+                )
+            };
             if !injected_steering.is_empty() {
                 emit_steering_events(&event_tx, injected_steering);
                 loop_guard_landing = None;
@@ -987,7 +1367,9 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
+                if active_goal_at_start {
+                    pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
+                }
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::Finished {
@@ -1029,7 +1411,8 @@ impl AgenticOrchestrator {
             let provider_call_trace = super::observability::ProviderCallTraceContext::for_run(
                 provider_call_tx.clone(),
                 iteration,
-            );
+            )
+            .with_provider_governor(provider_governor.clone());
 
             if conversation.len() < last_microcompact_history_message_count {
                 last_microcompact_history_message_count = conversation.len();
@@ -1060,42 +1443,105 @@ impl AgenticOrchestrator {
             // UI/DB keep mid-turn status prose; the provider must not. Feeding
             // "I'll do X" preambles back every tool round trains replan loops.
             let model_history = super::history_policy::model_facing_messages(&conversation);
-            let mut conversation_with_context = inject_runtime_context(
-                &model_history,
-                &db_path,
-                &session_id,
-                &working_dir,
-                project_dir.as_deref(),
-                hive_crew_slug.as_deref(),
-                hive_group_run.as_ref(),
-                hive_profile.as_deref(),
-                work_mode,
-                &skills_manager,
-                Some(ai_client.config().model.as_str()),
-                session_type,
-                user_id.as_deref(),
-            );
-            if let Some(extension_manager) = tool_registry.agent_extension_manager() {
-                let extension_context = crate::extensions::ExtensionCallContext::for_resolved_turn(
-                    working_dir.clone(),
-                    project_dir.clone(),
-                    Some(session_id.clone()),
-                    ai_client.resolved_model(),
-                    format!("{:?}", permission_mode).to_ascii_lowercase(),
-                    matches!(work_mode, WorkMode::Plan),
-                );
-                let extension_context_additions =
-                    extension_manager.context_for_turn(&extension_context).await;
-                if !extension_context_additions.is_empty() {
-                    conversation_with_context.push(ModelMessage {
-                        role: Role::System,
-                        content: vec![Content::Text {
-                            text: format!(
+            let mut conversation_with_context = match &context_mode {
+                RunContextMode::WorkerConversation { worker_id, .. } => {
+                    match context::inject_worker_conversation_context(
+                        &model_history,
+                        &db_path,
+                        &session_id,
+                        worker_id,
+                        user_id.as_deref(),
+                        hive_group_run.as_ref(),
+                    ) {
+                        Ok(conversation) => conversation,
+                        Err(error) => {
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker conversation context failed closed before provider access: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                }
+                RunContextMode::WorkerGoal {
+                    context: goal_context,
+                    ..
+                } => {
+                    let Some(allowlist) = execution_tool_allowlist.as_ref() else {
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "Hive Worker Goal tool capability is unavailable".to_string(),
+                        );
+                        return;
+                    };
+                    match context::inject_worker_goal_context(
+                        &model_history,
+                        &db_path,
+                        &session_id,
+                        user_id.as_deref(),
+                        goal_context,
+                        allowlist,
+                    ) {
+                        Ok(conversation) => conversation,
+                        Err(error) => {
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker Goal context failed closed before provider access: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                }
+                RunContextMode::Standard => inject_runtime_context(
+                    &model_history,
+                    &db_path,
+                    &session_id,
+                    &working_dir,
+                    project_dir.as_deref(),
+                    hive_crew_slug.as_deref(),
+                    hive_group_run.as_ref(),
+                    hive_profile.as_deref(),
+                    work_mode,
+                    &skills_manager,
+                    Some(ai_client.config().model.as_str()),
+                    session_type,
+                    user_id.as_deref(),
+                ),
+            };
+            if !context_mode.is_isolated_worker() {
+                if let Some(extension_manager) = tool_registry.agent_extension_manager() {
+                    let extension_context =
+                        crate::extensions::ExtensionCallContext::for_resolved_turn(
+                            working_dir.clone(),
+                            project_dir.clone(),
+                            Some(session_id.clone()),
+                            ai_client.resolved_model(),
+                            format!("{:?}", permission_mode).to_ascii_lowercase(),
+                            matches!(work_mode, WorkMode::Plan),
+                        );
+                    let extension_context_additions =
+                        extension_manager.context_for_turn(&extension_context).await;
+                    if !extension_context_additions.is_empty() {
+                        conversation_with_context.push(ModelMessage {
+                            role: Role::System,
+                            content: vec![Content::Text {
+                                text: format!(
                                 "[AGENT EXTENSION CONTEXT]\n\n{}\n\n[END AGENT EXTENSION CONTEXT]",
                                 extension_context_additions.join("\n\n")
                             ),
-                        }],
-                    });
+                            }],
+                        });
+                    }
                 }
             }
             if empty_completion_recovery_pending {
@@ -1135,6 +1581,16 @@ impl AgenticOrchestrator {
             );
 
             if compaction_manager.should_compact(estimated_tokens_before) {
+                if context_mode.is_isolated_worker() {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "Hive Worker run exceeded its bounded context window; ambient session compaction was not invoked"
+                            .to_string(),
+                    );
+                    return;
+                }
                 let messages_after_usage =
                     conversation.len().saturating_sub(messages_at_last_usage);
                 match apply_in_place_compaction(
@@ -1202,8 +1658,10 @@ impl AgenticOrchestrator {
                         if last_token_count > 0 {
                             update_token_count(&db_path, &session_id, last_token_count);
                         }
-                        finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
-                        pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
+                        if active_goal_at_start {
+                            finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
+                            pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
+                        }
                         clear_recovery_state(&db_path, &session_id);
                         set_agent_state(&db_path, &session_id, "error");
                         let _ = event_tx.send(LoopEvent::Finished {
@@ -1215,7 +1673,60 @@ impl AgenticOrchestrator {
                 }
             }
 
-            // Stream AI response
+            let provider_call_slot = WorkerProviderCallSlot::new(
+                WorkerProviderCallKind::AgentTurn,
+                u32::try_from(iteration).unwrap_or(u32::MAX),
+                0,
+            );
+            let reserved_tokens = bounded_reservation(
+                request_estimate.total_tokens,
+                request_options
+                    .max_tokens
+                    .unwrap_or(ai_client.config().max_tokens),
+            );
+            let (provider_call_id, provider_call_permit) = if let Some(governor) =
+                provider_governor.as_ref()
+            {
+                match governor.admit(provider_call_slot, reserved_tokens) {
+                    Ok(WorkerProviderAdmission::Allowed(permit)) => {
+                        let provider_call_id = permit.provider_call_id().to_string();
+                        if context_mode.is_worker_goal() {
+                            worker_goal_outcome_journal
+                                .record_provider_call(provider_call_id.clone());
+                        }
+                        (provider_call_id, Some(permit))
+                    }
+                    Ok(WorkerProviderAdmission::Gated(decision)) => {
+                        finish_worker_governor_gate(&db_path, &session_id, &event_tx, &decision);
+                        return;
+                    }
+                    Ok(WorkerProviderAdmission::AlreadyStarted(call)) => {
+                        finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker provider call {} may already have been accepted; it was not replayed",
+                                    call.provider_call_id
+                                ),
+                            );
+                        return;
+                    }
+                    Err(error) => {
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            format!("Hive Worker provider-call admission failed closed: {error:#}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                (uuid::Uuid::new_v4().to_string(), None)
+            };
+
+            // Stream AI response only after durable Worker admission.
             persist_recovery_state(
                 &db_path,
                 &session_id,
@@ -1227,7 +1738,6 @@ impl AgenticOrchestrator {
                     PartialAssistantState::default(),
                 ),
             );
-            let provider_call_id = uuid::Uuid::new_v4().to_string();
             let provider_call_started = Instant::now();
             let request_diagnostics =
                 ai_client.request_diagnostics(&conversation_with_context, &request_options);
@@ -1239,8 +1749,16 @@ impl AgenticOrchestrator {
             // borrow of `options` ends as soon as setup resolves. Later mode
             // transitions must be able to replace the governed schemas.
             let setup_result = {
-                let streaming_setup =
-                    ai_client.call_streaming(conversation_with_context, &request_options);
+                let attempt_policy = if provider_call_permit.is_some() {
+                    RemoteAttemptPolicy::GovernedSingleAttempt
+                } else {
+                    RemoteAttemptPolicy::ConfiguredRetries
+                };
+                let streaming_setup = ai_client.call_streaming_with_attempt_policy(
+                    conversation_with_context,
+                    &request_options,
+                    attempt_policy,
+                );
                 tokio::pin!(streaming_setup);
                 let mut setup_input_closed = false;
                 loop {
@@ -1258,7 +1776,7 @@ impl AgenticOrchestrator {
 
             let Some(setup_result) = setup_result else {
                 let _ = provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
-                    provider_call_id,
+                    provider_call_id.clone(),
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
@@ -1305,7 +1823,7 @@ impl AgenticOrchestrator {
                     }
                     let _ =
                         provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
-                            provider_call_id,
+                            provider_call_id.clone(),
                             iteration,
                             ai_client.provider_id(),
                             &ai_client.config().model,
@@ -1315,6 +1833,32 @@ impl AgenticOrchestrator {
                             provider_call_started.elapsed(),
                         ));
                     let error = format!("AI error: {e:#}");
+                    if provider_call_permit.is_some() {
+                        // The transport does not currently prove whether a
+                        // setup error happened before or after remote
+                        // acceptance. Keep Started unresolved and stop this
+                        // run without entering the ordinary retry path.
+                        persist_recovery_state(
+                            &db_path,
+                            &session_id,
+                            &build_recovery_state(
+                                &context_ledger,
+                                RecoveryStatus::Interrupted,
+                                Some(LoopStopReason::AwaitingInput),
+                                Some(error.clone()),
+                                PartialAssistantState::default(),
+                            ),
+                        );
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            format!(
+                                "Hive Worker provider acceptance is uncertain; the call was not replayed: {error}"
+                            ),
+                        );
+                        return;
+                    }
                     if !overflow_compact_retry_attempted && is_context_overflow_error(&error) {
                         overflow_compact_retry_attempted = true;
                         tracing::warn!(
@@ -1423,8 +1967,20 @@ impl AgenticOrchestrator {
             };
 
             let Some(result) = result else {
+                if let Some(permit) = provider_call_permit.as_ref() {
+                    if let Err(error) = permit.complete(WorkerProviderCompletion::acknowledged(
+                        WorkerProviderTerminalOutcome::CancelledAfterAcceptance,
+                        None,
+                    )) {
+                        tracing::error!(
+                            session_id = %session_id,
+                            %error,
+                            "Failed to terminalize cancelled Hive Worker provider call"
+                        );
+                    }
+                }
                 let _ = provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
-                    provider_call_id,
+                    provider_call_id.clone(),
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
@@ -1442,23 +1998,134 @@ impl AgenticOrchestrator {
                 return;
             };
 
-            let provider_call_outcome = match result.stop_reason.as_ref() {
-                None => "completed",
-                Some(LoopStopReason::ProviderError) => "provider_error",
-                Some(LoopStopReason::StreamIdleTimeout) => "stream_idle_timeout",
-                Some(LoopStopReason::UserAbort) => "user_abort",
-                Some(_) => "interrupted",
+            let neutral_invalid_outcome =
+                if context_mode.is_worker_conversation() && result.stop_reason.is_none() {
+                    if !result.tool_calls.is_empty() {
+                        Some(WorkerProviderTerminalOutcome::UnsafeOutput)
+                    } else if result.text.trim().is_empty() {
+                        Some(WorkerProviderTerminalOutcome::SemanticInvalid)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            let worker_goal_server_tool_rejected = context_mode.is_worker_goal()
+                && result.stop_reason.is_none()
+                && result.had_server_tool_activity;
+            let worker_goal_commit_pending = context_mode.is_worker_goal()
+                && !worker_goal_server_tool_rejected
+                && result.stop_reason.is_none()
+                && result.tool_calls.is_empty()
+                && loop_guard_landing.is_none();
+            let worker_goal_requested_research_actions = result
+                .tool_calls
+                .iter()
+                .filter(|call| matches!(call.name.as_str(), "read" | "glob" | "grep" | "list"))
+                .count();
+            let worker_goal_budget_rejected =
+                context_mode
+                    .worker_goal_context()
+                    .is_some_and(|goal_context| {
+                        !goal_context.permits_additional_attempt_work(
+                            worker_goal_outcome_journal.counters.tool_calls,
+                            result.tool_calls.len(),
+                            worker_goal_outcome_journal.counters.research_actions,
+                            worker_goal_requested_research_actions,
+                        )
+                    });
+            let worker_goal_landing = context_mode.is_worker_goal()
+                && result.stop_reason.is_none()
+                && result.tool_calls.is_empty()
+                && loop_guard_landing.is_some();
+            let provider_call_outcome = if worker_goal_commit_pending {
+                "awaiting_worker_goal_outcome_commit"
+            } else if worker_goal_server_tool_rejected {
+                "worker_goal_forbidden_server_tool_activity"
+            } else if worker_goal_budget_rejected {
+                "worker_goal_attempt_budget_rejected"
+            } else if worker_goal_landing {
+                "worker_goal_landing_rejected"
+            } else {
+                match (
+                    result.stop_reason.as_ref(),
+                    neutral_invalid_outcome,
+                    context_mode.is_worker_conversation(),
+                ) {
+                    (None, Some(WorkerProviderTerminalOutcome::UnsafeOutput), _) => {
+                        "unsafe_tool_output"
+                    }
+                    (None, Some(WorkerProviderTerminalOutcome::SemanticInvalid), _) => {
+                        "semantic_invalid"
+                    }
+                    (None, None, true) => "awaiting_canonical_commit",
+                    (None, None, false) => "completed",
+                    (Some(LoopStopReason::ProviderError), _, _) => "provider_error",
+                    (Some(LoopStopReason::StreamIdleTimeout), _, _) => "stream_idle_timeout",
+                    (Some(LoopStopReason::UserAbort), _, _) => "user_abort",
+                    (Some(_), _, _) => "interrupted",
+                    (None, Some(_), _) => "semantic_invalid",
+                }
             };
-            let _ = provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
-                provider_call_id,
-                iteration,
-                ai_client.provider_id(),
-                &ai_client.config().model,
-                options.reasoning_effort,
-                provider_call_outcome,
-                result.usage_available.then_some(result.usage.clone()),
-                provider_call_started.elapsed(),
-            ));
+            if let Some(permit) = provider_call_permit.as_ref() {
+                let terminal_outcome = match (result.stop_reason.as_ref(), neutral_invalid_outcome)
+                {
+                    (None, Some(outcome)) => Some(outcome),
+                    (None, None) if context_mode.is_worker_conversation() => None,
+                    (None, None) if worker_goal_commit_pending => None,
+                    (None, None) if worker_goal_server_tool_rejected => {
+                        Some(WorkerProviderTerminalOutcome::UnsafeOutput)
+                    }
+                    (None, None) if worker_goal_budget_rejected => {
+                        Some(WorkerProviderTerminalOutcome::SemanticInvalid)
+                    }
+                    (None, None) if worker_goal_landing => {
+                        Some(WorkerProviderTerminalOutcome::SemanticInvalid)
+                    }
+                    (None, None) => Some(WorkerProviderTerminalOutcome::Completed),
+                    (Some(LoopStopReason::StreamIdleTimeout), _) => {
+                        Some(WorkerProviderTerminalOutcome::StreamIdleTimeout)
+                    }
+                    (Some(LoopStopReason::ProviderError), _) => {
+                        Some(WorkerProviderTerminalOutcome::StreamError)
+                    }
+                    (Some(LoopStopReason::UserAbort), _) => {
+                        Some(WorkerProviderTerminalOutcome::CancelledAfterAcceptance)
+                    }
+                    (Some(_), _) => Some(WorkerProviderTerminalOutcome::StreamError),
+                };
+                if let Some(terminal_outcome) = terminal_outcome {
+                    if let Err(error) = permit.complete(WorkerProviderCompletion::acknowledged(
+                        terminal_outcome,
+                        result.usage_available.then_some(result.usage.clone()),
+                    )) {
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            format!(
+                                "Hive Worker provider call completed remotely but accounting failed closed: {error:#}"
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+            let neutral_commit_pending = context_mode.is_worker_conversation()
+                && result.stop_reason.is_none()
+                && neutral_invalid_outcome.is_none();
+            if !neutral_commit_pending && !worker_goal_commit_pending {
+                let _ = provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
+                    provider_call_id.clone(),
+                    iteration,
+                    ai_client.provider_id(),
+                    &ai_client.config().model,
+                    options.reasoning_effort,
+                    provider_call_outcome,
+                    result.usage_available.then_some(result.usage.clone()),
+                    provider_call_started.elapsed(),
+                ));
+            }
 
             if result.total_tokens > 0 {
                 last_token_count = result.total_tokens;
@@ -1468,10 +2135,12 @@ impl AgenticOrchestrator {
                 messages_at_last_usage = conversation.len();
             }
             provider_tool_activity_seen |= result.had_server_tool_activity;
-            let goal_token_stop =
-                record_active_goal_tokens(&db_path, &session_id, result.total_tokens);
+            let goal_token_stop = active_goal_at_start
+                .then(|| record_active_goal_tokens(&db_path, &session_id, result.total_tokens))
+                .flatten();
 
-            if loop_guard_landing.is_none()
+            if !context_mode.is_worker_conversation()
+                && loop_guard_landing.is_none()
                 && goal_token_stop.is_none()
                 && should_retry_empty_stream_interruption(
                     result.stop_reason.as_ref(),
@@ -1496,7 +2165,8 @@ impl AgenticOrchestrator {
                 None
             };
             if let Some(stop_reason) = effective_stop_reason {
-                if !overflow_compact_retry_attempted
+                if !context_mode.is_isolated_worker()
+                    && !overflow_compact_retry_attempted
                     && stop_reason == LoopStopReason::ProviderError
                     && result
                         .last_error
@@ -1582,6 +2252,227 @@ impl AgenticOrchestrator {
                     session_id: session_id.clone(),
                     stop_reason,
                 });
+                return;
+            }
+
+            if context_mode.is_worker_conversation() {
+                if let Some(invalid_outcome) = neutral_invalid_outcome {
+                    let reason = match invalid_outcome {
+                        WorkerProviderTerminalOutcome::UnsafeOutput => {
+                            "Hive Worker conversation returned an unadvertised tool call; no tool ran and no response was committed"
+                        }
+                        WorkerProviderTerminalOutcome::SemanticInvalid => {
+                            "Hive Worker conversation returned no user-visible text; no response was committed"
+                        }
+                        _ => "Hive Worker conversation response was rejected before commit",
+                    };
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        reason.to_string(),
+                    );
+                    return;
+                }
+
+                let Some(committer) = context_mode.response_committer() else {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "Hive Worker canonical response committer is unavailable".to_string(),
+                    );
+                    return;
+                };
+                let Some(governor) = provider_governor.as_ref() else {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "Hive Worker provider governor is unavailable during response commit"
+                            .to_string(),
+                    );
+                    return;
+                };
+                let Some(permit) = provider_call_permit.as_ref() else {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "Hive Worker provider permit is unavailable during response commit"
+                            .to_string(),
+                    );
+                    return;
+                };
+                let binding = governor.binding();
+                let commit_input = WorkerConversationResponseCommitInput {
+                    worker_id: binding.worker_id.clone(),
+                    worker_revision: binding.worker_revision,
+                    owner_user_id: binding.owner_user_id.clone(),
+                    session_id: binding.session_id.clone(),
+                    lane: binding.conversation_lane.clone(),
+                    run_id: binding.run_id.clone(),
+                    run_lease_token: binding.run_lease_token.clone(),
+                    run_lease_epoch: binding.run_lease_epoch,
+                    provider_call_id: permit.provider_call_id().to_string(),
+                    response_text: result.text.clone(),
+                };
+                if let Err(error) = committer.commit_response(&commit_input) {
+                    if let Some(outcome) = worker_response_commit_terminal_outcome(&error) {
+                        if let Err(accounting_error) =
+                            permit.complete(WorkerProviderCompletion::acknowledged(
+                                outcome,
+                                result.usage_available.then_some(result.usage.clone()),
+                            ))
+                        {
+                            let _ = provider_call_tx.send(
+                                super::observability::ProviderCallTrace::agent_loop(
+                                    provider_call_id.clone(),
+                                    iteration,
+                                    ai_client.provider_id(),
+                                    &ai_client.config().model,
+                                    options.reasoning_effort,
+                                    "canonical_commit_stale_accounting_uncertain",
+                                    result.usage_available.then_some(result.usage.clone()),
+                                    provider_call_started.elapsed(),
+                                ),
+                            );
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker response was rejected by a stale execution fence, but provider accounting requires fenced recovery: {accounting_error:#}"
+                                ),
+                            );
+                            return;
+                        }
+                        let _ = provider_call_tx.send(
+                            super::observability::ProviderCallTrace::agent_loop(
+                                provider_call_id.clone(),
+                                iteration,
+                                ai_client.provider_id(),
+                                &ai_client.config().model,
+                                options.reasoning_effort,
+                                "canonical_commit_stale",
+                                result.usage_available.then_some(result.usage.clone()),
+                                provider_call_started.elapsed(),
+                            ),
+                        );
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            format!(
+                                "Hive Worker response was rejected by a stale execution fence and was not published: {error}"
+                            ),
+                        );
+                        return;
+                    }
+
+                    let trace_outcome = match &error {
+                        WorkerConversationResponseCommitError::ConflictOrCorrupt(_) => {
+                            "canonical_commit_conflict_or_corrupt"
+                        }
+                        WorkerConversationResponseCommitError::CommitUncertain(_) => {
+                            "canonical_commit_uncertain"
+                        }
+                        WorkerConversationResponseCommitError::StaleRejected(_) => {
+                            unreachable!("stale response commit rejection was handled as terminal")
+                        }
+                    };
+                    let _ =
+                        provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
+                            provider_call_id.clone(),
+                            iteration,
+                            ai_client.provider_id(),
+                            &ai_client.config().model,
+                            options.reasoning_effort,
+                            trace_outcome,
+                            result.usage_available.then_some(result.usage.clone()),
+                            provider_call_started.elapsed(),
+                        ));
+                    // A conflicting durable row may be an adoption candidate,
+                    // and commit failure can be transaction-uncertain. Keep
+                    // Started so takeover can inspect the exact canonical row.
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        format!("Hive Worker response commit requires fenced recovery: {error}"),
+                    );
+                    return;
+                }
+                if let Err(error) = permit.complete(WorkerProviderCompletion::acknowledged(
+                    WorkerProviderTerminalOutcome::Completed,
+                    result.usage_available.then_some(result.usage.clone()),
+                )) {
+                    let _ =
+                        provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
+                            provider_call_id.clone(),
+                            iteration,
+                            ai_client.provider_id(),
+                            &ai_client.config().model,
+                            options.reasoning_effort,
+                            "canonical_committed_accounting_uncertain",
+                            result.usage_available.then_some(result.usage.clone()),
+                            provider_call_started.elapsed(),
+                        ));
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        format!(
+                            "Hive Worker response committed, but provider accounting requires fenced adoption: {error:#}"
+                        ),
+                    );
+                    return;
+                }
+                let _ = provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
+                    provider_call_id,
+                    iteration,
+                    ai_client.provider_id(),
+                    &ai_client.config().model,
+                    options.reasoning_effort,
+                    "completed",
+                    result.usage_available.then_some(result.usage.clone()),
+                    provider_call_started.elapsed(),
+                ));
+                if last_token_count > 0 {
+                    update_token_count(&db_path, &session_id, last_token_count);
+                }
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
+                });
+                return;
+            }
+
+            if worker_goal_server_tool_rejected {
+                finish_worker_provider_attention(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "Hive Worker Goal provider reported hosted tool activity on a surface with no hosted tools; no result or Workflow progress was accepted"
+                        .to_string(),
+                );
+                return;
+            }
+
+            if worker_goal_budget_rejected {
+                finish_worker_provider_attention(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "Hive Worker Goal requested a tool batch beyond the frozen attempt budget; no tool ran and no Workflow progress was published"
+                        .to_string(),
+                );
                 return;
             }
 
@@ -1673,8 +2564,12 @@ impl AgenticOrchestrator {
             }
 
             input_inbox.collect_ready();
-            let workflow_updated =
-                emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
+            let workflow_updated = if context_mode.is_isolated_worker() {
+                let _ = input_inbox.take_workflow_updates();
+                false
+            } else {
+                emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates())
+            };
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1692,13 +2587,18 @@ impl AgenticOrchestrator {
             }
 
             if loop_guard_landing.is_some() {
-                let injected_steering = inject_pending_steering(
-                    &mut input_inbox,
-                    &mut conversation,
-                    &mut context_ledger,
-                    &db_path,
-                    &session_id,
-                );
+                let injected_steering = if context_mode.is_isolated_worker() {
+                    let _ = input_inbox.take_steering();
+                    Vec::new()
+                } else {
+                    inject_pending_steering(
+                        &mut input_inbox,
+                        &mut conversation,
+                        &mut context_ledger,
+                        &db_path,
+                        &session_id,
+                    )
+                };
                 if !injected_steering.is_empty() || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
@@ -1723,6 +2623,18 @@ impl AgenticOrchestrator {
                 let landing = loop_guard_landing
                     .take()
                     .expect("landing state checked immediately before completion");
+                if context_mode.is_worker_goal() {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        format!(
+                            "Hive Worker Goal stopped at the bounded loop guard without a successful outcome commit; no Workflow progress was published: {}",
+                            landing.diagnostic
+                        ),
+                    );
+                    return;
+                }
                 if result.text.trim().is_empty() {
                     let fallback = LOOP_GUARD_LANDING_FALLBACK.to_string();
                     let _ = event_tx.send(LoopEvent::TextDelta {
@@ -1743,18 +2655,20 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                if landing.block_goal {
-                    block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
-                }
-                finish_active_attempt_for_stop(
-                    &db_path,
-                    &session_id,
+                if active_goal_at_start {
                     if landing.block_goal {
-                        "loop_guard_landing_completed_before_goal_verification"
-                    } else {
-                        "validation_converged_before_goal_verification"
-                    },
-                );
+                        block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
+                    }
+                    finish_active_attempt_for_stop(
+                        &db_path,
+                        &session_id,
+                        if landing.block_goal {
+                            "loop_guard_landing_completed_before_goal_verification"
+                        } else {
+                            "validation_converged_before_goal_verification"
+                        },
+                    );
+                }
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
@@ -1774,13 +2688,18 @@ impl AgenticOrchestrator {
 
             // A tool-free completion is also a safe boundary for live steering.
             if result.tool_calls.is_empty() {
-                let injected_steering = inject_pending_steering(
-                    &mut input_inbox,
-                    &mut conversation,
-                    &mut context_ledger,
-                    &db_path,
-                    &session_id,
-                );
+                let injected_steering = if context_mode.is_isolated_worker() {
+                    let _ = input_inbox.take_steering();
+                    Vec::new()
+                } else {
+                    inject_pending_steering(
+                        &mut input_inbox,
+                        &mut conversation,
+                        &mut context_ledger,
+                        &db_path,
+                        &session_id,
+                    )
+                };
                 if no_tool_completion_should_continue(&injected_steering) || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
@@ -1806,6 +2725,220 @@ impl AgenticOrchestrator {
             // No tool calls means this turn is complete. Assistant prose cannot
             // create, approve, or activate workflow state.
             if result.tool_calls.is_empty() {
+                if context_mode.is_worker_goal() {
+                    let Some(permit) = provider_call_permit.as_ref() else {
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "Hive Worker Goal final provider permit is unavailable".to_string(),
+                        );
+                        return;
+                    };
+                    let successful_terminal = !result.text.trim().is_empty()
+                        && worker_goal_outcome_journal.can_commit_outcome();
+                    if !successful_terminal {
+                        let reason = if result.text.trim().is_empty() {
+                            "Hive Worker Goal ended without a usable final outcome; no Workflow progress was committed"
+                        } else {
+                            "Hive Worker Goal lacks concrete successful governed-tool evidence, observed a tool failure, or exceeded its bounded outcome journal; no Workflow progress was committed"
+                        };
+                        if let Err(error) = permit.complete(WorkerProviderCompletion::acknowledged(
+                            WorkerProviderTerminalOutcome::SemanticInvalid,
+                            result.usage_available.then_some(result.usage.clone()),
+                        )) {
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "{reason}; final provider accounting requires fenced recovery: {error:#}"
+                                ),
+                            );
+                            return;
+                        }
+                        let _ = provider_call_tx.send(
+                            super::observability::ProviderCallTrace::agent_loop(
+                                provider_call_id.clone(),
+                                iteration,
+                                ai_client.provider_id(),
+                                &ai_client.config().model,
+                                options.reasoning_effort,
+                                "worker_goal_outcome_rejected",
+                                result.usage_available.then_some(result.usage.clone()),
+                                provider_call_started.elapsed(),
+                            ),
+                        );
+                        finish_worker_provider_attention(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            reason.to_string(),
+                        );
+                        return;
+                    }
+
+                    let Some(goal_context) = context_mode.worker_goal_context() else {
+                        unreachable!("Worker Goal mode checked immediately before context access")
+                    };
+                    let Some(committer) = context_mode.worker_goal_outcome_committer() else {
+                        unreachable!("Worker Goal mode structurally requires an outcome committer")
+                    };
+                    let outcome_input =
+                        worker_goal_outcome_journal
+                            .effect_summary()
+                            .and_then(|effect| {
+                                goal_context.outcome_commit_input(
+                                    worker_goal_outcome_journal.provider_call_ids.clone(),
+                                    worker_goal_outcome_journal.attempt_outcome(),
+                                    worker_goal_outcome_journal.evidence.clone(),
+                                    effect,
+                                    worker_goal_outcome_journal.counters,
+                                )
+                            });
+                    let outcome_input = match outcome_input {
+                        Ok(input)
+                            if input.final_provider_call_id() == provider_call_id.as_str() =>
+                        {
+                            input
+                        }
+                        Ok(_) => {
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                "Hive Worker Goal final provider identity drifted before outcome commit; the provider call remains unresolved for recovery"
+                                    .to_string(),
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker Goal outcome input failed closed; the final provider call remains unresolved for recovery: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    let finalize = commit_worker_goal_outcome_before_provider_completion(
+                        committer.as_ref(),
+                        &outcome_input,
+                        |terminal_outcome| {
+                            permit.complete(WorkerProviderCompletion::acknowledged(
+                                terminal_outcome,
+                                result.usage_available.then_some(result.usage.clone()),
+                            ))?;
+                            Ok(())
+                        },
+                    );
+                    match finalize {
+                        WorkerGoalOutcomeFinalize::Committed => {
+                            let _ = provider_call_tx.send(
+                                super::observability::ProviderCallTrace::agent_loop(
+                                    provider_call_id.clone(),
+                                    iteration,
+                                    ai_client.provider_id(),
+                                    &ai_client.config().model,
+                                    options.reasoning_effort,
+                                    "worker_goal_outcome_committed",
+                                    result.usage_available.then_some(result.usage.clone()),
+                                    provider_call_started.elapsed(),
+                                ),
+                            );
+                        }
+                        WorkerGoalOutcomeFinalize::ProvenStale => {
+                            let _ = provider_call_tx.send(
+                                super::observability::ProviderCallTrace::agent_loop(
+                                    provider_call_id.clone(),
+                                    iteration,
+                                    ai_client.provider_id(),
+                                    &ai_client.config().model,
+                                    options.reasoning_effort,
+                                    "worker_goal_outcome_stale",
+                                    result.usage_available.then_some(result.usage.clone()),
+                                    provider_call_started.elapsed(),
+                                ),
+                            );
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                "Hive Worker Goal outcome was rejected by a proven stale run fence; no stale progress was published"
+                                    .to_string(),
+                            );
+                            return;
+                        }
+                        WorkerGoalOutcomeFinalize::Ambiguous(error) => {
+                            let trace_outcome = match &error {
+                                WorkerGoalOutcomeCommitError::ConflictOrCorrupt(_) => {
+                                    "worker_goal_outcome_conflict_or_corrupt"
+                                }
+                                WorkerGoalOutcomeCommitError::CommitUncertain(_) => {
+                                    "worker_goal_outcome_commit_uncertain"
+                                }
+                                WorkerGoalOutcomeCommitError::StaleRejected(_) => {
+                                    unreachable!("proven stale handled by the finalize helper")
+                                }
+                            };
+                            let _ = provider_call_tx.send(
+                                super::observability::ProviderCallTrace::agent_loop(
+                                    provider_call_id.clone(),
+                                    iteration,
+                                    ai_client.provider_id(),
+                                    &ai_client.config().model,
+                                    options.reasoning_effort,
+                                    trace_outcome,
+                                    result.usage_available.then_some(result.usage.clone()),
+                                    provider_call_started.elapsed(),
+                                ),
+                            );
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker Goal outcome requires fenced recovery; the final provider call was deliberately left unresolved: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                        WorkerGoalOutcomeFinalize::ProviderAccountingUncertain {
+                            outcome_committed,
+                            error,
+                        } => {
+                            let trace_outcome = if outcome_committed {
+                                "worker_goal_outcome_committed_accounting_uncertain"
+                            } else {
+                                "worker_goal_outcome_stale_accounting_uncertain"
+                            };
+                            let _ = provider_call_tx.send(
+                                super::observability::ProviderCallTrace::agent_loop(
+                                    provider_call_id.clone(),
+                                    iteration,
+                                    ai_client.provider_id(),
+                                    &ai_client.config().model,
+                                    options.reasoning_effort,
+                                    trace_outcome,
+                                    result.usage_available.then_some(result.usage.clone()),
+                                    provider_call_started.elapsed(),
+                                ),
+                            );
+                            finish_worker_provider_attention(
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                format!(
+                                    "Hive Worker Goal outcome boundary resolved, but final provider accounting requires fenced recovery: {error:#}"
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                }
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
@@ -1813,11 +2946,13 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                finish_active_attempt_for_stop(
-                    &db_path,
-                    &session_id,
-                    "model_completion_before_goal_verification",
-                );
+                if active_goal_at_start {
+                    finish_active_attempt_for_stop(
+                        &db_path,
+                        &session_id,
+                        "model_completion_before_goal_verification",
+                    );
+                }
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 if let Some((_, reason)) = &goal_token_stop {
@@ -1887,7 +3022,7 @@ impl AgenticOrchestrator {
                         user_id.as_deref(),
                         permission_mode,
                         work_mode,
-                        Some(&ask_user_partial_assistant),
+                        (!context_mode.is_worker_goal()).then_some(&ask_user_partial_assistant),
                         delegated_progress_tx.as_ref(),
                         &event_tx,
                         Some(&provider_call_trace),
@@ -1899,6 +3034,13 @@ impl AgenticOrchestrator {
                         project_settings.disabled_tools.as_deref(),
                         hive_group_run.as_ref(),
                         Arc::clone(&file_observations),
+                        if context_mode.is_worker_goal() {
+                            executor::ExtensionExecutionPolicy::DisabledWorkerGoal
+                        } else if context_mode.is_isolated_worker() {
+                            executor::ExtensionExecutionPolicy::Disabled
+                        } else {
+                            executor::ExtensionExecutionPolicy::Enabled
+                        },
                     )
                     .await;
                     all_results.extend(other_batch.results);
@@ -1950,13 +3092,18 @@ impl AgenticOrchestrator {
                     });
                     return;
                 }
-                let injected_steering = inject_pending_steering(
-                    &mut input_inbox,
-                    &mut conversation,
-                    &mut context_ledger,
-                    &db_path,
-                    &session_id,
-                );
+                let injected_steering = if context_mode.is_isolated_worker() {
+                    let _ = input_inbox.take_steering();
+                    Vec::new()
+                } else {
+                    inject_pending_steering(
+                        &mut input_inbox,
+                        &mut conversation,
+                        &mut context_ledger,
+                        &db_path,
+                        &session_id,
+                    )
+                };
                 emit_steering_events(&event_tx, injected_steering);
 
                 if last_token_count > 0 {
@@ -2016,7 +3163,7 @@ impl AgenticOrchestrator {
                 user_id.as_deref(),
                 permission_mode,
                 work_mode,
-                Some(&tool_execution_partial_assistant),
+                (!context_mode.is_worker_goal()).then_some(&tool_execution_partial_assistant),
                 delegated_progress_tx.as_ref(),
                 &event_tx,
                 Some(&provider_call_trace),
@@ -2028,6 +3175,13 @@ impl AgenticOrchestrator {
                 project_settings.disabled_tools.as_deref(),
                 hive_group_run.as_ref(),
                 Arc::clone(&file_observations),
+                if context_mode.is_worker_goal() {
+                    executor::ExtensionExecutionPolicy::DisabledWorkerGoal
+                } else if context_mode.is_isolated_worker() {
+                    executor::ExtensionExecutionPolicy::Disabled
+                } else {
+                    executor::ExtensionExecutionPolicy::Enabled
+                },
             )
             .await;
             work_mode = tool_batch.next_work_mode;
@@ -2041,7 +3195,8 @@ impl AgenticOrchestrator {
                 ai_client.as_ref(),
                 permission_mode,
                 work_mode,
-                has_active_workflow_or_plan(&db_path, &session_id),
+                !context_mode.is_isolated_worker()
+                    && has_active_workflow_or_plan(&db_path, &session_id),
                 project_settings
                     .disabled_tools
                     .as_deref()
@@ -2049,6 +3204,9 @@ impl AgenticOrchestrator {
                 execution_tool_allowlist.as_ref(),
             );
             let tool_results = tool_batch.results;
+            if context_mode.is_worker_goal() {
+                worker_goal_outcome_journal.record_tool_results(&result.tool_calls, &tool_results);
+            }
             let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
             let current_turn_tool_calls = result.tool_calls.len();
             let current_turn_research_actions = result
@@ -2058,6 +3216,9 @@ impl AgenticOrchestrator {
                     is_research_action(call, &tool_results, delegated_store.as_ref(), &session_id)
                 })
                 .count();
+            if context_mode.is_worker_goal() {
+                worker_goal_outcome_journal.record_research_actions(current_turn_research_actions);
+            }
             goal_tool_call_count = goal_tool_call_count.saturating_add(current_turn_tool_calls);
             goal_research_action_count =
                 goal_research_action_count.saturating_add(current_turn_research_actions);
@@ -2112,9 +3273,9 @@ impl AgenticOrchestrator {
                             block_goal: false,
                         })
                 });
-            let delegation_checkpoint = guard_loop_landing
-                .is_none()
-                .then(|| delegation_nudge_tracker.record_turn(&result.tool_calls, &tool_results));
+            let delegation_checkpoint = (!context_mode.is_isolated_worker()
+                && guard_loop_landing.is_none())
+            .then(|| delegation_nudge_tracker.record_turn(&result.tool_calls, &tool_results));
             let delegation_nudge_instruction =
                 match delegation_checkpoint.as_ref().and_then(Option::as_ref) {
                     Some(DelegationCheckpoint::Nudge(instruction)) => Some(instruction.clone()),
@@ -2137,18 +3298,22 @@ impl AgenticOrchestrator {
                 .map(|landing| landing.diagnostic.clone());
             let token_budget_stopped = goal_token_stop.is_some();
             let goal_runtime_stop = goal_token_stop.or_else(|| {
-                record_active_attempt_progress(
-                    &db_path,
-                    &session_id,
-                    &mut attempt_progress_tracker,
-                    iteration,
-                    goal_tool_call_count,
-                    goal_research_action_count,
-                    current_turn_tool_calls,
-                    current_turn_research_actions,
-                    tool_batch_made_material_progress(&tool_results),
-                    blocker_fingerprint,
-                )
+                if active_goal_at_start {
+                    record_active_attempt_progress(
+                        &db_path,
+                        &session_id,
+                        &mut attempt_progress_tracker,
+                        iteration,
+                        goal_tool_call_count,
+                        goal_research_action_count,
+                        current_turn_tool_calls,
+                        current_turn_research_actions,
+                        tool_batch_made_material_progress(&tool_results),
+                        blocker_fingerprint,
+                    )
+                } else {
+                    None
+                }
             });
             if let Some(telemetry) = progress_telemetry {
                 if telemetry.triggered {
@@ -2215,6 +3380,16 @@ impl AgenticOrchestrator {
             clear_recovery_state(&db_path, &session_id);
 
             if yield_after_background_agent {
+                if context_mode.is_worker_goal() {
+                    finish_worker_provider_attention(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "Hive Worker Goal reached a forbidden background-agent yield; no Workflow progress was published"
+                            .to_string(),
+                    );
+                    return;
+                }
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -2227,12 +3402,14 @@ impl AgenticOrchestrator {
                 return;
             }
 
-            if successful_task_completion_needs_goal_followthrough(
-                &db_path,
-                &session_id,
-                &result.tool_calls,
-                &tool_msg.content,
-            ) {
+            if active_goal_at_start
+                && successful_task_completion_needs_goal_followthrough(
+                    &db_path,
+                    &session_id,
+                    &result.tool_calls,
+                    &tool_msg.content,
+                )
+            {
                 let instruction = "All approved plan steps are now terminal, but the Goal is still active. Continue in this same run: call `workflow_update` with `verify_criterion` and concrete evidence for every pending required criterion, then call `workflow_update` with `complete_goal`. Do not stop or claim completion in prose while the Goal remains active.";
                 conversation.push(ModelMessage {
                     role: Role::System,
@@ -2283,13 +3460,18 @@ impl AgenticOrchestrator {
                 });
                 return;
             }
-            let injected_steering = inject_pending_steering(
-                &mut input_inbox,
-                &mut conversation,
-                &mut context_ledger,
-                &db_path,
-                &session_id,
-            );
+            let injected_steering = if context_mode.is_isolated_worker() {
+                let _ = input_inbox.take_steering();
+                Vec::new()
+            } else {
+                inject_pending_steering(
+                    &mut input_inbox,
+                    &mut conversation,
+                    &mut context_ledger,
+                    &db_path,
+                    &session_id,
+                )
+            };
             if !injected_steering.is_empty() {
                 loop_guard_landing = None;
                 delegation_nudge_tracker.reset_for_steering();
@@ -2335,8 +3517,9 @@ impl AgenticOrchestrator {
                 continue;
             }
 
-            if let Some(explore_summary) =
-                finalize_explore_only_turn(&result.tool_calls, &tool_msg.content)
+            if let Some(explore_summary) = (!context_mode.is_worker_goal())
+                .then(|| finalize_explore_only_turn(&result.tool_calls, &tool_msg.content))
+                .flatten()
             {
                 let _ = event_tx.send(LoopEvent::TextDelta {
                     delta: explore_summary.clone(),
@@ -2716,6 +3899,7 @@ async fn apply_in_place_compaction(
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
+    use std::sync::{Arc, Mutex};
 
     use super::effective_context_window_for_runtime;
     use super::empty_completion_action;
@@ -2733,22 +3917,32 @@ mod tests {
     use super::successful_task_completion_needs_goal_followthrough;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
+    use super::worker_response_commit_terminal_outcome;
     use super::AttemptProgressTracker;
+    use super::CanonicalSessionPersistenceBoundary;
     use super::EmptyCompletionAction;
     use super::LoopGuardLanding;
+    use super::WorkerGoalOutcomeFinalize;
+    use super::WorkerGoalOutcomeJournal;
     use super::VALIDATION_REMINDER;
     use super::{
         is_stale_compaction_snapshot_error, mpsc, reload_persisted_conversation, ContextLedger,
     };
     use crate::agent::loop_events::{LoopInput, LoopInputInbox, LoopStopReason};
     use crate::agent::subagent::AgentCapability;
-    use crate::agent::DelegatedRunStage;
+    use crate::agent::{
+        DelegatedRunStage, WorkerGoalAttemptOutcome, WorkerGoalEffectSummary,
+        WorkerGoalOutcomeCommit, WorkerGoalOutcomeCommitDisposition, WorkerGoalOutcomeCommitError,
+        WorkerGoalOutcomeCommitInput, WorkerGoalOutcomeCommitter, WorkerGoalOutcomeCounters,
+        WorkerProviderTerminalOutcome,
+    };
     use crate::ai::client::CallOptions;
     use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{
         Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
         ProjectSettings, SessionManager, SessionType, WorkMode,
+        WorkerConversationResponseCommitError, WorkerRunOrigin,
     };
     use crate::tools::registry::PermissionMode;
     use crate::workflow::{
@@ -2759,6 +3953,403 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[derive(Clone, Copy)]
+    enum GoalCommitBehavior {
+        Insert,
+        Stale,
+        Conflict,
+    }
+
+    struct OrderedGoalCommitter {
+        order: Arc<Mutex<Vec<String>>>,
+        behavior: GoalCommitBehavior,
+    }
+
+    impl WorkerGoalOutcomeCommitter for OrderedGoalCommitter {
+        fn commit_outcome(
+            &self,
+            _input: &WorkerGoalOutcomeCommitInput,
+        ) -> Result<WorkerGoalOutcomeCommit, WorkerGoalOutcomeCommitError> {
+            self.order.lock().unwrap().push("outcome".into());
+            match self.behavior {
+                GoalCommitBehavior::Insert => Ok(WorkerGoalOutcomeCommit {
+                    disposition: WorkerGoalOutcomeCommitDisposition::Inserted,
+                }),
+                GoalCommitBehavior::Stale => {
+                    Err(WorkerGoalOutcomeCommitError::StaleRejected("stale".into()))
+                }
+                GoalCommitBehavior::Conflict => Err(
+                    WorkerGoalOutcomeCommitError::ConflictOrCorrupt("conflict".into()),
+                ),
+            }
+        }
+    }
+
+    fn worker_goal_outcome_input() -> WorkerGoalOutcomeCommitInput {
+        WorkerGoalOutcomeCommitInput::from_validated_run(
+            "worker-1".into(),
+            1,
+            Some("user-1".into()),
+            "worker-session".into(),
+            "run-1".into(),
+            "lease-1".into(),
+            1,
+            WorkerRunOrigin::UserWorkflowActivation,
+            "goal-1".into(),
+            1,
+            1,
+            "attempt-1".into(),
+            "plan-1".into(),
+            1,
+            "step-1".into(),
+            1,
+            std::path::PathBuf::from("/tmp/worker-goal-workspace"),
+            vec!["provider-call-1".into()],
+            WorkerGoalAttemptOutcome::Succeeded,
+            Vec::new(),
+            WorkerGoalEffectSummary::new("No workspace mutation was observed.", false).unwrap(),
+            WorkerGoalOutcomeCounters {
+                provider_calls: 1,
+                turns: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn worker_goal_outcome_commit_precedes_final_provider_completion() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let committer = OrderedGoalCommitter {
+            order: Arc::clone(&order),
+            behavior: GoalCommitBehavior::Insert,
+        };
+        let provider_order = Arc::clone(&order);
+        let result = super::commit_worker_goal_outcome_before_provider_completion(
+            &committer,
+            &worker_goal_outcome_input(),
+            move |outcome| {
+                provider_order
+                    .lock()
+                    .unwrap()
+                    .push(format!("provider:{outcome:?}"));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, WorkerGoalOutcomeFinalize::Committed));
+        assert_eq!(
+            order.lock().unwrap().clone(),
+            vec!["outcome".to_string(), "provider:Completed".to_string()]
+        );
+    }
+
+    #[test]
+    fn ambiguous_worker_goal_commit_leaves_final_provider_call_unresolved() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let committer = OrderedGoalCommitter {
+            order: Arc::clone(&order),
+            behavior: GoalCommitBehavior::Conflict,
+        };
+        let provider_order = Arc::clone(&order);
+        let result = super::commit_worker_goal_outcome_before_provider_completion(
+            &committer,
+            &worker_goal_outcome_input(),
+            move |outcome| {
+                provider_order
+                    .lock()
+                    .unwrap()
+                    .push(format!("provider:{outcome:?}"));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, WorkerGoalOutcomeFinalize::Ambiguous(_)));
+        assert_eq!(order.lock().unwrap().clone(), vec!["outcome".to_string()]);
+    }
+
+    #[test]
+    fn proven_stale_worker_goal_commit_terminalizes_with_stale_outcome_only() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let committer = OrderedGoalCommitter {
+            order: Arc::clone(&order),
+            behavior: GoalCommitBehavior::Stale,
+        };
+        let provider_order = Arc::clone(&order);
+        let result = super::commit_worker_goal_outcome_before_provider_completion(
+            &committer,
+            &worker_goal_outcome_input(),
+            move |outcome| {
+                provider_order
+                    .lock()
+                    .unwrap()
+                    .push(format!("provider:{outcome:?}"));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, WorkerGoalOutcomeFinalize::ProvenStale));
+        assert_eq!(
+            order.lock().unwrap().clone(),
+            vec![
+                "outcome".to_string(),
+                "provider:CanonicalCommitStale".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_goal_journal_keeps_bounded_typed_effects_not_raw_tool_output() {
+        let mut journal = WorkerGoalOutcomeJournal::default();
+        journal.record_provider_call("provider-call-1".into());
+        let read_call = AiToolCall {
+            id: "MODEL-SELECTED-TOOL-ID-CANARY".into(),
+            name: "read".into(),
+            arguments: json!({"file_path": "src/lib.rs"}),
+        };
+        journal.record_tool_results(
+            std::slice::from_ref(&read_call),
+            &[Content::ToolResult {
+                tool_use_id: read_call.id.clone(),
+                output: json!({
+                    "tool": "MODEL-SPOOFED-TOOL-NAME-CANARY",
+                    "summary": "RAW-TOOL-OUTPUT-SECRET-CANARY",
+                    "is_error": false
+                }),
+                is_error: None,
+            }],
+        );
+        journal.record_research_actions(1);
+
+        assert_eq!(journal.counters.provider_calls, 1);
+        assert_eq!(journal.counters.tool_calls, 1);
+        assert_eq!(journal.counters.successful_tool_calls, 1);
+        assert_eq!(journal.counters.research_actions, 1);
+        assert!(journal.can_commit_outcome());
+        assert_eq!(
+            journal.attempt_outcome(),
+            WorkerGoalAttemptOutcome::Progressed
+        );
+        let evidence = journal
+            .evidence
+            .first()
+            .expect("one typed observation should be retained")
+            .summary();
+        assert!(evidence.contains("read"));
+        assert!(!evidence.contains("RAW-TOOL-OUTPUT-SECRET-CANARY"));
+        assert!(!evidence.contains("MODEL-SELECTED-TOOL-ID-CANARY"));
+        assert!(!evidence.contains("MODEL-SPOOFED-TOOL-NAME-CANARY"));
+    }
+
+    #[test]
+    fn worker_goal_mutation_evidence_requires_explicit_changed_true() {
+        let journal = |name: &str, output: serde_json::Value| {
+            let call = AiToolCall {
+                id: format!("{name}-call"),
+                name: name.into(),
+                arguments: json!({}),
+            };
+            let mut journal = WorkerGoalOutcomeJournal::default();
+            journal.record_tool_results(
+                std::slice::from_ref(&call),
+                &[Content::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    output,
+                    is_error: None,
+                }],
+            );
+            journal
+        };
+
+        let unchanged = journal(
+            "write",
+            json!({"tool": "write", "is_error": false, "changed": false}),
+        );
+        assert!(!unchanged.workspace_mutated);
+        assert_eq!(
+            unchanged.evidence[0].kind(),
+            crate::agent::WorkerGoalEvidenceKind::WorkspaceObservation
+        );
+        assert!(!unchanged.effect_summary().unwrap().workspace_mutated());
+
+        let missing = journal("edit", json!({"tool": "edit", "is_error": false}));
+        assert!(!missing.workspace_mutated);
+        assert_eq!(
+            missing.evidence[0].kind(),
+            crate::agent::WorkerGoalEvidenceKind::Runtime
+        );
+
+        let invalid = journal(
+            "edit",
+            json!({"tool": "edit", "is_error": false, "changed": "yes"}),
+        );
+        assert!(!invalid.workspace_mutated);
+        assert_eq!(
+            invalid.evidence[0].kind(),
+            crate::agent::WorkerGoalEvidenceKind::Runtime
+        );
+
+        let opaque = journal(
+            "bash",
+            json!({"tool": "bash", "is_error": false, "changed": true}),
+        );
+        assert!(!opaque.workspace_mutated);
+        assert_eq!(
+            opaque.evidence[0].kind(),
+            crate::agent::WorkerGoalEvidenceKind::Runtime
+        );
+
+        let changed = journal(
+            "write",
+            json!({"tool": "write", "is_error": false, "changed": true}),
+        );
+        assert!(changed.workspace_mutated);
+        assert_eq!(
+            changed.evidence[0].kind(),
+            crate::agent::WorkerGoalEvidenceKind::WorkspaceMutation
+        );
+        assert!(changed.effect_summary().unwrap().workspace_mutated());
+    }
+
+    #[test]
+    fn worker_goal_nonempty_prose_without_tool_evidence_cannot_commit_progress() {
+        let final_text = "I cannot do this, but I am finished.";
+        let mut journal = WorkerGoalOutcomeJournal::default();
+        journal.record_provider_call("provider-call-1".into());
+
+        assert!(!final_text.trim().is_empty());
+        assert_eq!(journal.counters.successful_tool_calls, 0);
+        assert!(journal.evidence.is_empty());
+        assert!(!journal.can_commit_outcome());
+    }
+
+    #[test]
+    fn worker_goal_generic_command_heuristics_never_claim_verified_completion() {
+        let mut journal = WorkerGoalOutcomeJournal::default();
+        journal.record_provider_call("provider-call-1".into());
+        let validation_call = AiToolCall {
+            id: "validation-call".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test -p focused-package"}),
+        };
+        journal.record_tool_results(
+            std::slice::from_ref(&validation_call),
+            &[Content::ToolResult {
+                tool_use_id: validation_call.id.clone(),
+                output: json!({"tool": "bash", "is_error": false}),
+                is_error: None,
+            }],
+        );
+
+        assert!(journal.can_commit_outcome());
+        assert_eq!(
+            journal.attempt_outcome(),
+            WorkerGoalAttemptOutcome::Progressed
+        );
+        assert!(journal
+            .evidence
+            .iter()
+            .all(|item| item.kind() != crate::agent::WorkerGoalEvidenceKind::Verification));
+    }
+
+    #[test]
+    fn worker_goal_persistence_boundary_writes_no_trigger_tool_message_or_episode() {
+        let temp = TempDir::new().expect("temporary directory should be created");
+        let db_path = temp.path().join("worker-goal-persistence.db");
+        let sessions = SessionManager::new(Database::new(&db_path).expect("database should open"));
+        let session_id = sessions
+            .create_session("Worker Goal DM", None, None)
+            .expect("session should be created");
+        let boundary = CanonicalSessionPersistenceBoundary { enabled: false };
+
+        let trigger = ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "[WORKER GOAL TRIGGER v1] EPHEMERAL-TRIGGER-LEAK-CANARY".into(),
+            }],
+        };
+        let tool_result = ModelMessage {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "worker-goal-read-1".into(),
+                output: json!("TOOL-RESULT-LEAK-CANARY"),
+                is_error: None,
+            }],
+        };
+        boundary.save_message(&db_path, &session_id, &trigger);
+        boundary.save_message(&db_path, &session_id, &tool_result);
+        boundary.persist_context_state(
+            &db_path,
+            &session_id,
+            &ContextLedger::from_conversation(&[trigger]),
+        );
+        boundary.update_token_count(&db_path, &session_id, 999);
+
+        let db = Database::new(&db_path).expect("database should reopen");
+        let message_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .expect("message count should load");
+        let episode_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_episodes WHERE session_id = ?1",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .expect("episode count should load");
+        let (ledger, continuation, recovery, token_count): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = db
+            .conn()
+            .query_row(
+                "SELECT context_ledger_json, continuation_json, recovery_json, token_count
+                 FROM sessions WHERE id = ?1",
+                [&session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("session persistence columns should load");
+
+        assert_eq!(message_count, 0);
+        assert_eq!(episode_count, 0);
+        assert!(ledger.is_none());
+        assert!(continuation.is_none());
+        assert!(recovery.is_none());
+        assert!(token_count.is_none_or(|count| count == 0));
+    }
+
+    #[test]
+    fn worker_response_commit_failure_only_terminalizes_proven_stale_rejection() {
+        assert_eq!(
+            worker_response_commit_terminal_outcome(
+                &WorkerConversationResponseCommitError::StaleRejected("paused".into()),
+            ),
+            Some(WorkerProviderTerminalOutcome::CanonicalCommitStale),
+        );
+        assert_eq!(
+            worker_response_commit_terminal_outcome(
+                &WorkerConversationResponseCommitError::ConflictOrCorrupt(
+                    "different canonical content".into(),
+                ),
+            ),
+            None,
+            "a conflict can require canonical-row adoption, so Started must remain unresolved",
+        );
+        assert_eq!(
+            worker_response_commit_terminal_outcome(
+                &WorkerConversationResponseCommitError::CommitUncertain(
+                    "commit acknowledgement lost".into(),
+                ),
+            ),
+            None,
+            "an uncertain transaction must remain Started for fenced recovery",
+        );
+    }
 
     #[test]
     fn workflow_attempt_progress_uses_attempt_local_counters() {

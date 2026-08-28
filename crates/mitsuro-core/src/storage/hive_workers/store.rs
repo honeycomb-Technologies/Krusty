@@ -10,12 +10,12 @@ use crate::tools::registry::PermissionMode;
 use super::super::hive_home::is_valid_crew_slug;
 use super::super::hive_profiles::MAX_HIVE_PROFILE_DOCUMENT_BYTES;
 use super::model::{
-    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
-    HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, NewHiveWorker,
-    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
+    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerConversationBinding,
+    HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus,
+    NewHiveWorker, DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
 };
 
-pub(crate) const WORKER_COLUMNS: &str = "id, user_id, slug, display_name, avatar_color, model, model_key_json, model_catalog_revision, permission_mode, autonomy, heartbeat_interval_secs, status, dm_session_id, memory_namespace_id, created_at, updated_at";
+pub(crate) const WORKER_COLUMNS: &str = "id, user_id, slug, display_name, avatar_color, model, model_key_json, model_catalog_revision, permission_mode, autonomy, heartbeat_interval_secs, status, dm_session_id, memory_namespace_id, created_at, updated_at, revision";
 
 /// Matches rows owned by exactly the given user (NULL = local), mirroring
 /// the exact-owner semantics used across the rest of the hive stores.
@@ -361,6 +361,46 @@ pub fn load_worker_with_conn(conn: &rusqlite::Connection, id: &str) -> Result<Op
         .context("reading Hive worker")
 }
 
+/// Resolve a private Worker conversation from either its direct-message
+/// session or its `(group, Worker)` internal lane.
+///
+/// The schema makes each source unique and lane validation prevents a DM from
+/// also becoming a group lane. We still reject multiple matches explicitly so
+/// a malformed legacy database fails closed instead of selecting an arbitrary
+/// Worker namespace.
+pub fn resolve_worker_conversation_with_conn(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Option<HiveWorkerConversationBinding>> {
+    let mut statement = conn.prepare(
+        "SELECT worker_id, group_id
+         FROM (
+             SELECT id AS worker_id, NULL AS group_id
+             FROM hive_workers
+             WHERE dm_session_id = ?1
+             UNION ALL
+             SELECT worker_id, group_id
+             FROM hive_group_worker_lanes
+             WHERE session_id = ?1
+         )",
+    )?;
+    let bindings = statement
+        .query_map([session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        bindings.len() <= 1,
+        "Hive session is bound to multiple Worker conversations"
+    );
+    let Some((worker_id, group_id)) = bindings.into_iter().next() else {
+        return Ok(None);
+    };
+    let worker = load_worker_with_conn(conn, &worker_id)?
+        .ok_or_else(|| anyhow::anyhow!("Hive Worker conversation references a missing Worker"))?;
+    Ok(Some(HiveWorkerConversationBinding { worker, group_id }))
+}
+
 pub fn resolve_worker_for_crew_slug_with_conn(
     conn: &rusqlite::Connection,
     user_id: Option<&str>,
@@ -411,6 +451,7 @@ pub(crate) fn map_worker(row: &Row<'_>) -> rusqlite::Result<HiveWorker> {
         .transpose()?;
     Ok(HiveWorker {
         id: row.get(0)?,
+        revision: row.get(16)?,
         user_id: row.get(1)?,
         slug: row.get(2)?,
         display_name: row.get(3)?,

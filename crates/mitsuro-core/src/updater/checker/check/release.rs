@@ -57,5 +57,6 @@ pub(super) async fn check_for_updates_release() -> Result<Option<UpdateInfo>> {
         new_version: new_version.to_string(),
         release_notes,
         is_dev_mode: false,
+        apply: crate::updater::UpdateChannel::detect().apply_policy(),
     }))
 }

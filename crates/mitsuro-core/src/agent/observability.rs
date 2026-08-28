@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -92,6 +93,31 @@ enum ProviderCallTraceTarget {
 pub struct ProviderCallTraceContext {
     target: ProviderCallTraceTarget,
     turn: usize,
+    provider_governor: Option<Arc<super::WorkerProviderCallGovernor>>,
+}
+
+/// Content-free terminal classification for provider attempts that do not use
+/// the ordinary agent-loop trace channel. Keeping this typed prevents callers
+/// from placing provider text or other unbounded detail in the outcome field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCallTraceOutcome {
+    Completed,
+    Error,
+    Cancelled,
+    SemanticInvalid,
+    UnsafeOutput,
+}
+
+impl ProviderCallTraceOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::SemanticInvalid => "semantic_invalid",
+            Self::UnsafeOutput => "unsafe_output",
+        }
+    }
 }
 
 impl ProviderCallTraceContext {
@@ -99,6 +125,7 @@ impl ProviderCallTraceContext {
         Self {
             target: ProviderCallTraceTarget::Channel(tx),
             turn,
+            provider_governor: None,
         }
     }
 
@@ -107,26 +134,92 @@ impl ProviderCallTraceContext {
         session_id: impl Into<String>,
         turn: usize,
     ) -> Self {
+        Self::standalone_with_run_id(
+            db_path,
+            session_id,
+            format!("auxiliary-{}", uuid::Uuid::new_v4()),
+            turn,
+        )
+    }
+
+    /// Build a one-shot trace writer attributed to a stable caller-owned run.
+    /// Hive uses this for provider calls that intentionally bypass the full
+    /// agent loop but still belong to an exact durable run or review claim.
+    pub fn standalone_with_run_id(
+        db_path: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        run_id: impl Into<String>,
+        turn: usize,
+    ) -> Self {
         Self {
             target: ProviderCallTraceTarget::Standalone {
                 db_path: db_path.into(),
                 session_id: session_id.into(),
-                run_id: format!("auxiliary-{}", uuid::Uuid::new_v4()),
+                run_id: run_id.into(),
             },
             turn,
+            provider_governor: None,
         }
     }
 
-    pub(crate) async fn record_simple_call(
+    /// Attach the exact run-scoped Worker provider capability. Clones passed
+    /// into compaction, classifiers, or delegated work inherit this same root
+    /// origin and lease; they still need a distinct deterministic child slot.
+    pub fn with_provider_governor(
+        mut self,
+        provider_governor: Option<Arc<super::WorkerProviderCallGovernor>>,
+    ) -> Self {
+        self.provider_governor = provider_governor;
+        self
+    }
+
+    pub(crate) fn provider_governor(&self) -> Option<&Arc<super::WorkerProviderCallGovernor>> {
+        self.provider_governor.as_ref()
+    }
+
+    pub(crate) const fn turn(&self) -> usize {
+        self.turn
+    }
+
+    /// The stable runtime-trace run id when this context writes directly.
+    pub fn run_id(&self) -> Option<&str> {
+        match &self.target {
+            ProviderCallTraceTarget::Standalone { run_id, .. } => Some(run_id),
+            ProviderCallTraceTarget::Channel(_) => None,
+        }
+    }
+
+    pub async fn record_simple_call(
         &self,
         operation: &str,
         provider: ProviderId,
         model: &str,
         started_at: Instant,
         result: &anyhow::Result<SimpleCallResult>,
-    ) {
+    ) -> String {
+        let provider_call_id = uuid::Uuid::new_v4().to_string();
+        self.record_simple_call_with_id(
+            provider_call_id,
+            operation,
+            provider,
+            model,
+            started_at,
+            result,
+        )
+        .await
+    }
+
+    pub async fn record_simple_call_with_id(
+        &self,
+        provider_call_id: String,
+        operation: &str,
+        provider: ProviderId,
+        model: &str,
+        started_at: Instant,
+        result: &anyhow::Result<SimpleCallResult>,
+    ) -> String {
         let trace = ProviderCallTrace {
-            provider_call_id: uuid::Uuid::new_v4().to_string(),
+            provider_call_id: provider_call_id.clone(),
             turn: self.turn,
             call_kind: "auxiliary".to_string(),
             operation: operation.to_string(),
@@ -144,6 +237,60 @@ impl ProviderCallTraceContext {
             delegated_turn: None,
         };
         self.emit(trace).await;
+        provider_call_id
+    }
+
+    /// Record a bounded, content-free streaming or semantic-validation result.
+    pub async fn record_bounded_call(
+        &self,
+        operation: &'static str,
+        provider: ProviderId,
+        model: &str,
+        started_at: Instant,
+        outcome: ProviderCallTraceOutcome,
+        usage: Option<Usage>,
+    ) -> String {
+        let provider_call_id = uuid::Uuid::new_v4().to_string();
+        self.record_bounded_call_with_id(
+            provider_call_id,
+            operation,
+            provider,
+            model,
+            started_at,
+            outcome,
+            usage,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_bounded_call_with_id(
+        &self,
+        provider_call_id: String,
+        operation: &'static str,
+        provider: ProviderId,
+        model: &str,
+        started_at: Instant,
+        outcome: ProviderCallTraceOutcome,
+        usage: Option<Usage>,
+    ) -> String {
+        self.emit(ProviderCallTrace {
+            provider_call_id: provider_call_id.clone(),
+            turn: self.turn,
+            call_kind: "auxiliary".to_string(),
+            operation: operation.to_string(),
+            provider: provider.storage_key().to_string(),
+            model: bounded_trace_text(model, 512),
+            reasoning_effort: None,
+            outcome: outcome.as_str().to_string(),
+            usage,
+            duration_ms: duration_millis(started_at.elapsed()),
+            delegated_run_id: None,
+            delegated_task_id: None,
+            delegated_turn: None,
+        })
+        .await;
+        provider_call_id
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -160,8 +307,39 @@ impl ProviderCallTraceContext {
         outcome: &str,
         usage: Option<Usage>,
     ) {
+        self.record_delegated_call_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            operation,
+            provider,
+            model,
+            reasoning_effort,
+            delegated_run_id,
+            delegated_task_id,
+            delegated_turn,
+            started_at,
+            outcome,
+            usage,
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_delegated_call_with_id(
+        &self,
+        provider_call_id: String,
+        operation: &str,
+        provider: ProviderId,
+        model: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+        delegated_run_id: Option<&str>,
+        delegated_task_id: &str,
+        delegated_turn: usize,
+        started_at: Instant,
+        outcome: &str,
+        usage: Option<Usage>,
+    ) {
         self.emit(ProviderCallTrace {
-            provider_call_id: uuid::Uuid::new_v4().to_string(),
+            provider_call_id,
             turn: self.turn,
             call_kind: "delegated".to_string(),
             operation: operation.to_string(),
@@ -206,6 +384,14 @@ impl ProviderCallTraceContext {
             }
         }
     }
+}
+
+fn bounded_trace_text(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -459,7 +645,7 @@ mod tests {
 
     use super::{
         coalesce_adjacent_delta, forward_runtime_traces, ProviderCallTrace,
-        ProviderCallTraceContext,
+        ProviderCallTraceContext, ProviderCallTraceOutcome,
     };
     use crate::agent::loop_events::{LoopEvent, LoopStopReason};
     use crate::ai::client::SimpleCallResult;
@@ -514,6 +700,32 @@ mod tests {
         );
         assert!(!coalesce_adjacent_delta(&mut first, &other_turn));
         assert_eq!(first.payload["chars"], 5);
+    }
+
+    #[tokio::test]
+    async fn caller_owned_provider_call_id_is_reused_by_trace_projection() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let context = ProviderCallTraceContext::for_run(tx, 4);
+        let result: anyhow::Result<SimpleCallResult> = Ok(SimpleCallResult {
+            text: "ok".to_string(),
+            usage: None,
+        });
+
+        let returned = context
+            .record_simple_call_with_id(
+                "worker-call-ledger-id".to_string(),
+                "compaction_summary",
+                ProviderId::Grok,
+                "grok-test",
+                Instant::now(),
+                &result,
+            )
+            .await;
+
+        assert_eq!(returned, "worker-call-ledger-id");
+        let trace = rx.recv().await.expect("trace should be emitted");
+        assert_eq!(trace.provider_call_id, "worker-call-ledger-id");
+        assert_eq!(trace.turn, 4);
     }
 
     #[tokio::test]
@@ -766,5 +978,58 @@ mod tests {
         assert_eq!(events[2].payload["delegated_turn"], 3);
         assert_eq!(events[2].payload["cache_read_input_tokens"], 900);
         assert_eq!(events[2].payload["input_tokens"], 1_900);
+    }
+
+    #[tokio::test]
+    async fn stable_run_context_records_each_content_free_provider_attempt() {
+        let (db, temp_dir, session_id) = create_test_db();
+        let context = ProviderCallTraceContext::standalone_with_run_id(
+            temp_dir.path().join("test.db"),
+            session_id.clone(),
+            "hive-run-42",
+            1,
+        );
+        assert_eq!(context.run_id(), Some("hive-run-42"));
+        let first_id = context
+            .record_bounded_call(
+                "hive_worker_introduction_opening",
+                ProviderId::Grok,
+                &"m".repeat(700),
+                Instant::now(),
+                ProviderCallTraceOutcome::SemanticInvalid,
+                Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    reasoning_tokens: 0,
+                    total_tokens: 15,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                }),
+            )
+            .await;
+        let second_id = context
+            .record_bounded_call(
+                "hive_worker_introduction_opening",
+                ProviderId::Grok,
+                "grok-test",
+                Instant::now(),
+                ProviderCallTraceOutcome::Cancelled,
+                None,
+            )
+            .await;
+        assert_ne!(first_id, second_id);
+
+        let events = RuntimeTraceStore::new(&db)
+            .list_events(&session_id, None)
+            .expect("provider traces");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.run_id == "hive-run-42"));
+        assert_eq!(events[0].payload["provider_call_id"], first_id);
+        assert_eq!(events[0].payload["outcome"], "semantic_invalid");
+        assert_eq!(events[0].payload["model"].as_str().unwrap().len(), 512);
+        assert_eq!(events[0].payload["total_tokens"], 15);
+        assert_eq!(events[1].payload["provider_call_id"], second_id);
+        assert_eq!(events[1].payload["outcome"], "cancelled");
+        assert_eq!(events[1].payload["usage_available"], false);
     }
 }

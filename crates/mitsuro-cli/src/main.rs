@@ -23,6 +23,7 @@ pub(crate) use mitsuro_core::{
 mod serve;
 mod tui_support;
 mod tui_v2;
+mod update_cmd;
 
 /// Mitsuro - AI Coding Assistant
 #[derive(Parser)]
@@ -67,6 +68,16 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
+    },
+
+    /// Check for or apply a Mitsuro release update
+    Update {
+        /// Download the latest release and replace this install
+        #[arg(long)]
+        apply: bool,
+        /// Install this version instead of GitHub latest (for example 0.9.23)
+        #[arg(long)]
+        version: Option<String>,
     },
 
     /// Hive autonomous agent system
@@ -1129,6 +1140,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Some(Commands::Update { apply, version }) = &cli.command {
+        return update_cmd::run(*apply, version.clone()).await;
+    }
+
     // Serve mode has its own logging (stdout), skip TUI logging setup
     if matches!(cli.command, Some(Commands::Serve { .. })) {
         if let Some(Commands::Serve { port }) = cli.command {
@@ -1223,13 +1238,23 @@ async fn main() -> Result<()> {
             let server = acp::AcpServer::new()?;
             server.run().await?;
         }
-        Some(Commands::Serve { .. } | Commands::Hive { .. } | Commands::MigrateIdentity { .. }) => {
+        Some(
+            Commands::Serve { .. }
+            | Commands::Hive { .. }
+            | Commands::MigrateIdentity { .. }
+            | Commands::Update { .. },
+        ) => {
             unreachable!()
         }
         None => {
             // Full replace: Mitsuro TUI v2 is the default terminal surface.
             // Legacy v1 remains available as `mitsuro tui-legacy` if re-exposed later.
-            tui_v2::run().await?;
+            match tui_v2::run().await? {
+                tui_v2::TuiOutcome::Quit => {}
+                tui_v2::TuiOutcome::ApplyUpdate { version } => {
+                    update_cmd::apply_and_relaunch(Some(&version)).await?;
+                }
+            }
         }
     }
 

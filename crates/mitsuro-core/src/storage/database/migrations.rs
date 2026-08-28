@@ -40,14 +40,14 @@ impl Database {
     }
 
     /// Check if a column exists in a table (for safe ALTER TABLE migrations).
-    fn column_exists(tx: &rusqlite::Transaction, table: &str, column: &str) -> bool {
-        tx.prepare(&format!("SELECT {} FROM {} LIMIT 0", column, table))
+    fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+        conn.prepare(&format!("SELECT {} FROM {} LIMIT 0", column, table))
             .is_ok()
     }
 
     /// Check if a table exists (for data-cleanup migrations against lazily-created tables).
-    fn table_exists(tx: &rusqlite::Transaction, table: &str) -> bool {
-        tx.query_row(
+    fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
+        conn.query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
             [table],
             |_| Ok(()),
@@ -84,8 +84,55 @@ impl Database {
         for (old, new) in from.iter().zip(to.iter()) {
             rewritten = rewritten.replace(old, new);
         }
-        if rewritten == create_sql && value_rewrites.is_empty() {
-            return Ok(());
+        if rewritten == create_sql {
+            if value_rewrites.is_empty() {
+                return Ok(());
+            }
+
+            // A current-schema database may legitimately re-enter an older
+            // migration after a repaired or mixed-version schema_version row.
+            // Do not rebuild an already-canonical table merely because this
+            // migration *can* translate legacy values: dropping that table can
+            // invalidate newer triggers which correctly reference it.  Skip
+            // only after proving that every present rewrite column contains no
+            // legacy value. Missing columns make that individual mapping
+            // irrelevant; query failures on present columns remain fatal.
+            let quoted_table = table.replace('"', "\"\"");
+            let mut legacy_value_exists = false;
+            for (column, from_value, _) in value_rewrites {
+                let quoted_column = column.replace('"', "\"\"");
+                let column_exists = tx
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+                         )",
+                        [table, *column],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .with_context(|| format!("inspect columns for {table}"))?;
+                if !column_exists {
+                    continue;
+                }
+                let has_legacy_value = tx
+                    .query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM \"{quoted_table}\" \
+                             WHERE \"{quoted_column}\" = ?1 LIMIT 1)"
+                        ),
+                        [*from_value],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .with_context(|| {
+                        format!("inspect legacy value {from_value:?} in {table}.{column}")
+                    })?;
+                if has_legacy_value {
+                    legacy_value_exists = true;
+                    break;
+                }
+            }
+            if !legacy_value_exists {
+                return Ok(());
+            }
         }
 
         let tmp = format!("{table}__hive_rewrite");
@@ -4195,6 +4242,4647 @@ impl Database {
             )?;
         }
 
+        // Migration 69: isolated group Worker lanes and crash-safe Worker
+        // introductions.
+        //
+        // Group member runs use a dedicated session per `(group, Worker)` so
+        // private DM history can never become their model transcript. Message
+        // idempotency lets an introduction persist its assistant opening
+        // exactly once across controller retries. The introduction ledger is
+        // separate from the public transcript and records the durable
+        // lifecycle without manufacturing a user message.
+        if current_version < 69 {
+            info!(
+                "Running migration 69: Hive Worker conversation isolation and introduction ledger"
+            );
+
+            // Adding an enum member to a SQLite CHECK has no ALTER TABLE
+            // syntax. Match the established migrations 64/65/67 approach:
+            // edit only the table's CREATE SQL so rows, columns, foreign keys,
+            // and every index remain physically untouched.
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 69: checking for hive_runs")?;
+            if runs_table_exists {
+                const BASE_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume')";
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                const HEARTBEAT_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat')";
+                const INTRODUCTION_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 69: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql =
+                             replace(
+                                 replace(
+                                     replace(
+                                         replace(sql, ?1, ?5),
+                                         ?2, ?5
+                                     ),
+                                     ?3, ?5
+                                 ),
+                                 ?4, ?5
+                             )
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND (
+                               instr(sql, ?1) > 0 OR instr(sql, ?2) > 0
+                               OR instr(sql, ?3) > 0 OR instr(sql, ?4) > 0
+                           )",
+                        [
+                            BASE_KINDS,
+                            GROUP_KINDS,
+                            DELIVERY_KINDS,
+                            HEARTBEAT_KINDS,
+                            INTRODUCTION_KINDS,
+                        ],
+                    )
+                    .context("Migration 69: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 69: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_introduction") || !runs_sql.contains("kind IN"),
+                    "Migration 69 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let introduction_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive Worker introduction migration lock")?;
+
+            if Self::table_exists(&introduction_tx, "messages") {
+                if !Self::column_exists(&introduction_tx, "messages", "idempotency_key") {
+                    introduction_tx
+                        .execute_batch("ALTER TABLE messages ADD COLUMN idempotency_key TEXT;")
+                        .context("Migration 69: add messages.idempotency_key")?;
+                }
+                introduction_tx.execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_idempotency
+                         ON messages(session_id, idempotency_key)
+                         WHERE idempotency_key IS NOT NULL;",
+                )?;
+            }
+
+            introduction_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_group_worker_lanes (
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE RESTRICT,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id) ON DELETE RESTRICT,
+                        session_id TEXT NOT NULL UNIQUE
+                            REFERENCES sessions(id) ON DELETE CASCADE,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, worker_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_worker_lanes_worker
+                        ON hive_group_worker_lanes(worker_id, group_id);
+
+                    CREATE TABLE IF NOT EXISTS hive_worker_introductions (
+                        worker_id TEXT PRIMARY KEY
+                            REFERENCES hive_workers(id) ON DELETE CASCADE,
+                        run_id TEXT UNIQUE,
+                        status TEXT NOT NULL
+                            CHECK (status IN (
+                                'queued', 'running', 'awaiting_context', 'review_ready',
+                                'confirmed', 'skipped', 'failed', 'needs_recovery'
+                            )),
+                        prompt_version INTEGER NOT NULL,
+                        opening_message_id INTEGER
+                            REFERENCES messages(id) ON DELETE SET NULL,
+                        proposal_json TEXT
+                            CHECK (proposal_json IS NULL OR json_valid(proposal_json)),
+                        last_error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_introductions_status
+                        ON hive_worker_introductions(status, updated_at);
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_introductions_opening_message
+                        ON hive_worker_introductions(opening_message_id)
+                        WHERE opening_message_id IS NOT NULL;
+                    "#,
+                )
+                .context("Migration 69: create Hive Worker lane and introduction tables")?;
+            introduction_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (69)",
+                [],
+            )?;
+            introduction_tx.commit()?;
+        }
+
+        // Migration 70: Freeze the memory namespace selected for each Hive
+        // learning candidate at evidence-ingest time.
+        //
+        // Without this snapshot, a candidate produced in a Worker's private
+        // DM/group lane could later be promoted as owner-Shared after a DM
+        // rebind. Existing candidates are migrated only when their durable
+        // Worker binding can be proven. Unresolved pending legacy candidates
+        // are retained in a blocked terminal state instead of defaulting to
+        // Shared memory.
+        if current_version < 70 {
+            info!("Running migration 70: Hive learning memory scopes");
+            let learning_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive learning memory-scope migration lock")?;
+            if Self::table_exists(&learning_tx, "hive_learning_candidates") {
+                if !Self::column_exists(
+                    &learning_tx,
+                    "hive_learning_candidates",
+                    "memory_namespace",
+                ) {
+                    learning_tx.execute_batch(
+                        "ALTER TABLE hive_learning_candidates
+                         ADD COLUMN memory_namespace TEXT NOT NULL DEFAULT 'shared'
+                         CHECK(memory_namespace IN ('shared', 'hive', 'crew'));",
+                    )?;
+                }
+                if !Self::column_exists(
+                    &learning_tx,
+                    "hive_learning_candidates",
+                    "memory_namespace_id",
+                ) {
+                    learning_tx.execute_batch(
+                        "ALTER TABLE hive_learning_candidates
+                         ADD COLUMN memory_namespace_id TEXT;",
+                    )?;
+                }
+                if !Self::column_exists(
+                    &learning_tx,
+                    "hive_learning_candidates",
+                    "memory_acl_scope",
+                ) {
+                    learning_tx.execute_batch(
+                        "ALTER TABLE hive_learning_candidates
+                         ADD COLUMN memory_acl_scope TEXT NOT NULL DEFAULT 'owner'
+                         CHECK(memory_acl_scope IN ('owner', 'worker', 'group', 'conversation'));",
+                    )?;
+                }
+                if !Self::column_exists(
+                    &learning_tx,
+                    "hive_learning_candidates",
+                    "memory_scope_resolved",
+                ) {
+                    learning_tx.execute_batch(
+                        "ALTER TABLE hive_learning_candidates
+                         ADD COLUMN memory_scope_resolved INTEGER NOT NULL DEFAULT 0
+                         CHECK(memory_scope_resolved IN (0, 1));",
+                    )?;
+                }
+
+                learning_tx.execute_batch(
+                    r#"
+                    UPDATE hive_learning_candidates
+                    SET memory_namespace = 'crew',
+                        memory_namespace_id = COALESCE(
+                            (
+                                SELECT worker.memory_namespace_id
+                                FROM hive_workers worker
+                                WHERE worker.dm_session_id =
+                                    hive_learning_candidates.evidence_session_id
+                                  AND worker.user_id IS
+                                    hive_learning_candidates.user_id
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT worker.memory_namespace_id
+                                FROM hive_group_worker_lanes lane
+                                JOIN hive_workers worker ON worker.id = lane.worker_id
+                                WHERE lane.session_id =
+                                    hive_learning_candidates.evidence_session_id
+                                  AND worker.user_id IS
+                                    hive_learning_candidates.user_id
+                                LIMIT 1
+                            )
+                        ),
+                        memory_acl_scope = 'worker',
+                        memory_scope_resolved = 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM hive_workers worker
+                        WHERE worker.dm_session_id =
+                            hive_learning_candidates.evidence_session_id
+                          AND worker.user_id IS hive_learning_candidates.user_id
+                    ) OR EXISTS (
+                        SELECT 1
+                        FROM hive_group_worker_lanes lane
+                        JOIN hive_workers worker ON worker.id = lane.worker_id
+                        WHERE lane.session_id =
+                            hive_learning_candidates.evidence_session_id
+                          AND worker.user_id IS hive_learning_candidates.user_id
+                    );
+
+                    UPDATE hive_learning_candidates
+                    SET status = 'rejected',
+                        reason = reason || '; blocked because the legacy memory scope could not be proven',
+                        reviewed_at = COALESCE(reviewed_at, datetime('now'))
+                    WHERE memory_scope_resolved = 0
+                      AND status = 'pending';
+
+                    CREATE INDEX IF NOT EXISTS idx_hive_learning_candidates_memory_scope
+                        ON hive_learning_candidates(
+                            user_id, memory_namespace, memory_namespace_id,
+                            memory_acl_scope, status
+                        );
+                    "#,
+                )?;
+            }
+            learning_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (70)",
+                [],
+            )?;
+            learning_tx.commit()?;
+        }
+
+        // Migration 71: Reviewed, provenance-fenced Hive Worker Introduction
+        // proposals. The proposal itself remains on the one-row lifecycle
+        // ledger for efficient UI reads. Every provider review attempt is
+        // separately retained in an append-only claim/audit table so a crash,
+        // retry, rejection, or superseded transcript cannot silently rewrite
+        // the evidence that was shown to the user.
+        if current_version < 71 {
+            info!("Running migration 71: reviewed Hive Worker Introductions");
+            let introduction_review_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive Worker Introduction review migration lock")?;
+
+            if Self::table_exists(&introduction_review_tx, "hive_worker_introductions") {
+                if !Self::column_exists(
+                    &introduction_review_tx,
+                    "hive_worker_introductions",
+                    "proposal_revision",
+                ) {
+                    introduction_review_tx.execute_batch(
+                        "ALTER TABLE hive_worker_introductions
+                         ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 0
+                         CHECK(proposal_revision >= 0);",
+                    )?;
+                }
+                if !Self::column_exists(
+                    &introduction_review_tx,
+                    "hive_worker_introductions",
+                    "decision_json",
+                ) {
+                    introduction_review_tx.execute_batch(
+                        "ALTER TABLE hive_worker_introductions
+                         ADD COLUMN decision_json TEXT
+                         CHECK(decision_json IS NULL OR json_valid(decision_json));",
+                    )?;
+                }
+
+                introduction_review_tx.execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_worker_introduction_reviews (
+                        id TEXT PRIMARY KEY,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id) ON DELETE CASCADE,
+                        session_id TEXT NOT NULL
+                            REFERENCES sessions(id) ON DELETE CASCADE,
+                        status TEXT NOT NULL
+                            CHECK(status IN (
+                                'claimed', 'gather_more', 'review_ready',
+                                'confirmed', 'rejected', 'keep_talking',
+                                'failed', 'stale'
+                            )),
+                        claim_token TEXT NOT NULL UNIQUE,
+                        claim_expires_at TEXT NOT NULL,
+                        opening_message_id INTEGER NOT NULL,
+                        through_message_id INTEGER NOT NULL,
+                        user_message_ids_json TEXT NOT NULL
+                            CHECK(json_valid(user_message_ids_json)),
+                        transcript_digest TEXT NOT NULL,
+                        base_identity_digest TEXT NOT NULL,
+                        base_soul_digest TEXT NOT NULL,
+                        worker_user_id TEXT,
+                        model TEXT NOT NULL,
+                        model_key_json TEXT NOT NULL
+                            CHECK(json_valid(model_key_json)),
+                        model_catalog_revision TEXT,
+                        provider_id TEXT NOT NULL,
+                        trace_run_id TEXT NOT NULL,
+                        provider_call_id TEXT UNIQUE,
+                        usage_json TEXT
+                            CHECK(usage_json IS NULL OR json_valid(usage_json)),
+                        proposal_id TEXT UNIQUE,
+                        proposal_revision INTEGER
+                            CHECK(proposal_revision IS NULL OR proposal_revision > 0),
+                        reviewer_output_json TEXT
+                            CHECK(reviewer_output_json IS NULL OR json_valid(reviewer_output_json)),
+                        proposal_json TEXT
+                            CHECK(proposal_json IS NULL OR json_valid(proposal_json)),
+                        decision_json TEXT
+                            CHECK(decision_json IS NULL OR json_valid(decision_json)),
+                        last_error TEXT,
+                        claimed_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        CHECK(
+                            json_extract(model_key_json, '$.model_id') = model
+                            AND json_extract(model_key_json, '$.provider') = provider_id
+                        ),
+                        CHECK(
+                            (status IN ('review_ready', 'confirmed', 'rejected', 'keep_talking')
+                             AND proposal_id IS NOT NULL
+                             AND proposal_revision IS NOT NULL
+                             AND proposal_json IS NOT NULL)
+                            OR status IN ('claimed', 'gather_more', 'failed', 'stale')
+                        )
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_introduction_reviews_worker
+                        ON hive_worker_introduction_reviews(
+                            worker_id, through_message_id, status, updated_at
+                        );
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_introduction_reviews_claim
+                        ON hive_worker_introduction_reviews(status, claim_expires_at);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_introduction_reviews_trace_run
+                        ON hive_worker_introduction_reviews(trace_run_id);
+                    "#,
+                )?;
+            }
+
+            introduction_review_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (71)",
+                [],
+            )?;
+            introduction_review_tx.commit()?;
+        }
+
+        // Migration 72: freeze report ownership and Worker-private scope.
+        //
+        // Reports historically inherited access from the source session's
+        // *current* DM/group binding. Rebinding a Worker therefore changed
+        // the visibility of already-written reports. Snapshot exact owner,
+        // namespace, ACL, and source Worker on the report itself. Legacy rows
+        // use every typed Worker link we can prove and abort the migration on
+        // conflicting or unresolved Worker evidence rather than silently
+        // widening it to owner-shared access.
+        if current_version < 72 {
+            info!("Running migration 72: immutable report memory scopes");
+            let report_scope_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring report memory-scope migration lock")?;
+            if Self::table_exists(&report_scope_tx, "reports") {
+                let scope_already_immutable: bool = report_scope_tx.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master
+                         WHERE type = 'trigger' AND name = 'reports_scope_immutable'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !scope_already_immutable {
+                    if !Self::column_exists(&report_scope_tx, "reports", "owner_user_id") {
+                        report_scope_tx
+                            .execute_batch("ALTER TABLE reports ADD COLUMN owner_user_id TEXT;")?;
+                    }
+                    if !Self::column_exists(&report_scope_tx, "reports", "memory_namespace") {
+                        report_scope_tx.execute_batch(
+                            "ALTER TABLE reports
+                         ADD COLUMN memory_namespace TEXT NOT NULL DEFAULT 'shared'
+                         CHECK(memory_namespace IN ('shared', 'crew'));",
+                        )?;
+                    }
+                    if !Self::column_exists(&report_scope_tx, "reports", "namespace_id") {
+                        report_scope_tx.execute_batch(
+                            "ALTER TABLE reports
+                         ADD COLUMN namespace_id TEXT
+                         CHECK(namespace_id IS NULL OR length(trim(namespace_id)) > 0);",
+                        )?;
+                    }
+                    if !Self::column_exists(&report_scope_tx, "reports", "source_worker_id") {
+                        let worker_parent_ready =
+                            Self::table_exists(&report_scope_tx, "hive_workers")
+                                && Self::column_exists(&report_scope_tx, "hive_workers", "id");
+                        // SQLite accepts a foreign key declaration whose
+                        // parent table is absent, but every later INSERT then
+                        // fails while foreign keys are enabled -- even when
+                        // the new value is NULL. Preserve the FK in the real
+                        // Hive schema and keep legacy ordinary-only fixtures
+                        // usable with a fail-closed insert trigger instead.
+                        let source_worker_column = if worker_parent_ready {
+                            "ALTER TABLE reports
+                             ADD COLUMN source_worker_id TEXT
+                             REFERENCES hive_workers(id) ON DELETE RESTRICT;"
+                        } else {
+                            "ALTER TABLE reports
+                             ADD COLUMN source_worker_id TEXT;"
+                        };
+                        report_scope_tx.execute_batch(source_worker_column)?;
+                    }
+                    if !Self::column_exists(&report_scope_tx, "reports", "acl_scope") {
+                        // SQLite stores a column CHECK as part of the table's
+                        // overall row constraint, so later updates to any of the
+                        // referenced scope columns remain guarded as well.
+                        report_scope_tx.execute_batch(
+                            "ALTER TABLE reports
+                         ADD COLUMN acl_scope TEXT NOT NULL DEFAULT 'owner'
+                         CHECK(
+                             (acl_scope = 'owner'
+                              AND memory_namespace = 'shared'
+                              AND namespace_id IS NULL
+                              AND source_worker_id IS NULL)
+                             OR
+                             (acl_scope = 'worker'
+                              AND memory_namespace = 'crew'
+                              AND namespace_id IS NOT NULL
+                              AND length(trim(namespace_id)) > 0
+                              AND source_worker_id IS NOT NULL
+                              AND length(trim(source_worker_id)) > 0)
+                         );",
+                        )?;
+                    }
+
+                    let report_count: i64 =
+                        report_scope_tx
+                            .query_row("SELECT COUNT(*) FROM reports", [], |row| row.get(0))?;
+                    let sessions_ready = Self::table_exists(&report_scope_tx, "sessions")
+                        && ["id", "user_id", "session_type"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "sessions", column)
+                        });
+                    ensure!(
+                        report_count == 0 || sessions_ready,
+                        "Migration 72 cannot freeze report ownership without typed source sessions"
+                    );
+                    if report_count > 0 {
+                        let orphan_count: i64 = report_scope_tx.query_row(
+                            "SELECT COUNT(*)
+                         FROM reports report
+                         LEFT JOIN sessions session ON session.id = report.session_id
+                         WHERE session.id IS NULL",
+                            [],
+                            |row| row.get(0),
+                        )?;
+                        ensure!(
+                            orphan_count == 0,
+                            "Migration 72 found {orphan_count} reports with no source session"
+                        );
+                    }
+
+                    report_scope_tx.execute_batch(
+                        "DROP TABLE IF EXISTS report_scope_candidates__migration72;
+                     CREATE TABLE report_scope_candidates__migration72 (
+                         report_id TEXT NOT NULL,
+                         worker_id TEXT NOT NULL,
+                         evidence_kind TEXT NOT NULL,
+                         UNIQUE(report_id, worker_id, evidence_kind)
+                     );",
+                    )?;
+                    if Self::table_exists(&report_scope_tx, "hive_workers")
+                        && ["id", "dm_session_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_workers", column)
+                        })
+                    {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, worker.id, 'current_dm'
+                         FROM reports report
+                         JOIN hive_workers worker
+                           ON worker.dm_session_id = report.session_id",
+                            [],
+                        )?;
+                    }
+                    if Self::table_exists(&report_scope_tx, "hive_group_worker_lanes")
+                        && ["worker_id", "session_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_group_worker_lanes", column)
+                        })
+                    {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, lane.worker_id, 'group_lane'
+                         FROM reports report
+                         JOIN hive_group_worker_lanes lane
+                           ON lane.session_id = report.session_id",
+                            [],
+                        )?;
+                    }
+                    if Self::table_exists(&report_scope_tx, "hive_controllers")
+                        && ["session_id", "worker_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_controllers", column)
+                        })
+                    {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, controller.worker_id, 'controller'
+                         FROM reports report
+                         JOIN hive_controllers controller
+                           ON controller.session_id = report.session_id
+                         WHERE controller.worker_id IS NOT NULL",
+                            [],
+                        )?;
+                    }
+                    if Self::table_exists(&report_scope_tx, "hive_runtime_state")
+                        && ["session_id", "worker_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_runtime_state", column)
+                        })
+                    {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, runtime.worker_id, 'runtime_state'
+                         FROM reports report
+                         JOIN hive_runtime_state runtime
+                           ON runtime.session_id = report.session_id
+                         WHERE runtime.worker_id IS NOT NULL",
+                            [],
+                        )?;
+                    }
+                    let runs_ready = Self::table_exists(&report_scope_tx, "hive_runs")
+                        && ["session_id", "worker_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_runs", column)
+                        });
+                    if runs_ready {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, run.worker_id, 'run'
+                         FROM reports report
+                         JOIN hive_runs run ON run.session_id = report.session_id
+                         WHERE run.worker_id IS NOT NULL",
+                            [],
+                        )?;
+                    }
+                    if runs_ready
+                        && Self::column_exists(&report_scope_tx, "hive_runs", "controller_id")
+                        && Self::table_exists(&report_scope_tx, "hive_controllers")
+                        && ["id", "worker_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_controllers", column)
+                        })
+                    {
+                        report_scope_tx.execute(
+                            "INSERT OR IGNORE INTO report_scope_candidates__migration72
+                             (report_id, worker_id, evidence_kind)
+                         SELECT report.id, controller.worker_id, 'run_controller'
+                         FROM reports report
+                         JOIN hive_runs run ON run.session_id = report.session_id
+                         JOIN hive_controllers controller ON controller.id = run.controller_id
+                         WHERE controller.worker_id IS NOT NULL",
+                            [],
+                        )?;
+                    }
+
+                    let conflict_count: i64 = report_scope_tx.query_row(
+                        "SELECT COUNT(*)
+                     FROM (
+                         SELECT report_id
+                         FROM report_scope_candidates__migration72
+                         GROUP BY report_id
+                         HAVING COUNT(DISTINCT worker_id) > 1
+                     )",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    ensure!(
+                    conflict_count == 0,
+                    "Migration 72 found {conflict_count} reports with conflicting Worker scope evidence"
+                );
+
+                    let candidate_count: i64 = report_scope_tx.query_row(
+                        "SELECT COUNT(*) FROM report_scope_candidates__migration72",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let workers_ready = Self::table_exists(&report_scope_tx, "hive_workers")
+                        && ["id", "user_id", "memory_namespace_id"]
+                            .iter()
+                            .all(|column| {
+                                Self::column_exists(&report_scope_tx, "hive_workers", column)
+                            });
+                    ensure!(
+                    candidate_count == 0 || workers_ready,
+                    "Migration 72 found Worker-authored reports without a resolvable Worker table"
+                );
+                    if candidate_count > 0 {
+                        let invalid_candidate_count: i64 = report_scope_tx.query_row(
+                            "SELECT COUNT(*)
+                         FROM report_scope_candidates__migration72 candidate
+                         JOIN reports report ON report.id = candidate.report_id
+                         JOIN sessions session ON session.id = report.session_id
+                         LEFT JOIN hive_workers worker ON worker.id = candidate.worker_id
+                         WHERE worker.id IS NULL
+                            OR session.session_type <> 'hive'
+                            OR NOT (worker.user_id IS session.user_id)
+                            OR length(trim(worker.memory_namespace_id)) = 0",
+                            [],
+                            |row| row.get(0),
+                        )?;
+                        ensure!(
+                        invalid_candidate_count == 0,
+                        "Migration 72 found {invalid_candidate_count} unresolved Worker report scope claims"
+                    );
+                    }
+
+                    if report_count > 0 && workers_ready {
+                        report_scope_tx.execute(
+                            "UPDATE reports
+                         SET owner_user_id = (
+                                 SELECT session.user_id
+                                 FROM sessions session
+                                 WHERE session.id = reports.session_id
+                             ),
+                             memory_namespace = CASE
+                                 WHEN EXISTS (
+                                     SELECT 1
+                                     FROM report_scope_candidates__migration72 candidate
+                                     WHERE candidate.report_id = reports.id
+                                 ) THEN 'crew'
+                                 ELSE 'shared'
+                             END,
+                             namespace_id = (
+                                 SELECT worker.memory_namespace_id
+                                 FROM report_scope_candidates__migration72 candidate
+                                 JOIN hive_workers worker ON worker.id = candidate.worker_id
+                                 WHERE candidate.report_id = reports.id
+                                 LIMIT 1
+                             ),
+                             acl_scope = CASE
+                                 WHEN EXISTS (
+                                     SELECT 1
+                                     FROM report_scope_candidates__migration72 candidate
+                                     WHERE candidate.report_id = reports.id
+                                 ) THEN 'worker'
+                                 ELSE 'owner'
+                             END,
+                             source_worker_id = (
+                                 SELECT candidate.worker_id
+                                 FROM report_scope_candidates__migration72 candidate
+                                 WHERE candidate.report_id = reports.id
+                                 LIMIT 1
+                             )",
+                            [],
+                        )?;
+                    } else if report_count > 0 {
+                        // A synthetic/old ordinary-only schema may legitimately
+                        // have no Hive tables. With no Worker candidates proven,
+                        // freeze those reports as exact-owner shared without
+                        // compiling a query against a missing parent table.
+                        report_scope_tx.execute(
+                            "UPDATE reports
+                         SET owner_user_id = (
+                                 SELECT session.user_id
+                                 FROM sessions session
+                                 WHERE session.id = reports.session_id
+                             ),
+                             memory_namespace = 'shared',
+                             namespace_id = NULL,
+                             acl_scope = 'owner',
+                             source_worker_id = NULL",
+                            [],
+                        )?;
+                    }
+                    report_scope_tx.execute_batch(
+                        r#"
+                    DROP TABLE report_scope_candidates__migration72;
+                    CREATE INDEX IF NOT EXISTS idx_reports_frozen_reader_scope
+                        ON reports(
+                            owner_user_id, acl_scope, source_worker_id,
+                            project_dir, created_at DESC
+                        );
+                    CREATE TRIGGER IF NOT EXISTS reports_scope_immutable
+                    BEFORE UPDATE OF
+                        owner_user_id, memory_namespace, namespace_id,
+                        acl_scope, source_worker_id
+                    ON reports
+                    WHEN NOT (OLD.owner_user_id IS NEW.owner_user_id)
+                      OR NOT (OLD.memory_namespace IS NEW.memory_namespace)
+                      OR NOT (OLD.namespace_id IS NEW.namespace_id)
+                      OR NOT (OLD.acl_scope IS NEW.acl_scope)
+                      OR NOT (OLD.source_worker_id IS NEW.source_worker_id)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'report scope is immutable');
+                    END;
+                    "#,
+                    )?;
+                } else {
+                    ensure!(
+                        [
+                            "owner_user_id",
+                            "memory_namespace",
+                            "namespace_id",
+                            "acl_scope",
+                            "source_worker_id",
+                        ]
+                        .iter()
+                        .all(|column| Self::column_exists(
+                            &report_scope_tx,
+                            "reports",
+                            column
+                        )),
+                        "Migration 72 found an immutable report trigger without its scope columns"
+                    );
+                }
+                report_scope_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_reports_frozen_reader_scope
+                         ON reports(
+                             owner_user_id, acl_scope, source_worker_id,
+                             project_dir, created_at DESC
+                         );
+                     DROP TRIGGER IF EXISTS reports_scope_insert_guard;",
+                )?;
+                let insert_sessions_ready = Self::table_exists(&report_scope_tx, "sessions")
+                    && ["id", "user_id", "session_type"]
+                        .iter()
+                        .all(|column| Self::column_exists(&report_scope_tx, "sessions", column));
+                let insert_workers_ready = Self::table_exists(&report_scope_tx, "hive_workers")
+                    && ["id", "user_id", "dm_session_id", "memory_namespace_id"]
+                        .iter()
+                        .all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_workers", column)
+                        });
+                let insert_lanes_ready =
+                    Self::table_exists(&report_scope_tx, "hive_group_worker_lanes")
+                        && ["worker_id", "session_id"].iter().all(|column| {
+                            Self::column_exists(&report_scope_tx, "hive_group_worker_lanes", column)
+                        });
+                if insert_sessions_ready && insert_workers_ready && insert_lanes_ready {
+                    report_scope_tx.execute_batch(
+                        r#"
+                        CREATE TRIGGER reports_scope_insert_guard
+                        BEFORE INSERT ON reports
+                        WHEN NOT EXISTS (
+                                 SELECT 1 FROM sessions session
+                                 WHERE session.id = NEW.session_id
+                                   AND session.user_id IS NEW.owner_user_id
+                             )
+                          OR (
+                              NEW.acl_scope = 'owner'
+                              AND (
+                                  EXISTS (
+                                      SELECT 1 FROM hive_workers worker
+                                      WHERE worker.dm_session_id = NEW.session_id
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1 FROM hive_group_worker_lanes lane
+                                      WHERE lane.session_id = NEW.session_id
+                                  )
+                              )
+                          )
+                          OR (
+                              NEW.acl_scope = 'worker'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM sessions session
+                                  JOIN hive_workers worker
+                                    ON worker.id = NEW.source_worker_id
+                                  WHERE session.id = NEW.session_id
+                                    AND session.session_type = 'hive'
+                                    AND session.user_id IS NEW.owner_user_id
+                                    AND worker.user_id IS NEW.owner_user_id
+                                    AND worker.memory_namespace_id = NEW.namespace_id
+                                    AND (
+                                        worker.dm_session_id = NEW.session_id
+                                        OR EXISTS (
+                                            SELECT 1
+                                            FROM hive_group_worker_lanes lane
+                                            WHERE lane.session_id = NEW.session_id
+                                              AND lane.worker_id = worker.id
+                                        )
+                                    )
+                              )
+                          )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'report scope does not match source session');
+                        END;
+                        "#,
+                    )?;
+                } else if insert_sessions_ready {
+                    // Old ordinary-only schemas have no Hive parent tables.
+                    // Allow exact-owner shared reports and reject every
+                    // Worker-private claim without compiling a trigger that
+                    // references tables which do not exist.
+                    report_scope_tx.execute_batch(
+                        r#"
+                        CREATE TRIGGER reports_scope_insert_guard
+                        BEFORE INSERT ON reports
+                        WHEN NEW.acl_scope <> 'owner'
+                          OR NOT EXISTS (
+                              SELECT 1 FROM sessions session
+                              WHERE session.id = NEW.session_id
+                                AND session.user_id IS NEW.owner_user_id
+                          )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'report scope does not match source session');
+                        END;
+                        "#,
+                    )?;
+                } else {
+                    // With no typed session authority there is no safe scope
+                    // to freeze. Existing rows remain readable, but no future
+                    // insert may guess at ownership.
+                    report_scope_tx.execute_batch(
+                        r#"
+                        CREATE TRIGGER reports_scope_insert_guard
+                        BEFORE INSERT ON reports
+                        BEGIN
+                            SELECT RAISE(ABORT, 'report scope has no typed source session');
+                        END;
+                        "#,
+                    )?;
+                }
+            }
+            report_scope_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (72)",
+                [],
+            )?;
+            report_scope_tx.commit()?;
+        }
+
+        // Migration 73: execution/profile provenance for every first-class
+        // Hive Worker. Existing Workers begin at revision 1; profile,
+        // document, model, permission, and autonomy changes advance it in the
+        // same IMMEDIATE transaction. Status-only pause/resume/archive is a
+        // scheduling lifecycle and must not invalidate frozen runnable work.
+        if current_version < 73 {
+            info!("Running migration 73: revisioned Hive Workers");
+            let worker_revision_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive Worker revision migration lock")?;
+            if Self::table_exists(&worker_revision_tx, "hive_workers")
+                && !Self::column_exists(&worker_revision_tx, "hive_workers", "revision")
+            {
+                worker_revision_tx.execute_batch(
+                    "ALTER TABLE hive_workers
+                     ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+                     CHECK(revision >= 1);",
+                )?;
+            }
+            worker_revision_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (73)",
+                [],
+            )?;
+            worker_revision_tx.commit()?;
+        }
+
+        // Migration 74: authoritative Hive Worker spend and wake governor.
+        //
+        // Provider calls are a two-phase append-only ledger: a Started row is
+        // synchronously committed before the network boundary and exactly one
+        // immutable Completed/Unknown outcome may follow. Runtime traces are
+        // intentionally not backfilled because they are best-effort and
+        // prunable, while session token_count remains conversation accounting.
+        if current_version < 74 {
+            info!("Running migration 74: Hive Worker spend and wake governor");
+            let governor_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive Worker governor migration lock")?;
+            let default_calls =
+                crate::storage::hive_worker_governor::DEFAULT_WORKER_DAILY_CALL_LIMIT;
+            let default_tokens =
+                crate::storage::hive_worker_governor::DEFAULT_WORKER_DAILY_TOKEN_LIMIT;
+            let default_idle_base =
+                crate::storage::hive_worker_governor::DEFAULT_WORKER_IDLE_BASE_SECS;
+            let default_idle_max =
+                crate::storage::hive_worker_governor::DEFAULT_WORKER_IDLE_MAX_SECS;
+            let max_calls = crate::storage::hive_worker_governor::MAX_WORKER_DAILY_CALL_LIMIT;
+            let max_tokens = crate::storage::hive_worker_governor::MAX_WORKER_DAILY_TOKEN_LIMIT;
+            let max_idle = crate::storage::hive_worker_governor::MAX_WORKER_IDLE_SECS;
+            let migration_sql = format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS hive_worker_governor_policies (
+                    worker_id TEXT PRIMARY KEY
+                        REFERENCES hive_workers(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL DEFAULT 1
+                        CHECK (revision >= 1),
+                    daily_call_limit INTEGER NOT NULL DEFAULT {default_calls}
+                        CHECK (daily_call_limit > 0 AND daily_call_limit <= {max_calls}),
+                    daily_token_limit INTEGER NOT NULL DEFAULT {default_tokens}
+                        CHECK (daily_token_limit > 0 AND daily_token_limit <= {max_tokens}),
+                    timezone TEXT NOT NULL DEFAULT 'UTC'
+                        CHECK (length(timezone) BETWEEN 1 AND 128),
+                    quiet_start_minute INTEGER
+                        CHECK (quiet_start_minute IS NULL
+                               OR quiet_start_minute BETWEEN 0 AND 1439),
+                    quiet_end_minute INTEGER
+                        CHECK (quiet_end_minute IS NULL
+                               OR quiet_end_minute BETWEEN 0 AND 1439),
+                    quiet_gap_policy TEXT NOT NULL DEFAULT 'shift_forward'
+                        CHECK (quiet_gap_policy IN ('shift_forward', 'skip')),
+                    quiet_fold_policy TEXT NOT NULL DEFAULT 'first'
+                        CHECK (quiet_fold_policy IN ('first', 'second')),
+                    idle_base_secs INTEGER NOT NULL DEFAULT {default_idle_base}
+                        CHECK (idle_base_secs > 0 AND idle_base_secs <= {max_idle}),
+                    idle_max_secs INTEGER NOT NULL DEFAULT {default_idle_max}
+                        CHECK (idle_max_secs >= idle_base_secs
+                               AND idle_max_secs <= {max_idle}),
+                    tracking_started_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (quiet_start_minute IS NULL AND quiet_end_minute IS NULL)
+                        OR (
+                            quiet_start_minute IS NOT NULL
+                            AND quiet_end_minute IS NOT NULL
+                            AND quiet_start_minute <> quiet_end_minute
+                        )
+                    )
+                );
+
+                CREATE TABLE IF NOT EXISTS hive_worker_governor_override_grants (
+                    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 256),
+                    operation_id TEXT NOT NULL
+                        CHECK (length(operation_id) BETWEEN 1 AND 256),
+                    worker_id TEXT NOT NULL
+                        REFERENCES hive_workers(id) ON DELETE RESTRICT,
+                    owner_user_id TEXT,
+                    bypass_unresolved_provider_call INTEGER NOT NULL DEFAULT 0
+                        CHECK (bypass_unresolved_provider_call IN (0, 1)),
+                    bypass_daily_call_cap INTEGER NOT NULL DEFAULT 0
+                        CHECK (bypass_daily_call_cap IN (0, 1)),
+                    bypass_daily_token_cap INTEGER NOT NULL DEFAULT 0
+                        CHECK (bypass_daily_token_cap IN (0, 1)),
+                    bypass_quiet_hours INTEGER NOT NULL DEFAULT 0
+                        CHECK (bypass_quiet_hours IN (0, 1)),
+                    bypass_idle_backoff INTEGER NOT NULL DEFAULT 0
+                        CHECK (bypass_idle_backoff IN (0, 1)),
+                    reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 2048),
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL CHECK (expires_at > created_at),
+                    UNIQUE (worker_id, operation_id),
+                    CHECK (
+                        bypass_unresolved_provider_call = 1
+                        OR bypass_daily_call_cap = 1
+                        OR bypass_daily_token_cap = 1
+                        OR bypass_quiet_hours = 1
+                        OR bypass_idle_backoff = 1
+                    )
+                );
+
+                CREATE TABLE IF NOT EXISTS hive_worker_provider_calls (
+                    provider_call_id TEXT PRIMARY KEY
+                        CHECK (length(provider_call_id) BETWEEN 1 AND 256),
+                    worker_id TEXT NOT NULL
+                        REFERENCES hive_workers(id) ON DELETE RESTRICT,
+                    worker_revision INTEGER NOT NULL CHECK (worker_revision >= 1),
+                    owner_user_id TEXT,
+                    session_id TEXT NOT NULL
+                        CHECK (length(session_id) BETWEEN 1 AND 256),
+                    group_id TEXT,
+                    run_id TEXT NOT NULL CHECK (length(run_id) BETWEEN 1 AND 256),
+                    run_lease_token TEXT NOT NULL
+                        CHECK (length(run_lease_token) BETWEEN 1 AND 256),
+                    run_lease_epoch INTEGER NOT NULL CHECK (run_lease_epoch >= 0),
+                    run_lease_expires_at TEXT NOT NULL,
+                    workflow_goal_id TEXT,
+                    workflow_attempt_id TEXT,
+                    origin TEXT NOT NULL CHECK (origin IN (
+                        'user_dm', 'user_group', 'user_lifecycle_action',
+                        'user_workflow_activation', 'manual_run_now', 'scheduled',
+                        'heartbeat', 'worker_peer', 'scheduled_group',
+                        'workflow_rollover', 'lifecycle_sweep'
+                    )),
+                    lane_key TEXT NOT NULL CHECK (length(lane_key) BETWEEN 1 AND 512),
+                    call_kind TEXT NOT NULL CHECK (length(call_kind) BETWEEN 1 AND 256),
+                    provider_id TEXT NOT NULL
+                        CHECK (length(provider_id) BETWEEN 1 AND 256),
+                    model_id TEXT NOT NULL CHECK (length(model_id) BETWEEN 1 AND 512),
+                    model_key_json TEXT NOT NULL CHECK (json_valid(model_key_json)),
+                    model_key_fingerprint TEXT NOT NULL
+                        CHECK (length(model_key_fingerprint) = 64),
+                    model_catalog_revision TEXT,
+                    permission_mode TEXT NOT NULL
+                        CHECK (permission_mode IN ('supervised', 'autonomous')),
+                    pricing_snapshot_json TEXT
+                        CHECK (pricing_snapshot_json IS NULL
+                               OR json_valid(pricing_snapshot_json)),
+                    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+                    timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
+                    local_day TEXT NOT NULL CHECK (local_day GLOB '????-??-??'),
+                    reserved_tokens INTEGER NOT NULL
+                        CHECK (reserved_tokens > 0 AND reserved_tokens <= {max_tokens}),
+                    override_grant_id TEXT
+                        REFERENCES hive_worker_governor_override_grants(id)
+                        ON DELETE RESTRICT,
+                    started_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_hive_worker_provider_calls_worker_started
+                    ON hive_worker_provider_calls(worker_id, started_at);
+                CREATE INDEX IF NOT EXISTS idx_hive_worker_provider_calls_worker_day
+                    ON hive_worker_provider_calls(worker_id, local_day);
+                CREATE INDEX IF NOT EXISTS idx_hive_worker_provider_calls_run
+                    ON hive_worker_provider_calls(run_id);
+
+                CREATE TABLE IF NOT EXISTS hive_worker_provider_call_outcomes (
+                    provider_call_id TEXT PRIMARY KEY
+                        REFERENCES hive_worker_provider_calls(provider_call_id)
+                        ON DELETE RESTRICT,
+                    state TEXT NOT NULL CHECK (state IN ('completed', 'unknown')),
+                    outcome TEXT NOT NULL CHECK (length(outcome) BETWEEN 1 AND 2048),
+                    remote_acceptance TEXT NOT NULL
+                        CHECK (remote_acceptance IN (
+                            'not_sent', 'possibly_sent', 'acknowledged'
+                        )),
+                    usage_json TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
+                    usage_total_tokens INTEGER
+                        CHECK (usage_total_tokens IS NULL OR usage_total_tokens >= 0),
+                    estimated_cost_microunits INTEGER
+                        CHECK (estimated_cost_microunits IS NULL
+                               OR estimated_cost_microunits >= 0),
+                    unknown_reason TEXT,
+                    finished_at TEXT NOT NULL,
+                    CHECK (
+                        (state = 'unknown'
+                         AND usage_json IS NULL
+                         AND usage_total_tokens IS NULL
+                         AND unknown_reason IS NOT NULL
+                         AND length(unknown_reason) BETWEEN 1 AND 2048)
+                        OR
+                        (state = 'completed' AND unknown_reason IS NULL)
+                    )
+                );
+
+                CREATE TABLE IF NOT EXISTS hive_worker_governor_override_consumptions (
+                    grant_id TEXT PRIMARY KEY
+                        REFERENCES hive_worker_governor_override_grants(id)
+                        ON DELETE RESTRICT,
+                    provider_call_id TEXT NOT NULL UNIQUE
+                        REFERENCES hive_worker_provider_calls(provider_call_id)
+                        ON DELETE RESTRICT,
+                    consumed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS hive_worker_idle_state (
+                    worker_id TEXT NOT NULL
+                        REFERENCES hive_workers(id) ON DELETE CASCADE,
+                    lane_key TEXT NOT NULL CHECK (length(lane_key) BETWEEN 1 AND 512),
+                    idle_streak INTEGER NOT NULL DEFAULT 0 CHECK (idle_streak >= 0),
+                    not_before TEXT,
+                    last_material_at TEXT,
+                    last_outcome_run_id TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (worker_id, lane_key)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS hive_worker_governor_policy_identity_immutable
+                BEFORE UPDATE OF worker_id, tracking_started_at, created_at
+                ON hive_worker_governor_policies
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker governor policy identity is immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS hive_worker_provider_calls_no_update
+                BEFORE UPDATE ON hive_worker_provider_calls
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker provider-call Started rows are immutable');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_provider_calls_no_delete
+                BEFORE DELETE ON hive_worker_provider_calls
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker provider-call Started rows are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_provider_call_outcomes_no_update
+                BEFORE UPDATE ON hive_worker_provider_call_outcomes
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker provider-call outcomes are immutable');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_provider_call_outcomes_no_delete
+                BEFORE DELETE ON hive_worker_provider_call_outcomes
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker provider-call outcomes are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_grants_no_update
+                BEFORE UPDATE ON hive_worker_governor_override_grants
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker governor override grants are immutable');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_grants_no_delete
+                BEFORE DELETE ON hive_worker_governor_override_grants
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker governor override grants are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_consumptions_no_update
+                BEFORE UPDATE ON hive_worker_governor_override_consumptions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker governor override consumption is immutable');
+                END;
+                CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_consumptions_no_delete
+                BEFORE DELETE ON hive_worker_governor_override_consumptions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Worker governor override consumption is append-only');
+                END;
+                "#,
+            );
+            governor_tx
+                .execute_batch(&migration_sql)
+                .context("Migration 74: create Worker governor ledgers")?;
+            if Self::table_exists(&governor_tx, "hive_worker_provider_calls")
+                && !Self::column_exists(
+                    &governor_tx,
+                    "hive_worker_provider_calls",
+                    "worker_revision",
+                )
+            {
+                governor_tx.execute_batch(
+                    "ALTER TABLE hive_worker_provider_calls
+                     ADD COLUMN worker_revision INTEGER
+                     CHECK(worker_revision IS NULL OR worker_revision >= 1);",
+                )?;
+            }
+
+            let migration_cutoff = "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')";
+            if Self::table_exists(&governor_tx, "hive_workers") {
+                governor_tx.execute_batch(&format!(
+                    "INSERT OR IGNORE INTO hive_worker_governor_policies (
+                         worker_id, revision, daily_call_limit, daily_token_limit,
+                         timezone, quiet_start_minute, quiet_end_minute,
+                         quiet_gap_policy, quiet_fold_policy, idle_base_secs,
+                         idle_max_secs, tracking_started_at, created_at, updated_at
+                     )
+                     SELECT id, 1, {default_calls}, {default_tokens}, 'UTC', NULL, NULL,
+                            'shift_forward', 'first', {default_idle_base},
+                            {default_idle_max}, {migration_cutoff},
+                            {migration_cutoff}, {migration_cutoff}
+                     FROM hive_workers;
+                     CREATE TRIGGER IF NOT EXISTS hive_workers_governor_policy_after_insert
+                     AFTER INSERT ON hive_workers
+                     BEGIN
+                         INSERT INTO hive_worker_governor_policies (
+                             worker_id, revision, daily_call_limit, daily_token_limit,
+                             timezone, quiet_start_minute, quiet_end_minute,
+                             quiet_gap_policy, quiet_fold_policy, idle_base_secs,
+                             idle_max_secs, tracking_started_at, created_at, updated_at
+                         ) VALUES (
+                             NEW.id, 1, {default_calls}, {default_tokens}, 'UTC', NULL,
+                             NULL, 'shift_forward', 'first', {default_idle_base},
+                             {default_idle_max}, {migration_cutoff},
+                             {migration_cutoff}, {migration_cutoff}
+                         );
+                     END;"
+                ))?;
+            }
+
+            let override_guard_ready = Self::table_exists(&governor_tx, "hive_workers")
+                && ["id", "user_id", "status"]
+                    .iter()
+                    .all(|column| Self::column_exists(&governor_tx, "hive_workers", column));
+            if override_guard_ready {
+                governor_tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_owner_guard
+                    BEFORE INSERT ON hive_worker_governor_override_grants
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM hive_workers worker
+                        WHERE worker.id = NEW.worker_id
+                          AND worker.user_id IS NEW.owner_user_id
+                          AND worker.status = 'active'
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker governor override identity mismatch');
+                    END;
+                    "#,
+                )?;
+            }
+
+            let provider_guard_ready = [
+                "hive_workers",
+                "hive_runs",
+                "hive_controllers",
+                "hive_group_worker_lanes",
+                "hive_groups",
+                "hive_group_members",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&governor_tx, table))
+                && [
+                    "id",
+                    "user_id",
+                    "status",
+                    "revision",
+                    "dm_session_id",
+                    "model",
+                    "model_key_json",
+                    "model_catalog_revision",
+                    "permission_mode",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&governor_tx, "hive_workers", column))
+                && [
+                    "id",
+                    "controller_id",
+                    "session_id",
+                    "worker_id",
+                    "status",
+                    "lease_token",
+                    "lease_epoch",
+                    "lease_expires_at",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&governor_tx, "hive_runs", column));
+            let provider_guard_ready = provider_guard_ready
+                && Self::column_exists(
+                    &governor_tx,
+                    "hive_worker_provider_calls",
+                    "worker_revision",
+                );
+
+            if Self::table_exists(&governor_tx, "hive_runs") {
+                for (column, definition) in [
+                    (
+                        "governor_origin",
+                        "TEXT CHECK (governor_origin IS NULL OR governor_origin IN (
+                            'user_dm', 'user_group', 'user_lifecycle_action',
+                            'user_workflow_activation', 'manual_run_now', 'scheduled',
+                            'heartbeat', 'worker_peer', 'scheduled_group',
+                            'workflow_rollover', 'lifecycle_sweep', 'controller_child'
+                        ))",
+                    ),
+                    (
+                        "governor_lane_key",
+                        "TEXT CHECK (governor_lane_key IS NULL
+                                     OR length(governor_lane_key) BETWEEN 1 AND 512)",
+                    ),
+                    (
+                        "governor_gate_reason",
+                        "TEXT CHECK (governor_gate_reason IS NULL OR governor_gate_reason IN (
+                            'policy_unavailable', 'unresolved_provider_call',
+                            'daily_call_cap_reached', 'daily_token_cap_reached',
+                            'quiet_hours', 'idle_backoff'
+                        ))",
+                    ),
+                    ("governor_next_eligible_at", "TEXT"),
+                    (
+                        "governor_policy_revision",
+                        "INTEGER CHECK (governor_policy_revision IS NULL
+                                        OR governor_policy_revision >= 0)",
+                    ),
+                    (
+                        "governor_override_id",
+                        "TEXT REFERENCES hive_worker_governor_override_grants(id)
+                              ON DELETE SET NULL",
+                    ),
+                ] {
+                    if !Self::column_exists(&governor_tx, "hive_runs", column) {
+                        governor_tx.execute_batch(&format!(
+                            "ALTER TABLE hive_runs ADD COLUMN {column} {definition};"
+                        ))?;
+                    }
+                }
+                governor_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_hive_runs_governor_gate
+                         ON hive_runs(governor_gate_reason, governor_next_eligible_at)
+                         WHERE governor_gate_reason IS NOT NULL;",
+                )?;
+            }
+
+            if provider_guard_ready
+                && ["governor_origin", "governor_lane_key"]
+                    .iter()
+                    .all(|column| Self::column_exists(&governor_tx, "hive_runs", column))
+            {
+                governor_tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_provider_calls_binding_guard
+                    BEFORE INSERT ON hive_worker_provider_calls
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM hive_workers worker
+                        WHERE worker.id = NEW.worker_id
+                          AND worker.user_id IS NEW.owner_user_id
+                          AND worker.status = 'active'
+                          AND worker.revision = NEW.worker_revision
+                          AND worker.model = NEW.model_id
+                          AND worker.model_key_json = NEW.model_key_json
+                          AND worker.model_catalog_revision IS NEW.model_catalog_revision
+                          AND worker.permission_mode = NEW.permission_mode
+                          AND (
+                              (
+                                  NEW.group_id IS NULL
+                                  AND worker.dm_session_id = NEW.session_id
+                              )
+                              OR (
+                                  NEW.group_id IS NOT NULL
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_group_worker_lanes lane
+                                      JOIN hive_groups group_room
+                                        ON group_room.id = lane.group_id
+                                      JOIN hive_group_members member
+                                        ON member.group_id = lane.group_id
+                                       AND member.worker_id = lane.worker_id
+                                      WHERE lane.group_id = NEW.group_id
+                                        AND lane.worker_id = NEW.worker_id
+                                        AND lane.session_id = NEW.session_id
+                                        AND group_room.status = 'active'
+                                  )
+                              )
+                          )
+                          AND EXISTS (
+                              SELECT 1
+                              FROM hive_runs run
+                              JOIN hive_controllers controller
+                                ON controller.id = run.controller_id
+                              WHERE run.id = NEW.run_id
+                                AND COALESCE(run.worker_id, controller.worker_id)
+                                    = NEW.worker_id
+                                AND run.session_id = NEW.session_id
+                                AND run.status = 'running'
+                                AND run.lease_token = NEW.run_lease_token
+                                AND run.lease_epoch = NEW.run_lease_epoch
+                                AND run.lease_expires_at > NEW.started_at
+                                AND run.governor_origin = NEW.origin
+                                AND run.governor_lane_key = NEW.lane_key
+                          )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker provider-call binding mismatch');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_governor_override_consumption_guard
+                    BEFORE INSERT ON hive_worker_governor_override_consumptions
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM hive_worker_governor_override_grants grant_row
+                        JOIN hive_worker_provider_calls call
+                          ON call.provider_call_id = NEW.provider_call_id
+                        WHERE grant_row.id = NEW.grant_id
+                          AND call.override_grant_id = grant_row.id
+                          AND call.worker_id = grant_row.worker_id
+                          AND call.owner_user_id IS grant_row.owner_user_id
+                          AND grant_row.created_at <= call.started_at
+                          AND grant_row.expires_at > call.started_at
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker governor override consumption mismatch');
+                    END;
+                    "#,
+                )?;
+            }
+
+            governor_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (74)",
+                [],
+            )?;
+            governor_tx.commit()?;
+        }
+
+        // Migration 75: typed, workspace-neutral Worker conversation runs.
+        //
+        // A Worker run freezes its least-privilege execution context rather
+        // than allowing the execution host to substitute its own cwd. Final
+        // responses are linked to deterministic canonical rows, and user
+        // input accepted during an active response stays durable outside the
+        // canonical transcript until that response commits.
+        if current_version < 75 {
+            info!("Running migration 75: typed Worker conversation execution");
+
+            if Self::table_exists(&self.conn, "hive_runs") {
+                const INTRODUCTION_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction')";
+                const CONVERSATION_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 75: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [INTRODUCTION_KINDS, CONVERSATION_KINDS],
+                    )
+                    .context("Migration 75: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 75: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_conversation") || !runs_sql.contains("kind IN"),
+                    "Migration 75 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let conversation_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Worker conversation migration lock")?;
+
+            if Self::table_exists(&conversation_tx, "hive_runs") {
+                for (column, definition) in [
+                    (
+                        "execution_context_json",
+                        "TEXT CHECK (
+                            execution_context_json IS NULL OR (
+                                json_valid(execution_context_json)
+                                AND length(execution_context_json) BETWEEN 2 AND 16384
+                            )
+                        )",
+                    ),
+                    (
+                        "conversation_through_message_id",
+                        "INTEGER REFERENCES messages(id) ON DELETE SET NULL",
+                    ),
+                    (
+                        "response_message_id",
+                        "INTEGER REFERENCES messages(id) ON DELETE SET NULL",
+                    ),
+                    (
+                        "response_group_message_id",
+                        "TEXT REFERENCES hive_group_messages(id) ON DELETE SET NULL",
+                    ),
+                    ("response_provider_call_id", "TEXT"),
+                ] {
+                    if !Self::column_exists(&conversation_tx, "hive_runs", column) {
+                        conversation_tx.execute_batch(&format!(
+                            "ALTER TABLE hive_runs ADD COLUMN {column} {definition};"
+                        ))?;
+                    }
+                }
+                if ["kind", "objective_message_id"]
+                    .iter()
+                    .all(|column| Self::column_exists(&conversation_tx, "hive_runs", column))
+                {
+                    conversation_tx.execute_batch(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_conversation_objective
+                             ON hive_runs(objective_message_id)
+                             WHERE kind = 'worker_conversation'
+                               AND objective_message_id IS NOT NULL;",
+                    )?;
+                }
+                conversation_tx.execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_runs_response_message
+                         ON hive_runs(response_message_id)
+                         WHERE response_message_id IS NOT NULL;
+                     CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_runs_response_group_message
+                         ON hive_runs(response_group_message_id)
+                         WHERE response_group_message_id IS NOT NULL;
+                     CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_runs_response_provider_call
+                         ON hive_runs(response_provider_call_id)
+                         WHERE response_provider_call_id IS NOT NULL;",
+                )?;
+                if ["kind", "status", "worker_id", "available_at"]
+                    .iter()
+                    .all(|column| Self::column_exists(&conversation_tx, "hive_runs", column))
+                {
+                    conversation_tx.execute_batch(
+                        "CREATE INDEX IF NOT EXISTS idx_hive_worker_conversation_recovery
+                             ON hive_runs(kind, status, worker_id, available_at)
+                             WHERE kind = 'worker_conversation';",
+                    )?;
+                }
+            }
+
+            // Schema 74 was developed immediately before this migration. A
+            // pre-75 preview database may therefore have the provider ledger
+            // without the exact Worker revision column. Preserve old rows as
+            // provenance-incomplete (NULL, which loading rejects) rather than
+            // fabricating the historical revision from mutable current state.
+            if Self::table_exists(&conversation_tx, "hive_worker_provider_calls")
+                && !Self::column_exists(
+                    &conversation_tx,
+                    "hive_worker_provider_calls",
+                    "worker_revision",
+                )
+            {
+                conversation_tx.execute_batch(
+                    "ALTER TABLE hive_worker_provider_calls
+                     ADD COLUMN worker_revision INTEGER
+                     CHECK(worker_revision IS NULL OR worker_revision >= 1);",
+                )?;
+            }
+
+            let provider_revision_guard_ready = [
+                "hive_worker_provider_calls",
+                "hive_workers",
+                "hive_runs",
+                "hive_controllers",
+                "hive_group_worker_lanes",
+                "hive_groups",
+                "hive_group_members",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&conversation_tx, table))
+                && [
+                    "id",
+                    "user_id",
+                    "status",
+                    "revision",
+                    "dm_session_id",
+                    "model",
+                    "model_key_json",
+                    "model_catalog_revision",
+                    "permission_mode",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&conversation_tx, "hive_workers", column))
+                && [
+                    "worker_revision",
+                    "owner_user_id",
+                    "session_id",
+                    "group_id",
+                    "run_id",
+                    "run_lease_token",
+                    "run_lease_epoch",
+                    "run_lease_expires_at",
+                    "origin",
+                    "lane_key",
+                    "model_id",
+                    "model_key_json",
+                    "model_catalog_revision",
+                    "permission_mode",
+                ]
+                .iter()
+                .all(|column| {
+                    Self::column_exists(&conversation_tx, "hive_worker_provider_calls", column)
+                })
+                && [
+                    "id",
+                    "controller_id",
+                    "session_id",
+                    "worker_id",
+                    "status",
+                    "lease_token",
+                    "lease_epoch",
+                    "lease_expires_at",
+                    "governor_origin",
+                    "governor_lane_key",
+                    "execution_context_json",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&conversation_tx, "hive_runs", column));
+            if provider_revision_guard_ready {
+                conversation_tx.execute_batch(
+                    r#"
+                    DROP TRIGGER IF EXISTS hive_worker_provider_calls_binding_guard;
+                    CREATE TRIGGER hive_worker_provider_calls_binding_guard
+                    BEFORE INSERT ON hive_worker_provider_calls
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM hive_workers worker
+                        WHERE worker.id = NEW.worker_id
+                          AND worker.user_id IS NEW.owner_user_id
+                          AND worker.status = 'active'
+                          AND worker.revision = NEW.worker_revision
+                          AND worker.model = NEW.model_id
+                          AND worker.model_key_json = NEW.model_key_json
+                          AND worker.model_catalog_revision IS NEW.model_catalog_revision
+                          AND worker.permission_mode = NEW.permission_mode
+                          AND (
+                              (
+                                  NEW.group_id IS NULL
+                                  AND worker.dm_session_id = NEW.session_id
+                              )
+                              OR (
+                                  NEW.group_id IS NOT NULL
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_group_worker_lanes lane
+                                      JOIN hive_groups group_room
+                                        ON group_room.id = lane.group_id
+                                      JOIN hive_group_members member
+                                        ON member.group_id = lane.group_id
+                                       AND member.worker_id = lane.worker_id
+                                      WHERE lane.group_id = NEW.group_id
+                                        AND lane.worker_id = NEW.worker_id
+                                        AND lane.session_id = NEW.session_id
+                                        AND group_room.status = 'active'
+                                  )
+                              )
+                          )
+                          AND EXISTS (
+                              SELECT 1
+                              FROM hive_runs run
+                              JOIN hive_controllers controller
+                                ON controller.id = run.controller_id
+                              WHERE run.id = NEW.run_id
+                                AND COALESCE(run.worker_id, controller.worker_id)
+                                    = NEW.worker_id
+                                AND run.session_id = NEW.session_id
+                                AND run.status = 'running'
+                                AND run.lease_token = NEW.run_lease_token
+                                AND run.lease_epoch = NEW.run_lease_epoch
+                                AND run.lease_expires_at > NEW.started_at
+                                AND run.governor_origin = NEW.origin
+                                AND run.governor_lane_key = NEW.lane_key
+                                AND CAST(json_extract(
+                                    run.execution_context_json,
+                                    '$.mode.worker_revision'
+                                ) AS INTEGER) = NEW.worker_revision
+                          )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker provider-call binding mismatch');
+                    END;
+                    "#,
+                )?;
+            }
+
+            let input_dependencies_ready = [
+                "hive_workers",
+                "hive_controllers",
+                "sessions",
+                "hive_runs",
+                "messages",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&conversation_tx, table));
+            if input_dependencies_ready {
+                conversation_tx.execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_worker_conversation_inputs (
+                        id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 256),
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id) ON DELETE CASCADE,
+                        owner_user_id TEXT,
+                        session_id TEXT NOT NULL
+                            REFERENCES sessions(id) ON DELETE CASCADE,
+                        request_id TEXT NOT NULL
+                            CHECK(length(request_id) BETWEEN 1 AND 256),
+                        accepted_while_run_id TEXT NOT NULL
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        content_json TEXT NOT NULL CHECK(
+                            json_valid(content_json)
+                            AND length(content_json) BETWEEN 2 AND 262144
+                        ),
+                        state TEXT NOT NULL
+                            CHECK(state IN ('staged', 'materialized')),
+                        canonical_message_id INTEGER UNIQUE
+                            REFERENCES messages(id) ON DELETE RESTRICT,
+                        assigned_run_id TEXT
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        accepted_at TEXT NOT NULL,
+                        materialized_at TEXT,
+                        UNIQUE(session_id, request_id),
+                        CHECK(
+                            (state = 'staged'
+                             AND canonical_message_id IS NULL
+                             AND assigned_run_id IS NULL
+                             AND materialized_at IS NULL)
+                            OR
+                            (state = 'materialized'
+                             AND canonical_message_id IS NOT NULL
+                             AND assigned_run_id IS NOT NULL
+                             AND materialized_at IS NOT NULL)
+                        )
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_conversation_inputs_staged
+                        ON hive_worker_conversation_inputs(session_id, accepted_at, id)
+                        WHERE state = 'staged';
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_conversation_inputs_insert_guard
+                    BEFORE INSERT ON hive_worker_conversation_inputs
+                    WHEN NEW.state <> 'staged'
+                      OR NEW.canonical_message_id IS NOT NULL
+                      OR NEW.assigned_run_id IS NOT NULL
+                      OR NEW.materialized_at IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM hive_workers worker
+                          JOIN sessions session ON session.id = NEW.session_id
+                          JOIN hive_runs active
+                            ON active.id = NEW.accepted_while_run_id
+                          JOIN hive_controllers controller
+                            ON controller.id = active.controller_id
+                          WHERE worker.id = NEW.worker_id
+                            AND worker.user_id IS NEW.owner_user_id
+                            AND worker.status = 'active'
+                            AND worker.dm_session_id = session.id
+                            AND session.user_id IS worker.user_id
+                            AND session.session_type = 'hive'
+                            AND active.worker_id = worker.id
+                            AND active.session_id = session.id
+                            AND active.status IN (
+                                'queued', 'leased', 'running', 'sleeping',
+                                'retry_wait', 'recovery_required'
+                            )
+                            AND controller.worker_id = worker.id
+                            AND controller.session_id = session.id
+                            AND controller.user_id IS worker.user_id
+                            AND controller.status = 'active'
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker conversation input binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_conversation_inputs_identity_immutable
+                    BEFORE UPDATE OF id, worker_id, owner_user_id, session_id, request_id,
+                                     accepted_while_run_id, content_json, accepted_at
+                    ON hive_worker_conversation_inputs
+                    WHEN OLD.id IS NOT NEW.id
+                      OR OLD.worker_id IS NOT NEW.worker_id
+                      OR OLD.owner_user_id IS NOT NEW.owner_user_id
+                      OR OLD.session_id IS NOT NEW.session_id
+                      OR OLD.request_id IS NOT NEW.request_id
+                      OR OLD.accepted_while_run_id IS NOT NEW.accepted_while_run_id
+                      OR OLD.content_json IS NOT NEW.content_json
+                      OR OLD.accepted_at IS NOT NEW.accepted_at
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker conversation input identity is immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_conversation_inputs_no_delete
+                    BEFORE DELETE ON hive_worker_conversation_inputs
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker conversation input ledger is append-only');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_conversation_inputs_transition_guard
+                    BEFORE UPDATE OF state, canonical_message_id, assigned_run_id, materialized_at
+                    ON hive_worker_conversation_inputs
+                    WHEN NOT (
+                        OLD.state = 'staged'
+                        AND NEW.state = 'materialized'
+                        AND OLD.canonical_message_id IS NULL
+                        AND NEW.canonical_message_id IS NOT NULL
+                        AND OLD.assigned_run_id IS NULL
+                        AND NEW.assigned_run_id IS NOT NULL
+                        AND OLD.materialized_at IS NULL
+                        AND NEW.materialized_at IS NOT NULL
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker conversation input transition');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_conversation_inputs_materialize_guard
+                    BEFORE UPDATE OF state, canonical_message_id, assigned_run_id, materialized_at
+                    ON hive_worker_conversation_inputs
+                    WHEN NEW.state = 'materialized' AND NOT EXISTS (
+                        SELECT 1
+                        FROM messages message
+                        JOIN hive_runs assigned ON assigned.id = NEW.assigned_run_id
+                        JOIN hive_runs completed
+                          ON completed.id = NEW.accepted_while_run_id
+                        WHERE message.id = NEW.canonical_message_id
+                          AND message.session_id = NEW.session_id
+                          AND message.role = 'user'
+                          AND assigned.kind = 'worker_conversation'
+                          AND assigned.worker_id = NEW.worker_id
+                          AND assigned.session_id = NEW.session_id
+                          AND assigned.objective_message_id = NEW.canonical_message_id
+                          AND assigned.conversation_through_message_id
+                              = NEW.canonical_message_id
+                          AND completed.worker_id = NEW.worker_id
+                          AND completed.session_id = NEW.session_id
+                          AND completed.response_message_id IS NOT NULL
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid materialized Worker input binding');
+                    END;
+                    "#,
+                )?;
+            }
+
+            let run_guard_ready = [
+                "hive_runs",
+                "hive_workers",
+                "hive_controllers",
+                "sessions",
+                "messages",
+                "hive_group_worker_lanes",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&conversation_tx, table))
+                && [
+                    "worker_id",
+                    "objective_message_id",
+                    "group_id",
+                    "group_turn_id",
+                    "trigger_message_id",
+                    "governor_origin",
+                    "governor_lane_key",
+                    "execution_context_json",
+                    "conversation_through_message_id",
+                    "response_message_id",
+                    "response_group_message_id",
+                    "response_provider_call_id",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&conversation_tx, "hive_runs", column));
+            if run_guard_ready {
+                conversation_tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_context_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.worker_id IS NOT NULL AND (
+                        NEW.execution_context_json IS NULL
+                        OR json_extract(NEW.execution_context_json, '$.schema_version') <> 1
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            NOT IN (
+                                'worker_conversation_neutral',
+                                'worker_workspace_attached'
+                            )
+                        OR json_extract(NEW.execution_context_json, '$.mode.worker_id')
+                            IS NOT NEW.worker_id
+                        OR CAST(json_extract(
+                            NEW.execution_context_json, '$.mode.worker_revision'
+                        ) AS INTEGER) <> (
+                            SELECT worker.revision FROM hive_workers worker
+                            WHERE worker.id = NEW.worker_id
+                        )
+                        OR NEW.governor_origin IS NULL
+                        OR NEW.governor_lane_key IS NULL
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                                = 'direct_message'
+                            AND NEW.governor_lane_key <> 'dm'
+                        )
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind') = 'group'
+                            AND NEW.governor_lane_key <> 'group:' || json_extract(
+                                NEW.execution_context_json, '$.mode.lane.group_id'
+                            )
+                        )
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            NOT IN ('direct_message', 'group')
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run has no exact typed execution binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_response_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.response_message_id IS NOT NULL
+                      OR NEW.response_group_message_id IS NOT NULL
+                      OR NEW.response_provider_call_id IS NOT NULL
+                    BEGIN
+                        SELECT RAISE(ABORT, 'new Worker run cannot have a response linkage');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_legacy_resume_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind = 'legacy_resume' AND NEW.worker_id IS NOT NULL
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker conversations cannot use legacy_resume');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_conversation_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind = 'worker_conversation' AND (
+                        NEW.worker_id IS NULL
+                        OR NEW.session_id IS NULL
+                        OR NEW.objective_message_id IS NULL
+                        OR NEW.conversation_through_message_id IS NULL
+                        OR NEW.objective_message_id <> NEW.conversation_through_message_id
+                        OR NEW.group_id IS NOT NULL
+                        OR NEW.group_turn_id IS NOT NULL
+                        OR NEW.trigger_message_id IS NOT NULL
+                        OR NEW.governor_origin <> 'user_dm'
+                        OR NEW.governor_lane_key <> 'dm'
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            <> 'direct_message'
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM hive_workers worker
+                            JOIN hive_controllers controller
+                              ON controller.id = NEW.controller_id
+                            JOIN sessions session ON session.id = NEW.session_id
+                            JOIN messages objective
+                              ON objective.id = NEW.objective_message_id
+                            WHERE worker.id = NEW.worker_id
+                              AND worker.status = 'active'
+                              AND worker.dm_session_id = NEW.session_id
+                              AND controller.worker_id = worker.id
+                              AND controller.session_id = session.id
+                              AND controller.user_id IS worker.user_id
+                              AND controller.status = 'active'
+                              AND session.user_id IS worker.user_id
+                              AND session.session_type = 'hive'
+                              AND objective.session_id = session.id
+                              AND objective.role = 'user'
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker conversation run binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_binding_immutable
+                    BEFORE UPDATE OF worker_id, session_id, objective_message_id,
+                                     execution_context_json,
+                                     conversation_through_message_id,
+                                     governor_origin, governor_lane_key
+                    ON hive_runs
+                    WHEN OLD.worker_id IS NOT NEW.worker_id
+                      OR (
+                          OLD.worker_id IS NOT NULL AND (
+                              OLD.session_id IS NOT NEW.session_id
+                              OR OLD.objective_message_id IS NOT NEW.objective_message_id
+                              OR OLD.execution_context_json IS NOT NEW.execution_context_json
+                              OR OLD.conversation_through_message_id
+                                  IS NOT NEW.conversation_through_message_id
+                              OR OLD.governor_origin IS NOT NEW.governor_origin
+                              OR OLD.governor_lane_key IS NOT NEW.governor_lane_key
+                          )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run execution binding is immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_response_message_link_guard
+                    BEFORE UPDATE OF response_message_id ON hive_runs
+                    WHEN NEW.response_message_id IS NOT NULL AND (
+                        NEW.response_provider_call_id IS NULL OR NOT EXISTS (
+                        SELECT 1 FROM messages message
+                        WHERE message.id = NEW.response_message_id
+                          AND message.session_id = NEW.session_id
+                          AND message.role = 'assistant'
+                          AND (
+                              message.idempotency_key =
+                                  'worker-run:' || NEW.id || ':assistant:final'
+                              OR (
+                                  NEW.kind = 'worker_conversation'
+                                  AND NEW.worker_id IS NOT NULL
+                                  AND NEW.objective_message_id IS NOT NULL
+                                  AND message.idempotency_key =
+                                      'introduction:' || NEW.worker_id || ':user:'
+                                      || NEW.objective_message_id || ':context-response'
+                              )
+                          )
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker run response message');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_response_tuple_guard
+                    BEFORE UPDATE OF response_message_id, response_provider_call_id ON hive_runs
+                    WHEN (NEW.response_message_id IS NULL)
+                         <> (NEW.response_provider_call_id IS NULL)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker response message and provider provenance must link atomically');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_response_message_immutable
+                    BEFORE UPDATE OF response_message_id, response_group_message_id,
+                                     response_provider_call_id ON hive_runs
+                    WHEN (OLD.response_message_id IS NOT NULL
+                          AND OLD.response_message_id IS NOT NEW.response_message_id)
+                      OR (OLD.response_group_message_id IS NOT NULL
+                          AND OLD.response_group_message_id
+                              IS NOT NEW.response_group_message_id)
+                      OR (OLD.response_provider_call_id IS NOT NULL
+                          AND OLD.response_provider_call_id
+                              IS NOT NEW.response_provider_call_id)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run response linkage is immutable');
+                    END;
+                    "#,
+                )?;
+            }
+
+            let response_provider_guard_ready = run_guard_ready
+                && [
+                    "hive_worker_provider_calls",
+                    "hive_worker_provider_call_outcomes",
+                    "hive_worker_introductions",
+                ]
+                .iter()
+                .all(|table| Self::table_exists(&conversation_tx, table));
+            if response_provider_guard_ready {
+                conversation_tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_response_provider_call_guard
+                    BEFORE UPDATE OF response_provider_call_id ON hive_runs
+                    WHEN NEW.response_provider_call_id IS NOT NULL AND NOT EXISTS (
+                        SELECT 1
+                        FROM hive_worker_provider_calls call
+                        LEFT JOIN hive_worker_provider_call_outcomes outcome
+                          ON outcome.provider_call_id = call.provider_call_id
+                        WHERE call.provider_call_id = NEW.response_provider_call_id
+                          AND call.worker_id = NEW.worker_id
+                          AND call.session_id = NEW.session_id
+                          AND call.run_id = NEW.id
+                          AND call.run_lease_token = NEW.lease_token
+                          AND call.run_lease_epoch = NEW.lease_epoch
+                          AND call.call_kind IN (
+                              'agent_turn', 'worker_introduction_onboarding'
+                          )
+                          AND (
+                              outcome.provider_call_id IS NULL
+                              OR (
+                                  outcome.state = 'completed'
+                                  AND outcome.outcome = 'completed'
+                                  AND outcome.remote_acceptance = 'acknowledged'
+                              )
+                              OR (
+                                  outcome.state = 'completed'
+                                  AND outcome.outcome = 'semantic_invalid'
+                                  AND outcome.remote_acceptance = 'acknowledged'
+                                  AND NEW.kind = 'worker_conversation'
+                                  AND NEW.group_id IS NULL
+                                  AND NEW.objective_message_id IS NOT NULL
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_worker_introductions introduction
+                                      JOIN messages objective
+                                        ON objective.id = NEW.objective_message_id
+                                      WHERE introduction.worker_id = NEW.worker_id
+                                        AND introduction.status = 'awaiting_context'
+                                        AND introduction.opening_message_id IS NOT NULL
+                                        AND objective.session_id = NEW.session_id
+                                        AND objective.role = 'user'
+                                  )
+                              )
+                          )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker response provider provenance');
+                    END;
+                    "#,
+                )?;
+            }
+
+            let group_response_guard_ready =
+                run_guard_ready && Self::table_exists(&conversation_tx, "hive_group_messages");
+            if group_response_guard_ready {
+                conversation_tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_group_response_link_guard
+                    BEFORE UPDATE OF response_group_message_id ON hive_runs
+                    WHEN NEW.response_group_message_id IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM hive_group_messages message
+                        WHERE message.id = NEW.response_group_message_id
+                          AND message.group_id = NEW.group_id
+                          AND message.turn_id = NEW.group_turn_id
+                          AND message.sender_kind = 'worker'
+                          AND message.sender_worker_id = NEW.worker_id
+                          AND message.sender_run_id = NEW.id
+                          AND message.idempotency_key =
+                              'group-turn:' || NEW.group_turn_id
+                              || ':worker:' || NEW.worker_id
+                              || ':run:' || NEW.id || ':final'
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker group response message');
+                    END;
+                    "#,
+                )?;
+            }
+
+            conversation_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (75)",
+                [],
+            )?;
+            conversation_tx.commit()?;
+        }
+
+        // Migration 76: durable Hive Worker Workflow Goal attempts.
+        //
+        // A Workflow run is bound to exactly one canonical Goal attempt and
+        // an attached Worker workspace.  Its terminal authority is a bounded,
+        // append-only outcome record, never an ordinary assistant message and
+        // never a model-selected Goal/plan/step identifier.
+        //
+        // This migration also repairs preview databases which were stamped 75
+        // while the response-provider provenance column and its guards were
+        // still being developed.  Version stamps are not treated as proof
+        // that those safety objects exist.
+        if current_version < 76 {
+            info!("Running migration 76: durable Hive Worker Workflow Goals");
+
+            if Self::table_exists(&self.conn, "hive_runs") {
+                const CONVERSATION_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation')";
+                const WORKFLOW_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation', 'worker_workflow')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 76: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [CONVERSATION_KINDS, WORKFLOW_KINDS],
+                    )
+                    .context("Migration 76: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 76: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_workflow") || !runs_sql.contains("kind IN"),
+                    "Migration 76 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let workflow_worker_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Worker Workflow migration lock")?;
+
+            if Self::table_exists(&workflow_worker_tx, "hive_runs") {
+                // Compatibility catch-up for schema-75 preview databases.
+                if !Self::column_exists(
+                    &workflow_worker_tx,
+                    "hive_runs",
+                    "response_provider_call_id",
+                ) {
+                    workflow_worker_tx.execute_batch(
+                        "ALTER TABLE hive_runs ADD COLUMN response_provider_call_id TEXT;",
+                    )?;
+                }
+                if !Self::column_exists(&workflow_worker_tx, "hive_runs", "workflow_goal_id") {
+                    workflow_worker_tx.execute_batch(
+                        "ALTER TABLE hive_runs ADD COLUMN workflow_goal_id TEXT
+                             REFERENCES workflow_goals(id) ON DELETE RESTRICT;",
+                    )?;
+                }
+                if !Self::column_exists(&workflow_worker_tx, "hive_runs", "workflow_attempt_id") {
+                    workflow_worker_tx.execute_batch(
+                        "ALTER TABLE hive_runs ADD COLUMN workflow_attempt_id TEXT
+                             REFERENCES workflow_execution_attempts(id) ON DELETE RESTRICT;",
+                    )?;
+                }
+                workflow_worker_tx.execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_runs_response_provider_call
+                         ON hive_runs(response_provider_call_id)
+                         WHERE response_provider_call_id IS NOT NULL;
+                     CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_workflow_attempt
+                         ON hive_runs(workflow_attempt_id)
+                         WHERE workflow_attempt_id IS NOT NULL;
+                     CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_workflow_one_nonterminal
+                         ON hive_runs(workflow_goal_id)
+                         WHERE kind = 'worker_workflow'
+                           AND status IN (
+                               'queued', 'leased', 'running', 'sleeping',
+                               'awaiting_input', 'retry_wait', 'recovery_required'
+                           );
+                     CREATE INDEX IF NOT EXISTS idx_hive_worker_workflow_recovery
+                         ON hive_runs(kind, status, workflow_goal_id, available_at)
+                         WHERE kind = 'worker_workflow';",
+                )?;
+            }
+
+            let workflow_dependencies_ready = [
+                "hive_runs",
+                "hive_workers",
+                "hive_controllers",
+                "hive_worker_introductions",
+                "hive_worker_provider_calls",
+                "hive_worker_provider_call_outcomes",
+                "sessions",
+                "workflow_goals",
+                "workflow_plan_revisions",
+                "workflow_plan_steps",
+                "workflow_step_dependencies",
+                "workflow_execution_attempts",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&workflow_worker_tx, table));
+
+            if workflow_dependencies_ready {
+                workflow_worker_tx.execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_worker_goal_outcomes (
+                        run_id TEXT PRIMARY KEY
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id) ON DELETE RESTRICT,
+                        owner_user_id TEXT,
+                        session_id TEXT NOT NULL
+                            REFERENCES sessions(id) ON DELETE RESTRICT,
+                        workflow_goal_id TEXT NOT NULL
+                            REFERENCES workflow_goals(id) ON DELETE RESTRICT,
+                        workflow_attempt_id TEXT NOT NULL UNIQUE
+                            REFERENCES workflow_execution_attempts(id) ON DELETE RESTRICT,
+                        plan_revision_id TEXT NOT NULL
+                            REFERENCES workflow_plan_revisions(id) ON DELETE RESTRICT,
+                        step_id TEXT NOT NULL
+                            REFERENCES workflow_plan_steps(id) ON DELETE RESTRICT,
+                        workspace_dir TEXT NOT NULL
+                            CHECK(length(workspace_dir) BETWEEN 1 AND 16384),
+                        provider_call_ids_json TEXT NOT NULL CHECK(
+                            json_valid(provider_call_ids_json)
+                            AND json_type(provider_call_ids_json) = 'array'
+                            AND json_array_length(provider_call_ids_json) BETWEEN 1 AND 256
+                        ),
+                        outcome TEXT NOT NULL CHECK(outcome IN (
+                            'progressed', 'blocked', 'failed',
+                            'cancelled', 'budget_exhausted', 'needs_attention'
+                        )),
+                        evidence_json TEXT NOT NULL CHECK(
+                            json_valid(evidence_json)
+                            AND json_type(evidence_json) = 'array'
+                            AND json_array_length(evidence_json) <= 32
+                            AND length(evidence_json) <= 131072
+                        ),
+                        effect_json TEXT NOT NULL CHECK(
+                            json_valid(effect_json) AND length(effect_json) <= 16384
+                        ),
+                        counters_json TEXT NOT NULL CHECK(
+                            json_valid(counters_json) AND length(counters_json) <= 4096
+                        ),
+                        no_progress_fingerprint TEXT,
+                        no_progress_streak INTEGER NOT NULL DEFAULT 0
+                            CHECK(no_progress_streak BETWEEN 0 AND 3),
+                        committed_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_worker_goal_outcomes_goal
+                        ON hive_worker_goal_outcomes(
+                            workflow_goal_id, committed_at DESC, run_id
+                        );
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_outcomes_no_update
+                    BEFORE UPDATE ON hive_worker_goal_outcomes
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Goal outcomes are immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_outcomes_no_delete
+                    BEFORE DELETE ON hive_worker_goal_outcomes
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Goal outcomes are append-only');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_worker_context_insert_guard;
+                    CREATE TRIGGER hive_runs_worker_context_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.worker_id IS NOT NULL AND (
+                        NEW.execution_context_json IS NULL
+                        OR json_extract(NEW.execution_context_json, '$.schema_version') <> 1
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            NOT IN (
+                                'worker_conversation_neutral',
+                                'worker_workspace_attached',
+                                'worker_goal'
+                            )
+                        OR json_extract(NEW.execution_context_json, '$.mode.worker_id')
+                            IS NOT NEW.worker_id
+                        OR CAST(json_extract(
+                            NEW.execution_context_json, '$.mode.worker_revision'
+                        ) AS INTEGER) <> (
+                            SELECT worker.revision FROM hive_workers worker
+                            WHERE worker.id = NEW.worker_id
+                        )
+                        OR NEW.governor_origin IS NULL
+                        OR NEW.governor_lane_key IS NULL
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                                = 'direct_message'
+                            AND NEW.governor_lane_key <> 'dm'
+                        )
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind') = 'group'
+                            AND NEW.governor_lane_key <> 'group:' || json_extract(
+                                NEW.execution_context_json, '$.mode.lane.group_id'
+                            )
+                        )
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            NOT IN ('direct_message', 'group')
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run has no exact typed execution binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_non_workflow_link_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind <> 'worker_workflow' AND (
+                        NEW.workflow_goal_id IS NOT NULL
+                        OR NEW.workflow_attempt_id IS NOT NULL
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            = 'worker_goal'
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'non-Workflow run cannot carry Worker Goal authority');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_non_workflow_link_update_guard
+                    BEFORE UPDATE OF kind, workflow_goal_id, workflow_attempt_id,
+                                     execution_context_json ON hive_runs
+                    WHEN NEW.kind <> 'worker_workflow' AND (
+                        NEW.workflow_goal_id IS NOT NULL
+                        OR NEW.workflow_attempt_id IS NOT NULL
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            = 'worker_goal'
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'non-Workflow run cannot carry Worker Goal authority');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_workflow_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind = 'worker_workflow' AND (
+                        NEW.worker_id IS NULL
+                        OR NEW.session_id IS NULL
+                        OR NEW.workflow_goal_id IS NULL
+                        OR NEW.workflow_attempt_id IS NULL
+                        OR NEW.objective_message_id IS NOT NULL
+                        OR NEW.conversation_through_message_id IS NOT NULL
+                        OR NEW.group_id IS NOT NULL
+                        OR NEW.group_turn_id IS NOT NULL
+                        OR NEW.trigger_message_id IS NOT NULL
+                        OR NEW.governor_origin NOT IN (
+                            'user_workflow_activation', 'workflow_rollover'
+                        )
+                        OR NEW.governor_lane_key <> 'dm'
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            <> 'worker_goal'
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            <> 'direct_message'
+                        OR json_extract(NEW.execution_context_json, '$.mode.goal_id')
+                            IS NOT NEW.workflow_goal_id
+                        OR json_extract(NEW.execution_context_json, '$.mode.attempt_id')
+                            IS NOT NEW.workflow_attempt_id
+                        OR json_extract(NEW.execution_context_json, '$.mode.workspace_mode')
+                            NOT IN ('selected', 'created')
+                        OR json_extract(NEW.execution_context_json, '$.mode.working_dir')
+                            NOT GLOB '/*'
+                        OR json_extract(NEW.execution_context_json, '$.mode.project_dir')
+                            IS NOT json_extract(
+                                NEW.execution_context_json, '$.mode.working_dir'
+                            )
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM hive_workers worker
+                            JOIN hive_controllers controller
+                              ON controller.id = NEW.controller_id
+                            JOIN hive_worker_introductions introduction
+                              ON introduction.worker_id = worker.id
+                            JOIN sessions session ON session.id = NEW.session_id
+                            JOIN workflow_goals goal
+                              ON goal.id = NEW.workflow_goal_id
+                            JOIN workflow_execution_attempts attempt
+                              ON attempt.id = NEW.workflow_attempt_id
+                            JOIN workflow_plan_revisions plan
+                              ON plan.id = attempt.plan_revision_id
+                            JOIN workflow_plan_steps step
+                              ON step.id = attempt.step_id
+                            WHERE worker.id = NEW.worker_id
+                              AND worker.status = 'active'
+                              AND worker.dm_session_id = NEW.session_id
+                              AND worker.user_id IS session.user_id
+                              AND controller.worker_id = worker.id
+                              AND controller.session_id = session.id
+                              AND controller.user_id IS worker.user_id
+                              AND controller.status = 'active'
+                              AND introduction.status IN ('confirmed', 'skipped')
+                              AND session.session_type = 'hive'
+                              AND session.workspace_mode IN ('selected', 'created')
+                              AND session.working_dir GLOB '/*'
+                              AND session.project_dir = session.working_dir
+                              AND json_extract(
+                                  NEW.execution_context_json, '$.mode.working_dir'
+                              ) = session.working_dir
+                              AND goal.session_id = session.id
+                              AND goal.status = 'active'
+                              AND attempt.goal_id = goal.id
+                              AND attempt.status = 'running'
+                              AND attempt.goal_revision_at_start = goal.revision
+                              AND plan.goal_id = goal.id
+                              AND plan.status = 'active'
+                              AND step.plan_revision_id = plan.id
+                              AND step.status = 'in_progress'
+                              AND step.claimed_attempt_id = attempt.id
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM workflow_step_dependencies dependency
+                                  JOIN workflow_plan_steps prerequisite
+                                    ON prerequisite.id = dependency.depends_on_step_id
+                                  WHERE dependency.step_id = step.id
+                                    AND prerequisite.plan_revision_id = plan.id
+                                    AND prerequisite.status NOT IN ('completed', 'skipped')
+                              )
+                              AND CAST(json_extract(
+                                  NEW.execution_context_json, '$.mode.goal_revision'
+                              ) AS INTEGER) = goal.revision
+                              AND CAST(json_extract(
+                                  NEW.execution_context_json,
+                                  '$.mode.workflow_aggregate_revision'
+                              ) AS INTEGER) = goal.revision
+                              AND json_extract(
+                                  NEW.execution_context_json, '$.mode.plan_revision_id'
+                              ) = plan.id
+                              AND CAST(json_extract(
+                                  NEW.execution_context_json,
+                                  '$.mode.plan_revision_number'
+                              ) AS INTEGER) = plan.revision_number
+                              AND json_extract(
+                                  NEW.execution_context_json, '$.mode.step_id'
+                              ) = step.id
+                              AND CAST(json_extract(
+                                  NEW.execution_context_json, '$.mode.step_revision'
+                              ) AS INTEGER) = step.revision
+                              AND json_extract(NEW.config_json, '$.model') = worker.model
+                              AND json_extract(NEW.config_json, '$.working_dir')
+                                  = session.working_dir
+                              AND json_extract(NEW.config_json, '$.project_dir')
+                                  = session.project_dir
+                              AND NOT EXISTS (
+                                  SELECT configured.fullkey,
+                                         configured.type,
+                                         configured.atom,
+                                         COUNT(*)
+                                  FROM json_tree(json_extract(
+                                      NEW.config_json, '$.model_key'
+                                  )) configured
+                                  GROUP BY configured.fullkey,
+                                           configured.type,
+                                           configured.atom
+                                  EXCEPT
+                                  SELECT persisted.fullkey,
+                                         persisted.type,
+                                         persisted.atom,
+                                         COUNT(*)
+                                  FROM json_tree(worker.model_key_json) persisted
+                                  GROUP BY persisted.fullkey,
+                                           persisted.type,
+                                           persisted.atom
+                              )
+                              AND NOT EXISTS (
+                                  SELECT persisted.fullkey,
+                                         persisted.type,
+                                         persisted.atom,
+                                         COUNT(*)
+                                  FROM json_tree(worker.model_key_json) persisted
+                                  GROUP BY persisted.fullkey,
+                                           persisted.type,
+                                           persisted.atom
+                                  EXCEPT
+                                  SELECT configured.fullkey,
+                                         configured.type,
+                                         configured.atom,
+                                         COUNT(*)
+                                  FROM json_tree(json_extract(
+                                      NEW.config_json, '$.model_key'
+                                  )) configured
+                                  GROUP BY configured.fullkey,
+                                           configured.type,
+                                           configured.atom
+                              )
+                              AND json_extract(
+                                  NEW.config_json, '$.model_catalog_revision'
+                              ) IS worker.model_catalog_revision
+                              AND json_extract(
+                                  NEW.config_json, '$.permission_mode'
+                              ) = worker.permission_mode
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Workflow run binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_workflow_link_immutable
+                    BEFORE UPDATE OF workflow_goal_id, workflow_attempt_id ON hive_runs
+                    WHEN OLD.workflow_goal_id IS NOT NEW.workflow_goal_id
+                      OR OLD.workflow_attempt_id IS NOT NEW.workflow_attempt_id
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Workflow linkage is immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_provider_calls_workflow_guard
+                    BEFORE INSERT ON hive_worker_provider_calls
+                    WHEN (
+                        EXISTS (
+                            SELECT 1 FROM hive_runs run
+                            WHERE run.id = NEW.run_id
+                              AND run.kind = 'worker_workflow'
+                              AND (
+                                  NEW.workflow_goal_id IS NOT run.workflow_goal_id
+                                  OR NEW.workflow_attempt_id IS NOT run.workflow_attempt_id
+                              )
+                        )
+                        OR (
+                            (NEW.workflow_goal_id IS NOT NULL
+                             OR NEW.workflow_attempt_id IS NOT NULL)
+                            AND NOT EXISTS (
+                                SELECT 1 FROM hive_runs run
+                                WHERE run.id = NEW.run_id
+                                  AND run.kind = 'worker_workflow'
+                            )
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker provider call Workflow binding mismatch');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_outcomes_insert_guard
+                    BEFORE INSERT ON hive_worker_goal_outcomes
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM hive_runs run
+                        JOIN workflow_goals goal
+                          ON goal.id = NEW.workflow_goal_id
+                        JOIN workflow_execution_attempts attempt
+                          ON attempt.id = NEW.workflow_attempt_id
+                        JOIN workflow_plan_revisions plan
+                          ON plan.id = NEW.plan_revision_id
+                        JOIN workflow_plan_steps step ON step.id = NEW.step_id
+                        JOIN sessions session ON session.id = NEW.session_id
+                        JOIN hive_workers worker ON worker.id = NEW.worker_id
+                        WHERE run.id = NEW.run_id
+                          AND run.kind = 'worker_workflow'
+                          AND run.worker_id = worker.id
+                          AND run.session_id = session.id
+                          AND run.workflow_goal_id = goal.id
+                          AND run.workflow_attempt_id = attempt.id
+                          AND goal.session_id = session.id
+                          AND attempt.goal_id = goal.id
+                          AND attempt.plan_revision_id = plan.id
+                          AND attempt.step_id = step.id
+                          AND step.plan_revision_id = plan.id
+                          AND worker.user_id IS NEW.owner_user_id
+                          AND session.user_id IS NEW.owner_user_id
+                          AND session.working_dir = NEW.workspace_dir
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Goal outcome binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_workflow_success_guard
+                    BEFORE UPDATE OF status ON hive_runs
+                    WHEN NEW.kind = 'worker_workflow'
+                      AND NEW.status = 'succeeded'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_goal_outcomes outcome
+                          WHERE outcome.run_id = NEW.id
+                            AND outcome.worker_id = NEW.worker_id
+                            AND outcome.session_id = NEW.session_id
+                            AND outcome.workflow_goal_id = NEW.workflow_goal_id
+                            AND outcome.workflow_attempt_id = NEW.workflow_attempt_id
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM json_each(outcome.provider_call_ids_json) call_id
+                                LEFT JOIN hive_worker_provider_calls call
+                                  ON call.provider_call_id = call_id.value
+                                LEFT JOIN hive_worker_provider_call_outcomes call_outcome
+                                  ON call_outcome.provider_call_id = call.provider_call_id
+                                WHERE call.provider_call_id IS NULL
+                                   OR call.run_id <> NEW.id
+                                   OR call.worker_id <> NEW.worker_id
+                                   OR call.session_id <> NEW.session_id
+                                   OR call.workflow_goal_id IS NOT NEW.workflow_goal_id
+                                   OR call.workflow_attempt_id IS NOT NEW.workflow_attempt_id
+                                   OR call.run_lease_token IS NOT OLD.lease_token
+                                   OR call.run_lease_epoch IS NOT OLD.lease_epoch
+                                   OR call.call_kind <> 'agent_turn'
+                                   OR call_outcome.state IS NOT 'completed'
+                                   OR call_outcome.outcome IS NOT 'completed'
+                                   OR call_outcome.remote_acceptance IS NOT 'acknowledged'
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM hive_worker_provider_calls call
+                                LEFT JOIN hive_worker_provider_call_outcomes call_outcome
+                                  ON call_outcome.provider_call_id = call.provider_call_id
+                                WHERE call.run_id = NEW.id
+                                  AND (
+                                      call.worker_id <> NEW.worker_id
+                                      OR call.session_id <> NEW.session_id
+                                      OR call.workflow_goal_id IS NOT NEW.workflow_goal_id
+                                      OR call.workflow_attempt_id IS NOT NEW.workflow_attempt_id
+                                      OR call.run_lease_token IS NOT OLD.lease_token
+                                      OR call.run_lease_epoch IS NOT OLD.lease_epoch
+                                      OR call_outcome.state IS NOT 'completed'
+                                      OR call_outcome.remote_acceptance IS NOT 'acknowledged'
+                                      OR (
+                                          call.call_kind = 'agent_turn'
+                                          AND NOT EXISTS (
+                                              SELECT 1
+                                              FROM json_each(
+                                                  outcome.provider_call_ids_json
+                                              ) listed
+                                              WHERE listed.value = call.provider_call_id
+                                          )
+                                      )
+                                  )
+                            )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Workflow cannot succeed without an exact committed outcome');
+                    END;
+
+                    -- Schema-75 compatibility objects.  These are deliberately
+                    -- recreated after adding response_provider_call_id so a
+                    -- preview database cannot bypass atomic response linkage.
+                    DROP TRIGGER IF EXISTS hive_runs_response_insert_guard;
+                    CREATE TRIGGER hive_runs_response_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.response_message_id IS NOT NULL
+                      OR NEW.response_group_message_id IS NOT NULL
+                      OR NEW.response_provider_call_id IS NOT NULL
+                    BEGIN
+                        SELECT RAISE(ABORT, 'new Worker run cannot have a response linkage');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_response_message_link_guard;
+                    CREATE TRIGGER hive_runs_response_message_link_guard
+                    BEFORE UPDATE OF response_message_id ON hive_runs
+                    WHEN NEW.response_message_id IS NOT NULL AND (
+                        NEW.response_provider_call_id IS NULL OR NOT EXISTS (
+                        SELECT 1 FROM messages message
+                        WHERE message.id = NEW.response_message_id
+                          AND message.session_id = NEW.session_id
+                          AND message.role = 'assistant'
+                          AND (
+                              message.idempotency_key =
+                                  'worker-run:' || NEW.id || ':assistant:final'
+                              OR (
+                                  NEW.kind = 'worker_conversation'
+                                  AND NEW.worker_id IS NOT NULL
+                                  AND NEW.objective_message_id IS NOT NULL
+                                  AND message.idempotency_key =
+                                      'introduction:' || NEW.worker_id || ':user:'
+                                      || NEW.objective_message_id || ':context-response'
+                              )
+                          )
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker run response message');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_response_tuple_guard;
+                    CREATE TRIGGER hive_runs_response_tuple_guard
+                    BEFORE UPDATE OF response_message_id, response_provider_call_id ON hive_runs
+                    WHEN (NEW.response_message_id IS NULL)
+                         <> (NEW.response_provider_call_id IS NULL)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker response message and provider provenance must link atomically');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_response_provider_call_guard;
+                    CREATE TRIGGER hive_runs_response_provider_call_guard
+                    BEFORE UPDATE OF response_provider_call_id ON hive_runs
+                    WHEN NEW.response_provider_call_id IS NOT NULL AND NOT EXISTS (
+                        SELECT 1
+                        FROM hive_worker_provider_calls call
+                        LEFT JOIN hive_worker_provider_call_outcomes outcome
+                          ON outcome.provider_call_id = call.provider_call_id
+                        WHERE call.provider_call_id = NEW.response_provider_call_id
+                          AND call.worker_id = NEW.worker_id
+                          AND call.session_id = NEW.session_id
+                          AND call.run_id = NEW.id
+                          AND call.run_lease_token = NEW.lease_token
+                          AND call.run_lease_epoch = NEW.lease_epoch
+                          AND call.call_kind IN (
+                              'agent_turn', 'worker_introduction_onboarding'
+                          )
+                          AND (
+                              outcome.provider_call_id IS NULL
+                              OR (
+                                  outcome.state = 'completed'
+                                  AND outcome.outcome = 'completed'
+                                  AND outcome.remote_acceptance = 'acknowledged'
+                              )
+                              OR (
+                                  outcome.state = 'completed'
+                                  AND outcome.outcome = 'semantic_invalid'
+                                  AND outcome.remote_acceptance = 'acknowledged'
+                                  AND NEW.kind = 'worker_conversation'
+                                  AND NEW.group_id IS NULL
+                                  AND NEW.objective_message_id IS NOT NULL
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_worker_introductions introduction
+                                      JOIN messages objective
+                                        ON objective.id = NEW.objective_message_id
+                                      WHERE introduction.worker_id = NEW.worker_id
+                                        AND introduction.status = 'awaiting_context'
+                                        AND introduction.opening_message_id IS NOT NULL
+                                        AND objective.session_id = NEW.session_id
+                                        AND objective.role = 'user'
+                                  )
+                              )
+                          )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker response provider provenance');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_response_message_immutable;
+                    CREATE TRIGGER hive_runs_response_message_immutable
+                    BEFORE UPDATE OF response_message_id, response_group_message_id,
+                                     response_provider_call_id ON hive_runs
+                    WHEN (OLD.response_message_id IS NOT NULL
+                          AND OLD.response_message_id IS NOT NEW.response_message_id)
+                      OR (OLD.response_group_message_id IS NOT NULL
+                          AND OLD.response_group_message_id
+                              IS NOT NEW.response_group_message_id)
+                      OR (OLD.response_provider_call_id IS NOT NULL
+                          AND OLD.response_provider_call_id
+                              IS NOT NEW.response_provider_call_id)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run response linkage is immutable');
+                    END;
+
+                    "#,
+                )?;
+
+                // A schema-75 preview may contain the response provenance
+                // column without the group tables. Keep that partial-schema
+                // repairable without weakening full installations.
+                if Self::table_exists(&workflow_worker_tx, "hive_group_messages") {
+                    workflow_worker_tx.execute_batch(
+                        r#"
+                        DROP TRIGGER IF EXISTS hive_runs_group_response_link_guard;
+                        CREATE TRIGGER hive_runs_group_response_link_guard
+                        BEFORE UPDATE OF response_group_message_id ON hive_runs
+                        WHEN NEW.response_group_message_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM hive_group_messages message
+                            WHERE message.id = NEW.response_group_message_id
+                              AND message.group_id = NEW.group_id
+                              AND message.turn_id = NEW.group_turn_id
+                              AND message.sender_kind = 'worker'
+                              AND message.sender_worker_id = NEW.worker_id
+                              AND message.sender_run_id = NEW.id
+                              AND message.idempotency_key =
+                                  'group-turn:' || NEW.group_turn_id
+                                  || ':worker:' || NEW.worker_id
+                                  || ':run:' || NEW.id || ':final'
+                        )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'invalid Worker group response message');
+                        END;
+                        "#,
+                    )?;
+                }
+            }
+
+            workflow_worker_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (76)",
+                [],
+            )?;
+            workflow_worker_tx.commit()?;
+        }
+
+        // Migration 77: claimed, governed Hive Worker Introduction reviews.
+        //
+        // The reviewer used to be launched inline after an onboarding reply
+        // and rediscovered by a process-local host sweep.  A review is now a
+        // first-class Hive run linked to one immutable transcript snapshot.
+        // Its audit row is created in `queued` before the run is visible, and
+        // the exact provider Started row is the only provenance that can
+        // authorize a terminal review or a successful run.
+        if current_version < 77 {
+            info!("Running migration 77: durable Hive Worker Introduction review runs");
+
+            let has_hive_runs = Self::table_exists(&self.conn, "hive_runs");
+            let has_typed_sessions = Self::table_exists(&self.conn, "sessions");
+            let review_run_dependencies_ready = [
+                "hive_worker_introduction_reviews",
+                "hive_runs",
+                "hive_workers",
+                "hive_controllers",
+                "hive_worker_provider_calls",
+                "hive_worker_provider_call_outcomes",
+            ]
+            .into_iter()
+            .all(|table| Self::table_exists(&self.conn, table))
+                && [
+                    "id",
+                    "controller_id",
+                    "session_id",
+                    "kind",
+                    "status",
+                    "worker_id",
+                    "conversation_through_message_id",
+                    "objective_message_id",
+                    "response_message_id",
+                    "response_provider_call_id",
+                    "workflow_goal_id",
+                    "workflow_attempt_id",
+                    "governor_origin",
+                    "governor_lane_key",
+                    "lease_token",
+                    "lease_epoch",
+                ]
+                .into_iter()
+                .all(|column| Self::column_exists(&self.conn, "hive_runs", column))
+                && ["id", "user_id"]
+                    .into_iter()
+                    .all(|column| Self::column_exists(&self.conn, "hive_workers", column))
+                && ["id", "worker_id", "session_id", "user_id"]
+                    .into_iter()
+                    .all(|column| Self::column_exists(&self.conn, "hive_controllers", column))
+                && [
+                    "provider_call_id",
+                    "call_kind",
+                    "run_id",
+                    "worker_id",
+                    "session_id",
+                    "run_lease_token",
+                    "run_lease_epoch",
+                ]
+                .into_iter()
+                .all(|column| {
+                    Self::column_exists(&self.conn, "hive_worker_provider_calls", column)
+                })
+                && ["provider_call_id", "state", "outcome", "remote_acceptance"]
+                    .into_iter()
+                    .all(|column| {
+                        Self::column_exists(
+                            &self.conn,
+                            "hive_worker_provider_call_outcomes",
+                            column,
+                        )
+                    })
+                && [
+                    "id",
+                    "worker_id",
+                    "session_id",
+                    "status",
+                    "trace_run_id",
+                    "through_message_id",
+                    "provider_call_id",
+                    "last_error",
+                ]
+                .into_iter()
+                .all(|column| {
+                    Self::column_exists(&self.conn, "hive_worker_introduction_reviews", column)
+                });
+
+            // Specialized historical schemas may intentionally omit the Hive
+            // execution tables.  Do not partially activate the durable review
+            // surface in those databases: every CHECK extension, column, index,
+            // and trigger below is one atomic compatibility contract.  A schema
+            // that has both typed sessions and hive_runs but is missing one of
+            // the coupled authorities is corrupt/incomplete and must fail
+            // closed instead of accepting review runs with unenforceable
+            // provenance. Older specialized schemas are explicitly allowed to
+            // omit sessions while retaining scheduler tables; they receive the
+            // version stamp but no durable review surface.
+            ensure!(
+                !has_hive_runs || !has_typed_sessions || review_run_dependencies_ready,
+                "Migration 77 requires the complete Hive Introduction review-run dependency set"
+            );
+
+            if review_run_dependencies_ready {
+                const WORKFLOW_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation', 'worker_workflow')";
+                const REVIEW_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation', 'worker_workflow', 'worker_introduction_review')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 77: enabling writable_schema for Hive run kind")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [WORKFLOW_KINDS, REVIEW_KINDS],
+                    )
+                    .context("Migration 77: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 77: reloading Hive run schema");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_introduction_review")
+                        || !runs_sql.contains("kind IN"),
+                    "Migration 77 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            if review_run_dependencies_ready {
+                // SQLite cannot add a new value to an inline CHECK. Preserve
+                // the existing table and append only the queued value used by
+                // the durable materializer.
+                const CLAIMED_REVIEW_STATUSES: &str = "'claimed', 'gather_more', 'review_ready'";
+                const QUEUED_REVIEW_STATUSES: &str =
+                    "'queued', 'claimed', 'gather_more', 'review_ready'";
+                const REVIEW_WITHOUT_PROPOSAL_STATUSES: &str =
+                    "OR status IN ('claimed', 'gather_more', 'failed', 'stale')";
+                const QUEUED_REVIEW_WITHOUT_PROPOSAL_STATUSES: &str =
+                    "OR status IN ('queued', 'claimed', 'gather_more', 'failed', 'stale')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 77: enabling writable_schema for review status")?;
+                let first = self.conn.execute(
+                    "UPDATE sqlite_master
+                     SET sql = replace(sql, ?1, ?2)
+                     WHERE type = 'table'
+                       AND name = 'hive_worker_introduction_reviews'
+                       AND instr(sql, ?1) > 0
+                       AND instr(sql, ?2) = 0",
+                    [CLAIMED_REVIEW_STATUSES, QUEUED_REVIEW_STATUSES],
+                );
+                let second = self.conn.execute(
+                    "UPDATE sqlite_master
+                     SET sql = replace(sql, ?1, ?2)
+                     WHERE type = 'table'
+                       AND name = 'hive_worker_introduction_reviews'",
+                    [
+                        REVIEW_WITHOUT_PROPOSAL_STATUSES,
+                        QUEUED_REVIEW_WITHOUT_PROPOSAL_STATUSES,
+                    ],
+                );
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 77: reloading review schema");
+                first.context("Migration 77: add queued review status")?;
+                second.context("Migration 77: allow queued review without proposal")?;
+                restore?;
+                let review_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name = 'hive_worker_introduction_reviews'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    review_sql.contains("'queued', 'claimed', 'gather_more'"),
+                    "Migration 77 could not extend the Introduction review status CHECK"
+                );
+            }
+
+            let review_run_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Introduction review-run migration lock")?;
+            if review_run_dependencies_ready {
+                if !Self::column_exists(
+                    &review_run_tx,
+                    "hive_worker_introduction_reviews",
+                    "run_id",
+                ) {
+                    review_run_tx.execute_batch(
+                        "ALTER TABLE hive_worker_introduction_reviews
+                         ADD COLUMN run_id TEXT
+                         REFERENCES hive_runs(id) ON DELETE RESTRICT;",
+                    )?;
+                }
+                if !Self::column_exists(
+                    &review_run_tx,
+                    "hive_worker_introduction_reviews",
+                    "attempt_no",
+                ) {
+                    review_run_tx.execute_batch(
+                        "ALTER TABLE hive_worker_introduction_reviews
+                         ADD COLUMN attempt_no INTEGER
+                         CHECK(attempt_no IS NULL OR attempt_no >= 1);",
+                    )?;
+                }
+                review_run_tx.execute_batch(
+                    r#"
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_introduction_review_run
+                        ON hive_worker_introduction_reviews(run_id)
+                        WHERE run_id IS NOT NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_worker_introduction_review_attempt
+                        ON hive_worker_introduction_reviews(
+                            worker_id, through_message_id, attempt_no
+                        ) WHERE run_id IS NOT NULL;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_introduction_review_run_insert_guard
+                    BEFORE INSERT ON hive_worker_introduction_reviews
+                    WHEN NEW.run_id IS NOT NULL AND (
+                        NEW.attempt_no IS NULL
+                        OR NEW.status <> 'queued'
+                        OR NEW.trace_run_id <> NEW.run_id
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM hive_runs run
+                            JOIN hive_workers worker ON worker.id = NEW.worker_id
+                            JOIN hive_controllers controller
+                              ON controller.id = run.controller_id
+                            WHERE run.id = NEW.run_id
+                              AND run.kind = 'worker_introduction_review'
+                              AND run.status = 'queued'
+                              AND run.worker_id = NEW.worker_id
+                              AND run.session_id = NEW.session_id
+                              AND run.conversation_through_message_id = NEW.through_message_id
+                              AND run.objective_message_id IS NULL
+                              AND run.response_message_id IS NULL
+                              AND run.response_provider_call_id IS NULL
+                              AND run.workflow_goal_id IS NULL
+                              AND run.workflow_attempt_id IS NULL
+                              AND run.governor_origin = 'user_lifecycle_action'
+                              AND run.governor_lane_key = 'dm'
+                              AND controller.worker_id = worker.id
+                              AND controller.session_id = NEW.session_id
+                              AND controller.user_id IS worker.user_id
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Introduction review-run binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_introduction_review_run_immutable
+                    BEFORE UPDATE OF run_id, attempt_no ON hive_worker_introduction_reviews
+                    WHEN OLD.run_id IS NOT NEW.run_id
+                      OR OLD.attempt_no IS NOT NEW.attempt_no
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Introduction review-run binding is immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_introduction_review_provider_guard
+                    BEFORE UPDATE OF provider_call_id ON hive_worker_introduction_reviews
+                    WHEN NEW.run_id IS NOT NULL AND NEW.provider_call_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_provider_calls call
+                          JOIN hive_runs run ON run.id = NEW.run_id
+                          WHERE call.provider_call_id = NEW.provider_call_id
+                            AND call.call_kind = 'worker_introduction_review'
+                            AND call.run_id = run.id
+                            AND call.worker_id = NEW.worker_id
+                            AND call.session_id = NEW.session_id
+                            AND call.run_lease_token = run.lease_token
+                            AND call.run_lease_epoch = run.lease_epoch
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Introduction review provider provenance');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_introduction_review_call_kind_guard
+                    BEFORE INSERT ON hive_worker_provider_calls
+                    WHEN (
+                        NEW.call_kind = 'worker_introduction_review'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM hive_runs run
+                            JOIN hive_worker_introduction_reviews review
+                              ON review.run_id = run.id
+                            WHERE run.id = NEW.run_id
+                              AND run.kind = 'worker_introduction_review'
+                              AND run.status = 'running'
+                              AND run.lease_token = NEW.run_lease_token
+                              AND run.lease_epoch = NEW.run_lease_epoch
+                              AND review.status = 'claimed'
+                              AND review.provider_call_id IS NULL
+                        )
+                    ) OR (
+                        NEW.call_kind <> 'worker_introduction_review'
+                        AND EXISTS (
+                            SELECT 1 FROM hive_runs run
+                            WHERE run.id = NEW.run_id
+                              AND run.kind = 'worker_introduction_review'
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Introduction review provider-call kind');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_introduction_review_success_guard
+                    BEFORE UPDATE OF status ON hive_runs
+                    WHEN NEW.kind = 'worker_introduction_review'
+                      AND NEW.status = 'succeeded'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_introduction_reviews review
+                          LEFT JOIN hive_worker_provider_calls call
+                            ON call.provider_call_id = review.provider_call_id
+                          LEFT JOIN hive_worker_provider_call_outcomes outcome
+                            ON outcome.provider_call_id = call.provider_call_id
+                          WHERE review.run_id = NEW.id
+                            AND review.worker_id = NEW.worker_id
+                            AND review.session_id = NEW.session_id
+                            AND review.through_message_id = NEW.conversation_through_message_id
+                            AND (
+                                (
+                                    review.status = 'stale'
+                                    AND review.provider_call_id IS NULL
+                                    AND review.last_error IS NOT NULL
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                        FROM hive_worker_provider_calls pre_provider_call
+                                        WHERE pre_provider_call.run_id = NEW.id
+                                          AND pre_provider_call.run_lease_token = OLD.lease_token
+                                          AND pre_provider_call.run_lease_epoch = OLD.lease_epoch
+                                    )
+                                )
+                                OR (
+                                    review.status IN (
+                                        'gather_more', 'review_ready', 'confirmed',
+                                        'rejected', 'keep_talking', 'stale'
+                                    )
+                                    AND call.run_id = NEW.id
+                                    AND call.run_lease_token = OLD.lease_token
+                                    AND call.run_lease_epoch = OLD.lease_epoch
+                                    AND call.call_kind = 'worker_introduction_review'
+                                    AND outcome.state = 'completed'
+                                    AND outcome.remote_acceptance = 'acknowledged'
+                                    AND outcome.outcome IN (
+                                        'completed', 'semantic_invalid',
+                                        'canonical_commit_stale'
+                                    )
+                                )
+                            )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Introduction review cannot succeed without exact committed audit provenance');
+                    END;
+                    "#,
+                )?;
+            }
+            review_run_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (77)",
+                [],
+            )?;
+            review_run_tx.commit()?;
+        }
+
+        // Migration 78: immutable Worker Workflow acceptance authority.
+        //
+        // A `Progressed` Worker Goal outcome stages one provider-free,
+        // unclaimable acceptance run while its exact step remains claimed.
+        // Only an exact owner decision or a coupled lifecycle invalidation can
+        // terminalize that run. Automatic structural execution remains gated
+        // off until a separate network/process/workspace sandbox exists.
+        if current_version < 78 {
+            info!("Running migration 78: durable Worker Workflow acceptance authority");
+
+            // The acceptance tables are installed transactionally, but the
+            // hive_runs CHECK rewrite must be reloaded outside that
+            // transaction. Detect either form of prior authority so a
+            // damaged/half-present schema cannot be silently stamped 78 when
+            // its coupled dependencies are no longer complete.
+            let has_acceptance_run_schema: bool = self.conn.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'hive_runs'
+                       AND (
+                           instr(sql, 'worker_workflow_acceptance') > 0
+                           OR instr(sql, '''workflow_acceptance''') > 0
+                       )
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            let has_worker_goal_or_acceptance_authority = [
+                "hive_worker_goal_outcomes",
+                "hive_worker_goal_acceptance_candidates",
+                "hive_worker_goal_acceptance_results",
+            ]
+            .into_iter()
+            .any(|table| Self::table_exists(&self.conn, table))
+                || has_acceptance_run_schema;
+            let acceptance_dependencies_ready = [
+                "hive_runs",
+                "hive_workers",
+                "hive_controllers",
+                "hive_worker_governor_policies",
+                "hive_worker_provider_calls",
+                "hive_worker_goal_outcomes",
+                "sessions",
+                "workflow_goals",
+                "workflow_goal_criteria",
+                "workflow_plan_revisions",
+                "workflow_plan_steps",
+                "workflow_execution_attempts",
+            ]
+            .into_iter()
+            .all(|table| Self::table_exists(&self.conn, table));
+            ensure!(
+                !has_worker_goal_or_acceptance_authority || acceptance_dependencies_ready,
+                "Migration 78 requires the complete Worker Workflow acceptance dependency set"
+            );
+
+            if acceptance_dependencies_ready {
+                const REVIEW_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation', 'worker_workflow', 'worker_introduction_review')";
+                const ACCEPTANCE_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat', 'worker_introduction', 'worker_conversation', 'worker_workflow', 'worker_introduction_review', 'worker_workflow_acceptance')";
+                const OLD_ORIGIN_TAIL: &str =
+                    "'workflow_rollover', 'lifecycle_sweep', 'controller_child'";
+                const ACCEPTANCE_ORIGIN_TAIL: &str = "'workflow_rollover', 'workflow_acceptance', 'lifecycle_sweep', 'controller_child'";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 78: enabling writable_schema for acceptance authority")?;
+                let kind_rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [REVIEW_KINDS, ACCEPTANCE_KINDS],
+                    )
+                    .context("Migration 78: extend hive_runs kind CHECK");
+                let origin_rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [OLD_ORIGIN_TAIL, ACCEPTANCE_ORIGIN_TAIL],
+                    )
+                    .context("Migration 78: extend hive_runs governor-origin CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 78: reloading acceptance run schema");
+                kind_rewrite?;
+                origin_rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_workflow_acceptance")
+                        || !runs_sql.contains("kind IN"),
+                    "Migration 78 could not extend the hive_runs kind CHECK"
+                );
+                ensure!(
+                    runs_sql.contains("'workflow_acceptance'")
+                        || !runs_sql.contains("governor_origin IN"),
+                    "Migration 78 could not extend the governor-origin CHECK"
+                );
+            }
+
+            let acceptance_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Worker Workflow acceptance migration lock")?;
+
+            if acceptance_dependencies_ready {
+                acceptance_tx.execute_batch(
+                    r#"
+                    DROP INDEX IF EXISTS idx_hive_worker_workflow_attempt;
+                    CREATE UNIQUE INDEX idx_hive_worker_workflow_attempt
+                        ON hive_runs(workflow_attempt_id)
+                        WHERE kind = 'worker_workflow'
+                          AND workflow_attempt_id IS NOT NULL;
+
+                    CREATE TABLE IF NOT EXISTS hive_worker_goal_acceptance_candidates (
+                        acceptance_run_id TEXT PRIMARY KEY
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        source_run_id TEXT NOT NULL UNIQUE
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id) ON DELETE RESTRICT,
+                        worker_revision INTEGER NOT NULL CHECK(worker_revision >= 1),
+                        owner_user_id TEXT,
+                        session_id TEXT NOT NULL
+                            REFERENCES sessions(id) ON DELETE RESTRICT,
+                        workflow_goal_id TEXT NOT NULL
+                            REFERENCES workflow_goals(id) ON DELETE RESTRICT,
+                        source_attempt_id TEXT NOT NULL UNIQUE
+                            REFERENCES workflow_execution_attempts(id) ON DELETE RESTRICT,
+                        plan_revision_id TEXT NOT NULL
+                            REFERENCES workflow_plan_revisions(id) ON DELETE RESTRICT,
+                        plan_revision_number INTEGER NOT NULL
+                            CHECK(plan_revision_number >= 1),
+                        step_id TEXT NOT NULL
+                            REFERENCES workflow_plan_steps(id) ON DELETE RESTRICT,
+                        goal_revision INTEGER NOT NULL CHECK(goal_revision >= 1),
+                        workflow_aggregate_revision INTEGER NOT NULL
+                            CHECK(workflow_aggregate_revision = goal_revision),
+                        step_revision INTEGER NOT NULL CHECK(step_revision >= 1),
+                        workspace_dir TEXT NOT NULL CHECK(
+                            length(workspace_dir) BETWEEN 1 AND 16384
+                            AND workspace_dir GLOB '/*'
+                        ),
+                        acceptance_contract_json TEXT NOT NULL CHECK(
+                            json_valid(acceptance_contract_json)
+                            AND json_type(acceptance_contract_json) = 'object'
+                            AND json_extract(
+                                acceptance_contract_json, '$.schema_version'
+                            ) = 1
+                            AND json_type(
+                                acceptance_contract_json, '$.step_specs'
+                            ) = 'array'
+                            AND json_array_length(
+                                acceptance_contract_json, '$.step_specs'
+                            ) BETWEEN 1 AND 32
+                            AND json_type(
+                                acceptance_contract_json, '$.goal_specs'
+                            ) = 'array'
+                            AND json_array_length(
+                                acceptance_contract_json, '$.goal_specs'
+                            ) BETWEEN 0 AND 32
+                            AND length(acceptance_contract_json) <= 131072
+                        ),
+                        acceptance_contract_sha256 TEXT NOT NULL CHECK(
+                            length(acceptance_contract_sha256) = 64
+                            AND acceptance_contract_sha256
+                                NOT GLOB '*[^0-9a-f]*'
+                        ),
+                        source_outcome_sha256 TEXT NOT NULL CHECK(
+                            length(source_outcome_sha256) = 64
+                            AND source_outcome_sha256 NOT GLOB '*[^0-9a-f]*'
+                        ),
+                        state TEXT NOT NULL CHECK(state IN (
+                            'awaiting_user', 'verifying', 'needs_user',
+                            'accepted', 'rejected', 'stale'
+                        )),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        resolved_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_worker_goal_acceptance_pending
+                        ON hive_worker_goal_acceptance_candidates(
+                            worker_id, state, created_at, acceptance_run_id
+                        ) WHERE state IN (
+                            'awaiting_user', 'verifying', 'needs_user'
+                        );
+                    CREATE INDEX IF NOT EXISTS idx_worker_goal_acceptance_goal
+                        ON hive_worker_goal_acceptance_candidates(
+                            workflow_goal_id, state, created_at
+                        );
+
+                    CREATE TABLE IF NOT EXISTS hive_worker_goal_acceptance_results (
+                        acceptance_run_id TEXT PRIMARY KEY
+                            REFERENCES hive_worker_goal_acceptance_candidates(
+                                acceptance_run_id
+                            ) ON DELETE RESTRICT,
+                        source_run_id TEXT NOT NULL UNIQUE
+                            REFERENCES hive_runs(id) ON DELETE RESTRICT,
+                        authority TEXT NOT NULL CHECK(authority IN (
+                            'user', 'lifecycle'
+                        )),
+                        decision TEXT NOT NULL CHECK(decision IN ('accept', 'reject')),
+                        reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 4096),
+                        criteria_json TEXT NOT NULL CHECK(
+                            json_valid(criteria_json)
+                            AND json_type(criteria_json) = 'array'
+                            AND json_array_length(criteria_json) BETWEEN 0 AND 32
+                            AND length(criteria_json) <= 131072
+                        ),
+                        receipts_json TEXT NOT NULL CHECK(
+                            json_valid(receipts_json)
+                            AND json_type(receipts_json) = 'array'
+                            AND json_array_length(receipts_json) BETWEEN 0 AND 32
+                            AND length(receipts_json) <= 131072
+                        ),
+                        provider_call_ids_json TEXT NOT NULL CHECK(
+                            json_valid(provider_call_ids_json)
+                            AND json_type(provider_call_ids_json) = 'array'
+                            AND json_array_length(provider_call_ids_json) = 0
+                        ),
+                        resulting_goal_revision INTEGER,
+                        resulting_goal_status TEXT,
+                        resulting_step_status TEXT,
+                        committed_at TEXT NOT NULL,
+                        CHECK(authority <> 'lifecycle' OR decision = 'reject'),
+                        CHECK(authority <> 'lifecycle' OR json_array_length(criteria_json) = 0),
+                        CHECK(json_array_length(receipts_json) = 0),
+                        CHECK(
+                            (
+                                authority = 'user'
+                                AND resulting_goal_revision IS NOT NULL
+                                AND resulting_goal_revision >= 1
+                                AND resulting_goal_status IS NOT NULL
+                                AND resulting_goal_status IN (
+                                    'active', 'paused', 'completed'
+                                )
+                                AND resulting_step_status IS NOT NULL
+                                AND resulting_step_status IN (
+                                    'pending', 'completed'
+                                )
+                            )
+                            OR (
+                                authority = 'lifecycle'
+                                AND resulting_goal_revision IS NULL
+                                AND resulting_goal_status IS NULL
+                                AND resulting_step_status IS NULL
+                            )
+                        )
+                    );
+
+                    DROP TRIGGER IF EXISTS hive_runs_worker_context_insert_guard;
+                    CREATE TRIGGER hive_runs_worker_context_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.worker_id IS NOT NULL AND (
+                        NEW.execution_context_json IS NULL
+                        OR json_extract(NEW.execution_context_json, '$.schema_version') <> 1
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            NOT IN (
+                                'worker_conversation_neutral',
+                                'worker_workspace_attached',
+                                'worker_goal',
+                                'worker_goal_acceptance'
+                            )
+                        OR json_extract(NEW.execution_context_json, '$.mode.worker_id')
+                            IS NOT NEW.worker_id
+                        OR CAST(json_extract(
+                            NEW.execution_context_json, '$.mode.worker_revision'
+                        ) AS INTEGER) <> (
+                            SELECT worker.revision FROM hive_workers worker
+                            WHERE worker.id = NEW.worker_id
+                        )
+                        OR NEW.governor_origin IS NULL
+                        OR NEW.governor_lane_key IS NULL
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                                = 'direct_message'
+                            AND NEW.governor_lane_key <> 'dm'
+                        )
+                        OR (
+                            json_extract(NEW.execution_context_json, '$.mode.lane.kind') = 'group'
+                            AND NEW.governor_lane_key <> 'group:' || json_extract(
+                                NEW.execution_context_json, '$.mode.lane.group_id'
+                            )
+                        )
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            NOT IN ('direct_message', 'group')
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker run has no exact typed execution binding');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_non_workflow_link_insert_guard;
+                    CREATE TRIGGER hive_runs_non_workflow_link_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind NOT IN (
+                        'worker_workflow', 'worker_workflow_acceptance'
+                    ) AND (
+                        NEW.workflow_goal_id IS NOT NULL
+                        OR NEW.workflow_attempt_id IS NOT NULL
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            IN ('worker_goal', 'worker_goal_acceptance')
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'non-Workflow run cannot carry Worker Goal authority');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_runs_non_workflow_link_update_guard;
+                    CREATE TRIGGER hive_runs_non_workflow_link_update_guard
+                    BEFORE UPDATE OF kind, workflow_goal_id, workflow_attempt_id,
+                                     execution_context_json ON hive_runs
+                    WHEN NEW.kind NOT IN (
+                        'worker_workflow', 'worker_workflow_acceptance'
+                    ) AND (
+                        NEW.workflow_goal_id IS NOT NULL
+                        OR NEW.workflow_attempt_id IS NOT NULL
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            IN ('worker_goal', 'worker_goal_acceptance')
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'non-Workflow run cannot carry Worker Goal authority');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_acceptance_insert_guard
+                    BEFORE INSERT ON hive_runs
+                    WHEN NEW.kind = 'worker_workflow_acceptance' AND (
+                        NEW.worker_id IS NULL
+                        OR NEW.session_id IS NULL
+                        OR NEW.workflow_goal_id IS NULL
+                        OR NEW.workflow_attempt_id IS NULL
+                        OR NEW.status <> 'awaiting_input'
+                        OR NEW.attempt_count <> 0
+                        OR NEW.max_attempts <> 1
+                        OR NEW.lease_owner IS NOT NULL
+                        OR NEW.lease_token IS NOT NULL
+                        OR NEW.lease_epoch IS NOT NULL
+                        OR NEW.lease_expires_at IS NOT NULL
+                        OR NEW.objective_message_id IS NOT NULL
+                        OR NEW.conversation_through_message_id IS NOT NULL
+                        OR NEW.response_message_id IS NOT NULL
+                        OR NEW.response_group_message_id IS NOT NULL
+                        OR NEW.response_provider_call_id IS NOT NULL
+                        OR NEW.group_id IS NOT NULL
+                        OR NEW.group_turn_id IS NOT NULL
+                        OR NEW.trigger_message_id IS NOT NULL
+                        OR NEW.governor_origin <> 'workflow_acceptance'
+                        OR NEW.governor_lane_key <> 'dm'
+                        OR json_extract(NEW.execution_context_json, '$.mode.kind')
+                            <> 'worker_goal_acceptance'
+                        OR json_extract(NEW.execution_context_json, '$.mode.lane.kind')
+                            <> 'direct_message'
+                        OR json_extract(NEW.execution_context_json, '$.mode.goal_id')
+                            IS NOT NEW.workflow_goal_id
+                        OR json_extract(
+                            NEW.execution_context_json, '$.mode.source_attempt_id'
+                        ) IS NOT NEW.workflow_attempt_id
+                        OR json_extract(
+                            NEW.execution_context_json, '$.mode.workspace_mode'
+                        ) NOT IN ('selected', 'created')
+                        OR json_extract(NEW.execution_context_json, '$.mode.working_dir')
+                            NOT GLOB '/*'
+                        OR json_extract(NEW.execution_context_json, '$.mode.project_dir')
+                            IS NOT json_extract(
+                                NEW.execution_context_json, '$.mode.working_dir'
+                            )
+                        OR json_type(
+                            NEW.execution_context_json, '$.mode.tool_allowlist'
+                        ) <> 'array'
+                        OR json_array_length(
+                            NEW.execution_context_json, '$.mode.tool_allowlist'
+                        ) <> 0
+                        OR length(json_extract(
+                            NEW.execution_context_json,
+                            '$.mode.acceptance_contract_sha256'
+                        )) <> 64
+                        OR json_extract(
+                            NEW.execution_context_json,
+                            '$.mode.acceptance_contract_sha256'
+                        ) GLOB '*[^0-9a-f]*'
+                        OR length(json_extract(
+                            NEW.execution_context_json, '$.mode.source_outcome_sha256'
+                        )) <> 64
+                        OR json_extract(
+                            NEW.execution_context_json, '$.mode.source_outcome_sha256'
+                        ) GLOB '*[^0-9a-f]*'
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM hive_runs source
+                            JOIN hive_worker_goal_outcomes outcome
+                              ON outcome.run_id = source.id
+                            JOIN hive_workers worker ON worker.id = source.worker_id
+                            JOIN hive_controllers controller
+                              ON controller.id = NEW.controller_id
+                            JOIN sessions session ON session.id = source.session_id
+                            JOIN workflow_goals goal
+                              ON goal.id = source.workflow_goal_id
+                            JOIN workflow_execution_attempts attempt
+                              ON attempt.id = source.workflow_attempt_id
+                            JOIN workflow_plan_revisions plan
+                              ON plan.id = attempt.plan_revision_id
+                            JOIN workflow_plan_steps step ON step.id = attempt.step_id
+                            JOIN hive_worker_governor_policies policy
+                              ON policy.worker_id = worker.id
+                            WHERE source.id = json_extract(
+                                      NEW.execution_context_json, '$.mode.source_run_id'
+                                  )
+                              AND source.kind = 'worker_workflow'
+                              AND source.status = 'running'
+                              AND outcome.outcome = 'progressed'
+                              AND source.worker_id = NEW.worker_id
+                              AND source.session_id = NEW.session_id
+                              AND source.workflow_goal_id = NEW.workflow_goal_id
+                              AND source.workflow_attempt_id = NEW.workflow_attempt_id
+                              AND worker.status = 'active'
+                              AND worker.dm_session_id = session.id
+                              AND worker.user_id IS session.user_id
+                              AND worker.revision = CAST(json_extract(
+                                  NEW.execution_context_json, '$.mode.worker_revision'
+                              ) AS INTEGER)
+                              AND controller.worker_id = worker.id
+                              AND controller.session_id = session.id
+                              AND controller.user_id IS worker.user_id
+                              AND controller.status = 'active'
+                              AND NEW.governor_policy_revision = policy.revision
+                              AND session.session_type = 'hive'
+                              AND session.workspace_mode IN ('selected', 'created')
+                              AND session.working_dir = session.project_dir
+                              AND session.working_dir = json_extract(
+                                  NEW.execution_context_json, '$.mode.working_dir'
+                              )
+                              AND goal.session_id = session.id
+                              AND goal.status = 'active'
+                              AND goal.revision = CAST(json_extract(
+                                  NEW.execution_context_json, '$.mode.goal_revision'
+                              ) AS INTEGER)
+                              AND goal.revision = CAST(json_extract(
+                                  NEW.execution_context_json,
+                                  '$.mode.workflow_aggregate_revision'
+                              ) AS INTEGER)
+                              AND goal.revision = CAST(json_extract(
+                                  source.execution_context_json,
+                                  '$.mode.goal_revision'
+                              ) AS INTEGER) + 1
+                              AND attempt.goal_id = goal.id
+                              AND attempt.status = 'paused'
+                              AND attempt.stop_reason = 'awaiting_acceptance'
+                              AND plan.id = json_extract(
+                                  NEW.execution_context_json, '$.mode.plan_revision_id'
+                              )
+                              AND plan.goal_id = goal.id
+                              AND plan.status = 'active'
+                              AND plan.revision_number = CAST(json_extract(
+                                  NEW.execution_context_json,
+                                  '$.mode.plan_revision_number'
+                              ) AS INTEGER)
+                              AND step.id = json_extract(
+                                  NEW.execution_context_json, '$.mode.step_id'
+                              )
+                              AND step.plan_revision_id = plan.id
+                              AND step.status = 'in_progress'
+                              AND step.claimed_attempt_id = attempt.id
+                              AND step.revision = CAST(json_extract(
+                                  NEW.execution_context_json, '$.mode.step_revision'
+                              ) AS INTEGER)
+                        )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Workflow acceptance run binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_acceptance_immutable
+                    BEFORE UPDATE OF kind, controller_id, session_id, worker_id,
+                                     workflow_goal_id, workflow_attempt_id,
+                                     governor_origin, governor_lane_key,
+                                     governor_policy_revision, execution_context_json,
+                                     objective_message_id,
+                                     conversation_through_message_id,
+                                     response_message_id, response_group_message_id,
+                                     response_provider_call_id, group_id, group_turn_id,
+                                     trigger_message_id, attempt_count, max_attempts,
+                                     lease_owner, lease_token, lease_epoch,
+                                     lease_expires_at ON hive_runs
+                    WHEN OLD.kind = 'worker_workflow_acceptance' AND (
+                        OLD.kind IS NOT NEW.kind
+                        OR OLD.controller_id IS NOT NEW.controller_id
+                        OR OLD.session_id IS NOT NEW.session_id
+                        OR OLD.worker_id IS NOT NEW.worker_id
+                        OR OLD.workflow_goal_id IS NOT NEW.workflow_goal_id
+                        OR OLD.workflow_attempt_id IS NOT NEW.workflow_attempt_id
+                        OR OLD.governor_origin IS NOT NEW.governor_origin
+                        OR OLD.governor_lane_key IS NOT NEW.governor_lane_key
+                        OR OLD.governor_policy_revision
+                            IS NOT NEW.governor_policy_revision
+                        OR OLD.execution_context_json IS NOT NEW.execution_context_json
+                        OR OLD.objective_message_id IS NOT NEW.objective_message_id
+                        OR OLD.conversation_through_message_id
+                            IS NOT NEW.conversation_through_message_id
+                        OR OLD.response_message_id IS NOT NEW.response_message_id
+                        OR OLD.response_group_message_id
+                            IS NOT NEW.response_group_message_id
+                        OR OLD.response_provider_call_id
+                            IS NOT NEW.response_provider_call_id
+                        OR OLD.group_id IS NOT NEW.group_id
+                        OR OLD.group_turn_id IS NOT NEW.group_turn_id
+                        OR OLD.trigger_message_id IS NOT NEW.trigger_message_id
+                        OR OLD.attempt_count IS NOT NEW.attempt_count
+                        OR OLD.max_attempts IS NOT NEW.max_attempts
+                        OR OLD.lease_owner IS NOT NEW.lease_owner
+                        OR OLD.lease_token IS NOT NEW.lease_token
+                        OR OLD.lease_epoch IS NOT NEW.lease_epoch
+                        OR OLD.lease_expires_at IS NOT NEW.lease_expires_at
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Workflow acceptance run is immutable and unclaimable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_candidate_insert_guard
+                    BEFORE INSERT ON hive_worker_goal_acceptance_candidates
+                    WHEN NEW.state <> 'awaiting_user'
+                      OR NEW.resolved_at IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM hive_runs acceptance_run
+                          JOIN hive_runs source
+                            ON source.id = NEW.source_run_id
+                          JOIN hive_worker_goal_outcomes outcome
+                            ON outcome.run_id = source.id
+                          JOIN hive_workers worker ON worker.id = NEW.worker_id
+                          JOIN sessions session ON session.id = NEW.session_id
+                          JOIN workflow_goals goal ON goal.id = NEW.workflow_goal_id
+                          JOIN workflow_execution_attempts attempt
+                            ON attempt.id = NEW.source_attempt_id
+                          JOIN workflow_plan_revisions plan
+                            ON plan.id = NEW.plan_revision_id
+                          JOIN workflow_plan_steps step ON step.id = NEW.step_id
+                          WHERE acceptance_run.id = NEW.acceptance_run_id
+                            AND acceptance_run.kind = 'worker_workflow_acceptance'
+                            AND acceptance_run.status = 'awaiting_input'
+                            AND acceptance_run.worker_id = NEW.worker_id
+                            AND acceptance_run.session_id = NEW.session_id
+                            AND acceptance_run.workflow_goal_id = NEW.workflow_goal_id
+                            AND acceptance_run.workflow_attempt_id = NEW.source_attempt_id
+                            AND source.kind = 'worker_workflow'
+                            AND source.status = 'running'
+                            AND source.worker_id = NEW.worker_id
+                            AND source.session_id = NEW.session_id
+                            AND source.workflow_goal_id = NEW.workflow_goal_id
+                            AND source.workflow_attempt_id = NEW.source_attempt_id
+                            AND outcome.outcome = 'progressed'
+                            AND outcome.worker_id = NEW.worker_id
+                            AND outcome.owner_user_id IS NEW.owner_user_id
+                            AND outcome.session_id = NEW.session_id
+                            AND outcome.workflow_goal_id = NEW.workflow_goal_id
+                            AND outcome.workflow_attempt_id = NEW.source_attempt_id
+                            AND outcome.plan_revision_id = NEW.plan_revision_id
+                            AND outcome.step_id = NEW.step_id
+                            AND outcome.workspace_dir = NEW.workspace_dir
+                            AND worker.user_id IS NEW.owner_user_id
+                            AND worker.revision = NEW.worker_revision
+                            AND worker.dm_session_id = session.id
+                            AND worker.status = 'active'
+                            AND session.user_id IS NEW.owner_user_id
+                            AND session.session_type = 'hive'
+                            AND session.working_dir = NEW.workspace_dir
+                            AND session.project_dir = NEW.workspace_dir
+                            AND goal.session_id = session.id
+                            AND goal.status = 'active'
+                            AND goal.revision = NEW.goal_revision
+                            AND NEW.workflow_aggregate_revision = goal.revision
+                            AND attempt.goal_id = goal.id
+                            AND attempt.plan_revision_id = plan.id
+                            AND attempt.step_id = step.id
+                            AND attempt.status = 'paused'
+                            AND attempt.stop_reason = 'awaiting_acceptance'
+                            AND plan.goal_id = goal.id
+                            AND plan.revision_number = NEW.plan_revision_number
+                            AND plan.status = 'active'
+                            AND step.plan_revision_id = plan.id
+                            AND step.status = 'in_progress'
+                            AND step.claimed_attempt_id = attempt.id
+                            AND step.revision = NEW.step_revision
+                            AND json_extract(
+                                acceptance_run.execution_context_json,
+                                '$.mode.source_run_id'
+                            ) = source.id
+                            AND json_extract(
+                                acceptance_run.execution_context_json,
+                                '$.mode.acceptance_contract_sha256'
+                            ) = NEW.acceptance_contract_sha256
+                            AND json_extract(
+                                acceptance_run.execution_context_json,
+                                '$.mode.source_outcome_sha256'
+                            ) = NEW.source_outcome_sha256
+                            AND json_extract(
+                                acceptance_run.execution_context_json,
+                                '$.mode.plan_revision_id'
+                            ) = NEW.plan_revision_id
+                            AND json_extract(
+                                acceptance_run.execution_context_json,
+                                '$.mode.step_id'
+                            ) = NEW.step_id
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Goal acceptance candidate binding');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_candidate_update_guard
+                    BEFORE UPDATE ON hive_worker_goal_acceptance_candidates
+                    WHEN OLD.acceptance_run_id IS NOT NEW.acceptance_run_id
+                      OR OLD.source_run_id IS NOT NEW.source_run_id
+                      OR OLD.worker_id IS NOT NEW.worker_id
+                      OR OLD.worker_revision IS NOT NEW.worker_revision
+                      OR OLD.owner_user_id IS NOT NEW.owner_user_id
+                      OR OLD.session_id IS NOT NEW.session_id
+                      OR OLD.workflow_goal_id IS NOT NEW.workflow_goal_id
+                      OR OLD.source_attempt_id IS NOT NEW.source_attempt_id
+                      OR OLD.plan_revision_id IS NOT NEW.plan_revision_id
+                      OR OLD.plan_revision_number IS NOT NEW.plan_revision_number
+                      OR OLD.step_id IS NOT NEW.step_id
+                      OR OLD.goal_revision IS NOT NEW.goal_revision
+                      OR OLD.workflow_aggregate_revision
+                          IS NOT NEW.workflow_aggregate_revision
+                      OR OLD.step_revision IS NOT NEW.step_revision
+                      OR OLD.workspace_dir IS NOT NEW.workspace_dir
+                      OR OLD.acceptance_contract_json
+                          IS NOT NEW.acceptance_contract_json
+                      OR OLD.acceptance_contract_sha256
+                          IS NOT NEW.acceptance_contract_sha256
+                      OR OLD.source_outcome_sha256 IS NOT NEW.source_outcome_sha256
+                      OR OLD.created_at IS NOT NEW.created_at
+                      OR OLD.resolved_at IS NOT NULL
+                      OR OLD.state NOT IN ('awaiting_user', 'needs_user', 'verifying')
+                      OR NEW.state NOT IN ('accepted', 'rejected', 'stale')
+                      OR NEW.resolved_at IS NULL
+                      OR NEW.updated_at IS NOT NEW.resolved_at
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_goal_acceptance_results result
+                          WHERE result.acceptance_run_id = OLD.acceptance_run_id
+                            AND result.source_run_id = OLD.source_run_id
+                            AND (
+                                (NEW.state = 'accepted'
+                                 AND result.authority = 'user'
+                                 AND result.decision = 'accept')
+                                OR (NEW.state = 'rejected'
+                                    AND result.authority = 'user'
+                                    AND result.decision = 'reject')
+                                OR (NEW.state = 'stale'
+                                    AND result.authority = 'lifecycle'
+                                    AND result.decision = 'reject')
+                            )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Goal acceptance candidate transition');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_candidate_no_delete
+                    BEFORE DELETE ON hive_worker_goal_acceptance_candidates
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Goal acceptance candidates are append-only');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_result_insert_guard
+                    BEFORE INSERT ON hive_worker_goal_acceptance_results
+                    WHEN json_array_length(NEW.receipts_json) <> 0
+                      OR json_array_length(NEW.provider_call_ids_json) <> 0
+                      OR (NEW.decision = 'reject'
+                          AND json_array_length(NEW.criteria_json) <> 0)
+                      OR (NEW.authority = 'lifecycle' AND (
+                          NEW.decision <> 'reject'
+                          OR json_array_length(NEW.criteria_json) <> 0
+                          OR NEW.reason NOT IN (
+                              'workflow_goal_cancelled', 'worker_archived'
+                          )
+                      ))
+                      OR EXISTS (
+                          SELECT 1 FROM json_each(NEW.criteria_json) criterion
+                          WHERE json_type(criterion.value) <> 'object'
+                             OR length(json_extract(
+                                 criterion.value, '$.criterion_id'
+                             )) NOT BETWEEN 1 AND 256
+                             OR json_extract(criterion.value, '$.decision')
+                                 NOT IN ('passed', 'failed', 'waived')
+                             OR json_type(criterion.value, '$.evidence') <> 'array'
+                             OR json_array_length(
+                                 criterion.value, '$.evidence'
+                             ) > 16
+                      )
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_goal_acceptance_candidates candidate
+                          JOIN hive_runs acceptance_run
+                            ON acceptance_run.id = candidate.acceptance_run_id
+                          WHERE candidate.acceptance_run_id = NEW.acceptance_run_id
+                            AND candidate.source_run_id = NEW.source_run_id
+                            AND candidate.state IN (
+                                'awaiting_user', 'needs_user', 'verifying'
+                            )
+                            AND (
+                                NEW.authority = 'lifecycle'
+                                OR candidate.state IN ('awaiting_user', 'needs_user')
+                            )
+                            AND acceptance_run.kind = 'worker_workflow_acceptance'
+                            AND acceptance_run.status = 'awaiting_input'
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker Goal acceptance result authority');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_result_no_update
+                    BEFORE UPDATE ON hive_worker_goal_acceptance_results
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Goal acceptance results are immutable');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_goal_acceptance_result_no_delete
+                    BEFORE DELETE ON hive_worker_goal_acceptance_results
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Worker Goal acceptance results are append-only');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_acceptance_status_guard
+                    BEFORE UPDATE OF status ON hive_runs
+                    WHEN OLD.kind = 'worker_workflow_acceptance'
+                      AND NEW.status IS NOT OLD.status
+                      AND NOT (
+                          OLD.status = 'awaiting_input'
+                          AND NEW.status = 'succeeded'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM hive_worker_goal_acceptance_candidates candidate
+                              JOIN hive_worker_goal_acceptance_results result
+                                ON result.acceptance_run_id
+                                    = candidate.acceptance_run_id
+                              WHERE candidate.acceptance_run_id = OLD.id
+                                AND candidate.source_run_id = result.source_run_id
+                                AND result.authority = 'user'
+                                AND (
+                                    (candidate.state = 'accepted'
+                                     AND result.decision = 'accept')
+                                    OR (candidate.state = 'rejected'
+                                        AND result.decision = 'reject')
+                                )
+                          )
+                      )
+                      AND NOT (
+                          OLD.status = 'awaiting_input'
+                          AND NEW.status = 'cancelled'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM hive_worker_goal_acceptance_candidates candidate
+                              JOIN hive_worker_goal_acceptance_results result
+                                ON result.acceptance_run_id
+                                    = candidate.acceptance_run_id
+                              WHERE candidate.acceptance_run_id = OLD.id
+                                AND candidate.state = 'stale'
+                                AND candidate.source_run_id = result.source_run_id
+                                AND result.authority = 'lifecycle'
+                                AND result.decision = 'reject'
+                          )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'acceptance run requires an exact committed result');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_worker_provider_calls_acceptance_disabled
+                    BEFORE INSERT ON hive_worker_provider_calls
+                    WHEN EXISTS (
+                        SELECT 1 FROM hive_runs run
+                        WHERE run.id = NEW.run_id
+                          AND run.kind = 'worker_workflow_acceptance'
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'automatic Workflow acceptance is disabled');
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS hive_runs_worker_workflow_progressed_acceptance_guard
+                    BEFORE UPDATE OF status ON hive_runs
+                    WHEN NEW.kind = 'worker_workflow'
+                      AND NEW.status = 'succeeded'
+                      AND EXISTS (
+                          SELECT 1 FROM hive_worker_goal_outcomes outcome
+                          WHERE outcome.run_id = NEW.id
+                            AND outcome.outcome = 'progressed'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM hive_worker_goal_outcomes outcome
+                          JOIN hive_worker_goal_acceptance_candidates candidate
+                            ON candidate.source_run_id = outcome.run_id
+                          JOIN hive_runs acceptance_run
+                            ON acceptance_run.id = candidate.acceptance_run_id
+                          WHERE outcome.run_id = NEW.id
+                            AND outcome.outcome = 'progressed'
+                            AND candidate.worker_id = outcome.worker_id
+                            AND candidate.owner_user_id IS outcome.owner_user_id
+                            AND candidate.session_id = outcome.session_id
+                            AND candidate.workflow_goal_id = outcome.workflow_goal_id
+                            AND candidate.source_attempt_id
+                                = outcome.workflow_attempt_id
+                            AND candidate.plan_revision_id = outcome.plan_revision_id
+                            AND candidate.step_id = outcome.step_id
+                            AND candidate.workspace_dir = outcome.workspace_dir
+                            AND acceptance_run.kind
+                                = 'worker_workflow_acceptance'
+                            AND acceptance_run.status = 'awaiting_input'
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Progressed Workflow outcome has no atomic acceptance authority');
+                    END;
+                    "#,
+                )?;
+            }
+            let terminal_conversation_promotion_ready = [
+                "hive_worker_conversation_inputs",
+                "hive_runs",
+                "hive_workers",
+                "hive_controllers",
+                "hive_worker_introduction_reviews",
+                "hive_worker_governor_override_grants",
+                "hive_worker_governor_override_consumptions",
+                "hive_worker_provider_calls",
+                "hive_worker_provider_call_outcomes",
+                "messages",
+                "sessions",
+            ]
+            .iter()
+            .all(|table| Self::table_exists(&acceptance_tx, table));
+            if terminal_conversation_promotion_ready {
+                acceptance_tx.execute_batch(
+                    r#"
+                    DROP TRIGGER IF EXISTS hive_worker_conversation_inputs_insert_guard;
+                    CREATE TRIGGER hive_worker_conversation_inputs_insert_guard
+                    BEFORE INSERT ON hive_worker_conversation_inputs
+                    WHEN NEW.state <> 'staged'
+                      OR NEW.canonical_message_id IS NOT NULL
+                      OR NEW.assigned_run_id IS NOT NULL
+                      OR NEW.materialized_at IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM hive_workers worker
+                          JOIN sessions session ON session.id = NEW.session_id
+                          JOIN hive_runs active
+                            ON active.id = NEW.accepted_while_run_id
+                          JOIN hive_controllers controller
+                            ON controller.id = active.controller_id
+                          WHERE worker.id = NEW.worker_id
+                            AND worker.user_id IS NEW.owner_user_id
+                            AND worker.status = 'active'
+                            AND worker.dm_session_id = session.id
+                            AND session.user_id IS worker.user_id
+                            AND session.session_type = 'hive'
+                            AND active.worker_id = worker.id
+                            AND active.session_id = session.id
+                            AND active.status IN (
+                                'queued', 'leased', 'running', 'sleeping',
+                                'retry_wait', 'recovery_required'
+                            )
+                            AND active.schedule_id IS NULL
+                            AND active.occurrence_id IS NULL
+                            AND active.group_id IS NULL
+                            AND active.workflow_goal_id IS NULL
+                            AND active.workflow_attempt_id IS NULL
+                            AND controller.worker_id = worker.id
+                            AND controller.session_id = session.id
+                            AND controller.user_id IS worker.user_id
+                            AND controller.status = 'active'
+                            AND json_valid(active.execution_context_json)
+                            AND json_extract(
+                                active.execution_context_json, '$.mode.kind'
+                            ) IN (
+                                'worker_conversation_neutral',
+                                'worker_workspace_attached'
+                            )
+                            AND json_extract(
+                                active.execution_context_json, '$.mode.lane.kind'
+                            ) = 'direct_message'
+                            AND json_extract(
+                                active.execution_context_json, '$.mode.worker_id'
+                            ) = active.worker_id
+                            AND CAST(json_extract(
+                                active.execution_context_json,
+                                '$.mode.worker_revision'
+                            ) AS INTEGER) = worker.revision
+                            AND (
+                                (
+                                    json_extract(
+                                        active.execution_context_json,
+                                        '$.mode.kind'
+                                    ) = 'worker_conversation_neutral'
+                                    AND session.workspace_mode = 'neutral'
+                                    AND (
+                                        session.working_dir IS NULL
+                                        OR session.working_dir = ''
+                                    )
+                                    AND (
+                                        session.project_dir IS NULL
+                                        OR session.project_dir = ''
+                                    )
+                                )
+                                OR (
+                                    session.workspace_mode = json_extract(
+                                        active.execution_context_json,
+                                        '$.mode.workspace_mode'
+                                    )
+                                    AND session.working_dir = json_extract(
+                                        active.execution_context_json,
+                                        '$.mode.working_dir'
+                                    )
+                                    AND session.project_dir IS json_extract(
+                                        active.execution_context_json,
+                                        '$.mode.project_dir'
+                                    )
+                                )
+                            )
+                            AND (
+                                (
+                                    active.kind = 'worker_conversation'
+                                    AND active.governor_origin = 'user_dm'
+                                    AND active.governor_lane_key = 'dm'
+                                    AND active.objective_message_id IS NOT NULL
+                                    AND active.conversation_through_message_id
+                                        = active.objective_message_id
+                                    AND EXISTS (
+                                        SELECT 1 FROM messages objective
+                                        WHERE objective.id
+                                            = active.objective_message_id
+                                          AND objective.session_id = session.id
+                                          AND objective.role = 'user'
+                                    )
+                                )
+                                OR (
+                                    active.kind = 'worker_introduction_review'
+                                    AND active.status IN ('leased', 'running')
+                                    AND active.governor_origin
+                                        = 'user_lifecycle_action'
+                                    AND active.governor_lane_key = 'dm'
+                                    AND active.objective_message_id IS NULL
+                                    AND active.response_message_id IS NULL
+                                    AND active.response_group_message_id IS NULL
+                                    AND active.response_provider_call_id IS NULL
+                                    AND EXISTS (
+                                        SELECT 1
+                                        FROM hive_worker_introduction_reviews review
+                                        WHERE review.run_id = active.id
+                                          AND review.worker_id = worker.id
+                                          AND review.session_id = session.id
+                                          AND review.through_message_id
+                                              = active.conversation_through_message_id
+                                          AND review.status = 'stale'
+                                          AND review.provider_call_id IS NULL
+                                          AND review.last_error
+                                              = 'pre-provider stale: superseded by newer accepted user input'
+                                    )
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                        FROM hive_worker_provider_calls provider_call
+                                        WHERE provider_call.run_id = active.id
+                                    )
+                                )
+                            )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid Worker conversation input binding');
+                    END;
+
+                    DROP TRIGGER IF EXISTS hive_worker_conversation_inputs_materialize_guard;
+                    CREATE TRIGGER hive_worker_conversation_inputs_materialize_guard
+                    BEFORE UPDATE OF state, canonical_message_id, assigned_run_id, materialized_at
+                    ON hive_worker_conversation_inputs
+                    WHEN NEW.state = 'materialized' AND NOT EXISTS (
+                        WITH RECURSIVE conversation_chain(run_id) AS (
+                            SELECT NEW.accepted_while_run_id
+                            UNION
+                            SELECT ledger.accepted_while_run_id
+                            FROM hive_worker_conversation_inputs ledger
+                            JOIN conversation_chain chain
+                              ON ledger.assigned_run_id = chain.run_id
+                            WHERE ledger.id <> NEW.id
+                              AND ledger.state = 'materialized'
+                              AND ledger.worker_id = NEW.worker_id
+                              AND ledger.owner_user_id IS NEW.owner_user_id
+                              AND ledger.session_id = NEW.session_id
+                            UNION
+                            SELECT ledger.assigned_run_id
+                            FROM hive_worker_conversation_inputs ledger
+                            JOIN conversation_chain chain
+                              ON ledger.accepted_while_run_id = chain.run_id
+                            WHERE ledger.id <> NEW.id
+                              AND ledger.state = 'materialized'
+                              AND ledger.worker_id = NEW.worker_id
+                              AND ledger.owner_user_id IS NEW.owner_user_id
+                              AND ledger.session_id = NEW.session_id
+                              AND ledger.assigned_run_id IS NOT NULL
+                        ),
+                        component_tail(run_id) AS (
+                            SELECT COALESCE(
+                                (
+                                    SELECT ledger.assigned_run_id
+                                    FROM hive_worker_conversation_inputs ledger
+                                    JOIN conversation_chain component
+                                      ON component.run_id
+                                         = ledger.accepted_while_run_id
+                                    WHERE ledger.id <> NEW.id
+                                      AND ledger.state = 'materialized'
+                                      AND ledger.worker_id = NEW.worker_id
+                                      AND ledger.owner_user_id IS NEW.owner_user_id
+                                      AND ledger.session_id = NEW.session_id
+                                      AND ledger.assigned_run_id IS NOT NULL
+                                    ORDER BY ledger.canonical_message_id DESC
+                                    LIMIT 1
+                                ),
+                                NEW.accepted_while_run_id
+                            )
+                        )
+                        SELECT 1
+                        FROM component_tail tail
+                        JOIN messages message
+                          ON message.id = NEW.canonical_message_id
+                        JOIN hive_runs assigned ON assigned.id = NEW.assigned_run_id
+                        JOIN hive_runs predecessor
+                          ON predecessor.id = tail.run_id
+                        JOIN hive_workers worker ON worker.id = predecessor.worker_id
+                        JOIN sessions predecessor_session
+                          ON predecessor_session.id = predecessor.session_id
+                        JOIN hive_controllers predecessor_controller
+                          ON predecessor_controller.id = predecessor.controller_id
+                        WHERE message.session_id = NEW.session_id
+                          AND message.role = 'user'
+                          AND assigned.kind = 'worker_conversation'
+                          AND assigned.worker_id = NEW.worker_id
+                          AND assigned.session_id = NEW.session_id
+                          AND assigned.controller_id = predecessor.controller_id
+                          AND assigned.schedule_id IS NULL
+                          AND assigned.occurrence_id IS NULL
+                          AND assigned.group_id IS NULL
+                          AND assigned.workflow_goal_id IS NULL
+                          AND assigned.workflow_attempt_id IS NULL
+                          AND assigned.governor_origin = 'user_dm'
+                          AND assigned.governor_lane_key = 'dm'
+                          AND assigned.objective_message_id = NEW.canonical_message_id
+                          AND assigned.conversation_through_message_id
+                              = NEW.canonical_message_id
+                          AND worker.user_id IS NEW.owner_user_id
+                          AND worker.status = 'active'
+                          AND predecessor_session.user_id IS worker.user_id
+                          AND predecessor_session.session_type = 'hive'
+                          AND predecessor_controller.worker_id = worker.id
+                          AND predecessor_controller.session_id
+                              = predecessor_session.id
+                          AND predecessor_controller.user_id IS worker.user_id
+                          AND predecessor_controller.status = 'active'
+                          AND predecessor.worker_id = NEW.worker_id
+                          AND predecessor.session_id = NEW.session_id
+                          AND (
+                              predecessor.kind = 'worker_introduction_review'
+                              OR assigned.execution_context_json
+                                 = predecessor.execution_context_json
+                          )
+                          AND (
+                              (
+                                  predecessor.status = 'succeeded'
+                                  AND (
+                                      predecessor.response_message_id IS NOT NULL
+                                      OR predecessor.kind
+                                          = 'worker_introduction_review'
+                                  )
+                              )
+                              OR (
+                                  predecessor.status = 'cancelled'
+                                  AND predecessor.kind = 'worker_conversation'
+                                  AND predecessor.schedule_id IS NULL
+                                  AND predecessor.occurrence_id IS NULL
+                                  AND predecessor.group_id IS NULL
+                                  AND predecessor.workflow_goal_id IS NULL
+                                  AND predecessor.workflow_attempt_id IS NULL
+                                  AND predecessor.governor_origin = 'user_dm'
+                                  AND predecessor.governor_lane_key = 'dm'
+                                  AND predecessor.response_message_id IS NULL
+                                  AND predecessor.response_group_message_id IS NULL
+                                  AND predecessor.response_provider_call_id IS NULL
+                                  AND predecessor.last_stop_reason
+                                      = 'owner acknowledged unresolved provider accounting for one direct-message recovery call'
+                                  AND json_valid(predecessor.outcome_json)
+                                  AND json_extract(
+                                      predecessor.outcome_json, '$.kind'
+                                  ) = 'cancelled'
+                                  AND json_extract(
+                                      predecessor.outcome_json, '$.reason'
+                                  ) = 'owner_acknowledged_governor_recovery'
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_worker_governor_override_grants recovery_grant
+                                      WHERE recovery_grant.id = json_extract(
+                                          predecessor.outcome_json,
+                                          '$.governor_recovery_grant_id'
+                                      )
+                                        AND recovery_grant.worker_id = worker.id
+                                        AND recovery_grant.owner_user_id IS worker.user_id
+                                        AND recovery_grant.bypass_unresolved_provider_call = 1
+                                        AND recovery_grant.bypass_daily_call_cap = 0
+                                        AND recovery_grant.bypass_daily_token_cap = 0
+                                        AND recovery_grant.bypass_quiet_hours = 0
+                                        AND recovery_grant.bypass_idle_backoff = 0
+                                        AND recovery_grant.created_at
+                                            <= predecessor.finished_at
+                                        AND recovery_grant.expires_at
+                                            > NEW.materialized_at
+                                        AND assigned.governor_override_id
+                                            = recovery_grant.id
+                                        AND NOT EXISTS (
+                                            SELECT 1
+                                            FROM hive_worker_governor_override_consumptions recovery_consumption
+                                            WHERE recovery_consumption.grant_id
+                                                = recovery_grant.id
+                                        )
+                                        AND (
+                                            SELECT COUNT(*)
+                                            FROM hive_runs recovery_reference
+                                            WHERE recovery_reference.governor_override_id
+                                                = recovery_grant.id
+                                        ) = 1
+                                        AND EXISTS (
+                                            SELECT 1
+                                            FROM hive_worker_provider_calls recovery_call
+                                            LEFT JOIN hive_worker_provider_call_outcomes recovery_outcome
+                                              ON recovery_outcome.provider_call_id
+                                                 = recovery_call.provider_call_id
+                                            WHERE recovery_call.run_id = predecessor.id
+                                              AND (
+                                                  recovery_outcome.provider_call_id IS NULL
+                                                  OR recovery_outcome.state = 'unknown'
+                                              )
+                                        )
+                                        AND NOT EXISTS (
+                                            SELECT 1
+                                            FROM hive_worker_provider_calls late_recovery_call
+                                            LEFT JOIN hive_worker_provider_call_outcomes late_recovery_outcome
+                                              ON late_recovery_outcome.provider_call_id
+                                                 = late_recovery_call.provider_call_id
+                                            WHERE late_recovery_call.run_id = predecessor.id
+                                              AND (
+                                                  late_recovery_outcome.provider_call_id IS NULL
+                                                  OR late_recovery_outcome.state = 'unknown'
+                                              )
+                                              AND late_recovery_call.started_at
+                                                  >= recovery_grant.created_at
+                                        )
+                                  )
+                                  AND json_valid(
+                                      predecessor.execution_context_json
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.kind'
+                                  ) IN (
+                                      'worker_conversation_neutral',
+                                      'worker_workspace_attached'
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.lane.kind'
+                                  ) = 'direct_message'
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_id'
+                                  ) = predecessor.worker_id
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_revision'
+                                  ) = worker.revision
+                                  AND worker.dm_session_id = predecessor.session_id
+                                  AND (
+                                      (
+                                          json_extract(
+                                              predecessor.execution_context_json,
+                                              '$.mode.kind'
+                                          ) = 'worker_conversation_neutral'
+                                          AND predecessor_session.workspace_mode
+                                              = 'neutral'
+                                          AND (
+                                              predecessor_session.working_dir IS NULL
+                                              OR predecessor_session.working_dir = ''
+                                          )
+                                          AND (
+                                              predecessor_session.project_dir IS NULL
+                                              OR predecessor_session.project_dir = ''
+                                          )
+                                      )
+                                      OR (
+                                          predecessor_session.workspace_mode
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.workspace_mode'
+                                              )
+                                          AND predecessor_session.working_dir
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.working_dir'
+                                              )
+                                          AND predecessor_session.project_dir
+                                              IS json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.project_dir'
+                                              )
+                                      )
+                                  )
+                              )
+                              OR (
+                                  predecessor.status = 'cancelled'
+                                  AND predecessor.kind = 'worker_conversation'
+                                  AND predecessor.schedule_id IS NULL
+                                  AND predecessor.occurrence_id IS NULL
+                                  AND predecessor.group_id IS NULL
+                                  AND predecessor.workflow_goal_id IS NULL
+                                  AND predecessor.workflow_attempt_id IS NULL
+                                  AND predecessor.governor_origin = 'user_dm'
+                                  AND predecessor.governor_lane_key = 'dm'
+                                  AND predecessor.response_message_id IS NULL
+                                  AND predecessor.response_group_message_id IS NULL
+                                  AND predecessor.response_provider_call_id IS NULL
+                                  AND predecessor.last_stop_reason
+                                      = 'owner acknowledged completed provider response loss for one direct-message recovery call'
+                                  AND json_valid(predecessor.outcome_json)
+                                  AND json_extract(
+                                      predecessor.outcome_json, '$.kind'
+                                  ) = 'cancelled'
+                                  AND json_extract(
+                                      predecessor.outcome_json, '$.reason'
+                                  ) = 'owner_acknowledged_provider_response_loss'
+                                  AND (
+                                      (
+                                          json_type(
+                                              predecessor.outcome_json,
+                                              '$.governor_recovery_grant_id'
+                                          ) IS NULL
+                                          AND assigned.governor_override_id IS NULL
+                                      )
+                                      OR EXISTS (
+                                          SELECT 1
+                                          FROM hive_worker_governor_override_grants response_loss_grant
+                                          WHERE response_loss_grant.id = json_extract(
+                                              predecessor.outcome_json,
+                                              '$.governor_recovery_grant_id'
+                                          )
+                                            AND assigned.governor_override_id
+                                                = response_loss_grant.id
+                                            AND response_loss_grant.worker_id = worker.id
+                                            AND response_loss_grant.owner_user_id
+                                                IS worker.user_id
+                                            AND response_loss_grant.bypass_unresolved_provider_call = 1
+                                            AND response_loss_grant.bypass_daily_call_cap = 0
+                                            AND response_loss_grant.bypass_daily_token_cap = 0
+                                            AND response_loss_grant.bypass_quiet_hours = 0
+                                            AND response_loss_grant.bypass_idle_backoff = 0
+                                            AND response_loss_grant.created_at
+                                                <= predecessor.finished_at
+                                            AND response_loss_grant.expires_at
+                                                > NEW.materialized_at
+                                            AND NOT EXISTS (
+                                                SELECT 1
+                                                FROM hive_worker_governor_override_consumptions response_loss_consumption
+                                                WHERE response_loss_consumption.grant_id
+                                                    = response_loss_grant.id
+                                            )
+                                            AND (
+                                                SELECT COUNT(*)
+                                                FROM hive_runs response_loss_reference
+                                                WHERE response_loss_reference.governor_override_id
+                                                    = response_loss_grant.id
+                                            ) = 1
+                                      )
+                                  )
+                                  AND (
+                                      SELECT COUNT(*)
+                                      FROM hive_worker_provider_calls response_loss_call
+                                      WHERE response_loss_call.run_id = predecessor.id
+                                  ) = 1
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM hive_worker_provider_calls response_loss_call
+                                      JOIN hive_worker_provider_call_outcomes response_loss_outcome
+                                        ON response_loss_outcome.provider_call_id
+                                           = response_loss_call.provider_call_id
+                                      WHERE response_loss_call.run_id = predecessor.id
+                                        AND response_loss_call.worker_id = worker.id
+                                        AND response_loss_call.worker_revision = worker.revision
+                                        AND response_loss_call.owner_user_id IS worker.user_id
+                                        AND response_loss_call.session_id
+                                            = predecessor.session_id
+                                        AND response_loss_call.group_id IS NULL
+                                        AND response_loss_call.workflow_goal_id IS NULL
+                                        AND response_loss_call.workflow_attempt_id IS NULL
+                                        AND response_loss_call.origin = 'user_dm'
+                                        AND response_loss_call.lane_key = 'dm'
+                                        AND response_loss_call.call_kind = 'agent_turn'
+                                        AND response_loss_outcome.state = 'completed'
+                                        AND response_loss_outcome.outcome = 'completed'
+                                        AND response_loss_outcome.remote_acceptance
+                                            = 'acknowledged'
+                                  )
+                                  AND json_valid(
+                                      predecessor.execution_context_json
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.kind'
+                                  ) IN (
+                                      'worker_conversation_neutral',
+                                      'worker_workspace_attached'
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.lane.kind'
+                                  ) = 'direct_message'
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_id'
+                                  ) = predecessor.worker_id
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_revision'
+                                  ) = worker.revision
+                                  AND worker.status = 'active'
+                                  AND worker.dm_session_id = predecessor.session_id
+                                  AND (
+                                      (
+                                          json_extract(
+                                              predecessor.execution_context_json,
+                                              '$.mode.kind'
+                                          ) = 'worker_conversation_neutral'
+                                          AND predecessor_session.workspace_mode
+                                              = 'neutral'
+                                          AND (
+                                              predecessor_session.working_dir IS NULL
+                                              OR predecessor_session.working_dir = ''
+                                          )
+                                          AND (
+                                              predecessor_session.project_dir IS NULL
+                                              OR predecessor_session.project_dir = ''
+                                          )
+                                      )
+                                      OR (
+                                          predecessor_session.workspace_mode
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.workspace_mode'
+                                              )
+                                          AND predecessor_session.working_dir
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.working_dir'
+                                              )
+                                          AND predecessor_session.project_dir
+                                              IS json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.project_dir'
+                                              )
+                                      )
+                                  )
+                              )
+                              OR (
+                                  predecessor.status IN (
+                                      'failed', 'dead_letter', 'cancelled'
+                                  )
+                                  AND predecessor.kind = 'worker_conversation'
+                                  AND predecessor.schedule_id IS NULL
+                                  AND predecessor.occurrence_id IS NULL
+                                  AND predecessor.group_id IS NULL
+                                  AND predecessor.workflow_goal_id IS NULL
+                                  AND predecessor.workflow_attempt_id IS NULL
+                                  AND predecessor.governor_origin = 'user_dm'
+                                  AND predecessor.governor_lane_key = 'dm'
+                                  AND predecessor.response_message_id IS NULL
+                                  AND predecessor.response_group_message_id IS NULL
+                                  AND predecessor.response_provider_call_id IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM hive_worker_provider_calls call
+                                      LEFT JOIN hive_worker_provider_call_outcomes outcome
+                                        ON outcome.provider_call_id
+                                           = call.provider_call_id
+                                      WHERE call.run_id = predecessor.id
+                                        AND (
+                                            outcome.provider_call_id IS NULL
+                                            OR outcome.state = 'unknown'
+                                            OR (
+                                                call.call_kind IN (
+                                                    'agent_turn',
+                                                    'worker_introduction_opening',
+                                                    'worker_introduction_onboarding'
+                                                )
+                                                AND outcome.state = 'completed'
+                                                AND outcome.outcome = 'completed'
+                                                AND outcome.remote_acceptance
+                                                    = 'acknowledged'
+                                            )
+                                        )
+                                  )
+                                  AND json_valid(
+                                      predecessor.execution_context_json
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.kind'
+                                  ) IN (
+                                      'worker_conversation_neutral',
+                                      'worker_workspace_attached'
+                                  )
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.lane.kind'
+                                  ) = 'direct_message'
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_id'
+                                  ) = predecessor.worker_id
+                                  AND json_extract(
+                                      predecessor.execution_context_json,
+                                      '$.mode.worker_revision'
+                                  ) = worker.revision
+                                  AND worker.dm_session_id = predecessor.session_id
+                                  AND (
+                                      (
+                                          json_extract(
+                                              predecessor.execution_context_json,
+                                              '$.mode.kind'
+                                          ) = 'worker_conversation_neutral'
+                                          AND predecessor_session.workspace_mode
+                                              = 'neutral'
+                                          AND (
+                                              predecessor_session.working_dir IS NULL
+                                              OR predecessor_session.working_dir = ''
+                                          )
+                                          AND (
+                                              predecessor_session.project_dir IS NULL
+                                              OR predecessor_session.project_dir = ''
+                                          )
+                                      )
+                                      OR (
+                                          predecessor_session.workspace_mode
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.workspace_mode'
+                                              )
+                                          AND predecessor_session.working_dir
+                                              = json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.working_dir'
+                                              )
+                                          AND predecessor_session.project_dir
+                                              IS json_extract(
+                                                  predecessor.execution_context_json,
+                                                  '$.mode.project_dir'
+                                              )
+                                      )
+                                  )
+                              )
+                          )
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'invalid materialized Worker input binding');
+                    END;
+                    "#,
+                )?;
+            }
+            acceptance_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (78)",
+                [],
+            )?;
+            acceptance_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4317,7 +9005,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 68);
+        assert_eq!(database.get_schema_version(), 78);
         database
             .conn()
             .execute(
@@ -4398,7 +9086,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 68);
+        assert_eq!(database.get_schema_version(), 78);
         let create_sql: String = database
             .conn()
             .query_row(

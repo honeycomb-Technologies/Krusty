@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::hive::HiveRunStatus;
+use crate::storage::WorkerRunGovernorProjection;
+
+use super::HiveRunExecutionContextV1;
+
+/// Stable durable marker proving that the owner requested Stop for one exact
+/// ordinary Worker direct-chat run. Store completion authority matches this
+/// value exactly; callers must not reuse it for lifecycle cancellation.
+pub const WORKER_CONVERSATION_STOP_REQUESTED_REASON: &str =
+    "Worker conversation stop requested by user";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +29,23 @@ pub enum HiveRunKind {
     WorkerMessage,
     /// Periodic wake for an always-on Worker on its private DM lane.
     WorkerHeartbeat,
+    /// One tool-free first turn in which a new Worker initiates its private
+    /// conversation without manufacturing a canonical user message.
+    WorkerIntroduction,
+    /// One user-visible response on a Worker's serialized private DM lane.
+    /// This run kind is never replayed after an uncertain provider boundary.
+    WorkerConversation,
+    /// One bounded attempt against a user-approved durable Workflow Goal.
+    /// The run commits a typed Goal outcome rather than a chat response and
+    /// is never replayed after crossing a provider or workspace boundary.
+    WorkerWorkflow,
+    /// One tool-free, transcript-frozen Introduction review. Its terminal
+    /// authority is the linked review audit, never an assistant response.
+    WorkerIntroductionReview,
+    /// One immutable owner-facing decision boundary for a committed
+    /// `Progressed` Worker Workflow result. V1 is never claimed or executed;
+    /// it remains `awaiting_input` until an exact owner or lifecycle result.
+    WorkerWorkflowAcceptance,
 }
 
 impl HiveRunKind {
@@ -32,6 +58,11 @@ impl HiveRunKind {
             Self::GroupTurn => "group_turn",
             Self::WorkerMessage => "worker_message",
             Self::WorkerHeartbeat => "worker_heartbeat",
+            Self::WorkerIntroduction => "worker_introduction",
+            Self::WorkerConversation => "worker_conversation",
+            Self::WorkerWorkflow => "worker_workflow",
+            Self::WorkerIntroductionReview => "worker_introduction_review",
+            Self::WorkerWorkflowAcceptance => "worker_workflow_acceptance",
         }
     }
 
@@ -44,6 +75,11 @@ impl HiveRunKind {
             "group_turn" => Some(Self::GroupTurn),
             "worker_message" => Some(Self::WorkerMessage),
             "worker_heartbeat" => Some(Self::WorkerHeartbeat),
+            "worker_introduction" => Some(Self::WorkerIntroduction),
+            "worker_conversation" => Some(Self::WorkerConversation),
+            "worker_workflow" => Some(Self::WorkerWorkflow),
+            "worker_introduction_review" => Some(Self::WorkerIntroductionReview),
+            "worker_workflow_acceptance" => Some(Self::WorkerWorkflowAcceptance),
             _ => None,
         }
     }
@@ -73,9 +109,41 @@ pub struct HiveRun {
     pub session_id: Option<String>,
     pub schedule_id: Option<String>,
     pub occurrence_id: Option<String>,
+    /// Authoritative Worker linkage; never recover this identity from config.
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    /// Canonical user/objective message that caused this run.
+    #[serde(default)]
+    pub objective_message_id: Option<i64>,
     pub kind: HiveRunKind,
     pub objective: String,
     pub config: Value,
+    /// Frozen capability, revision, and conversation-lane binding.
+    #[serde(default)]
+    pub execution_context: Option<HiveRunExecutionContextV1>,
+    /// Inclusive canonical transcript boundary for this response.
+    #[serde(default)]
+    pub conversation_through_message_id: Option<i64>,
+    /// Deterministically keyed final assistant row, once committed.
+    #[serde(default)]
+    pub response_message_id: Option<i64>,
+    /// Exact provider Started row whose visible output became the response.
+    #[serde(default)]
+    pub response_provider_call_id: Option<String>,
+    /// Deterministically keyed group-room projection, when this is a member run.
+    #[serde(default)]
+    pub response_group_message_id: Option<String>,
+    /// Canonical durable Workflow Goal bound to this run, when the run is a
+    /// bounded Worker Workflow attempt.
+    #[serde(default)]
+    pub workflow_goal_id: Option<String>,
+    /// Canonical Workflow execution attempt.  One attempt can back exactly
+    /// one Hive run.
+    #[serde(default)]
+    pub workflow_attempt_id: Option<String>,
+    /// Migration-74 gate/origin projection loaded from authoritative columns.
+    #[serde(default)]
+    pub governor: Option<WorkerRunGovernorProjection>,
     pub status: HiveRunStatus,
     pub priority: i32,
     pub concurrency_key: Option<String>,
@@ -212,8 +280,20 @@ pub struct RunCompletion {
 pub struct LeaseReconciliation {
     pub requeued_unstarted: usize,
     pub recovery_required: usize,
+    /// Expired Worker Introduction attempts whose canonical first assistant
+    /// message was already committed before the executor disappeared.
+    pub recovered_succeeded: usize,
+    /// Expired attempts with an exact terminal failure audit, including an
+    /// acknowledged semantic-invalid reviewer response.
+    pub recovered_failed: usize,
+    /// Expired ordinary Worker conversations whose exact typed Stop marker
+    /// was committed before the prior daemon disappeared.
+    pub recovered_cancelled: usize,
     pub requeued_runs: Vec<ReconciledRun>,
     pub recovery_required_runs: Vec<ReconciledRun>,
+    pub recovered_succeeded_runs: Vec<ReconciledRun>,
+    pub recovered_failed_runs: Vec<ReconciledRun>,
+    pub recovered_cancelled_runs: Vec<ReconciledRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

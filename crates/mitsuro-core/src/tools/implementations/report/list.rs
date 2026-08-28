@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::storage::{Database, ReportStore};
 use crate::tools::registry::{ToolContext, ToolResult};
 
-use super::Params;
+use super::{resolve_reader_scope, Params};
 
 pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
     let db_path = match &ctx.db_path {
@@ -16,14 +16,28 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
         Err(e) => return ToolResult::error(format!("Database error: {e}")),
     };
 
+    let reader = match resolve_reader_scope(ctx, &db) {
+        Ok(reader) => reader,
+        Err(e) => return ToolResult::error(format!("Report access denied: {e}")),
+    };
+
     let store = ReportStore::new(db);
     let project_dir = ctx.project_dir.as_ref().map(|p| p.to_string_lossy());
     let project_dir_str = project_dir.as_deref();
 
     let reports = if let Some(query) = params.query.as_deref() {
-        store.search_reports(query, project_dir_str)
+        store.search_reports_for_memory_reader(
+            query,
+            project_dir_str,
+            reader.user_id.as_deref(),
+            reader.worker_id.as_deref(),
+        )
     } else {
-        store.list_reports(project_dir_str)
+        store.list_reports_for_memory_reader(
+            project_dir_str,
+            reader.user_id.as_deref(),
+            reader.worker_id.as_deref(),
+        )
     };
 
     match reports {

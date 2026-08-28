@@ -17,6 +17,7 @@ use tracing::info;
 
 use super::config::CallOptions;
 use super::core::AiClient;
+use super::RemoteAttemptPolicy;
 use crate::ai::retry::{
     is_retryable_interactive_stream_error, with_retry, IsRetryable, RetryConfig,
 };
@@ -51,14 +52,38 @@ impl AiClient {
         messages: Vec<ModelMessage>,
         options: &CallOptions,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
+        self.call_streaming_with_attempt_policy(
+            messages,
+            options,
+            RemoteAttemptPolicy::ConfiguredRetries,
+        )
+        .await
+    }
+
+    /// Call a streaming provider with an explicit remote-attempt policy.
+    ///
+    /// Hive Worker callers must pass `GovernedSingleAttempt` only after their
+    /// exact durable provider-call slot has been Started.
+    pub async fn call_streaming_with_attempt_policy(
+        &self,
+        messages: Vec<ModelMessage>,
+        options: &CallOptions,
+        attempt_policy: RemoteAttemptPolicy,
+    ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         let canonical_options = self.canonical_call_options(&self.config().model, options);
-        let retry_config = RetryConfig::interactive_stream();
+
+        if !attempt_policy.allows_retry() {
+            return self
+                .call_streaming_once(messages, &canonical_options, attempt_policy)
+                .await;
+        }
 
         // A receiver is returned only after the provider accepts the request,
         // so typed transient HTTP failures and definite connect failures can be
         // retried here without duplicating visible deltas or local tool work.
+        let retry_config = RetryConfig::interactive_stream();
         with_retry(&retry_config, || async {
-            self.call_streaming_once(messages.clone(), &canonical_options)
+            self.call_streaming_once(messages.clone(), &canonical_options, attempt_policy)
                 .await
                 .map_err(InteractiveStreamSetupError)
         })
@@ -70,6 +95,7 @@ impl AiClient {
         &self,
         messages: Vec<ModelMessage>,
         canonical_options: &CallOptions,
+        attempt_policy: RemoteAttemptPolicy,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         let call_start = Instant::now();
         info!("=== API CALL START ===");
@@ -88,7 +114,7 @@ impl AiClient {
 
         if self.config().uses_openai_format() {
             return self
-                .call_streaming_openai(messages, canonical_options, call_start)
+                .call_streaming_openai(messages, canonical_options, call_start, attempt_policy)
                 .await;
         }
 
@@ -337,6 +363,56 @@ mod tests {
         assert_eq!(first_body, second_body);
         assert_eq!(text, "ok");
         assert!(finished);
+    }
+
+    #[tokio::test]
+    async fn governed_ambiguous_setup_failure_uses_one_remote_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("address should resolve")
+        );
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one connection should arrive");
+            let request = read_http_request(&mut stream);
+            request_tx
+                .send(request)
+                .expect("request should be recorded");
+            // Closing after the complete request is intentionally ambiguous:
+            // the peer may have accepted work before its response disappeared.
+            drop(stream);
+
+            listener
+                .set_nonblocking(true)
+                .expect("listener should become nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_millis(350);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(_) => panic!("governed call attempted a second remote request"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("unexpected listener error: {error}"),
+                }
+            }
+        });
+
+        let client = openai_test_client(url);
+        client
+            .call_streaming_with_attempt_policy(
+                vec![user_message()],
+                &CallOptions::default(),
+                RemoteAttemptPolicy::GovernedSingleAttempt,
+            )
+            .await
+            .expect_err("ambiguous governed setup failure must surface without retry");
+
+        server_thread.join().expect("server thread should finish");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("exactly one request should be recorded");
+        assert!(request_rx.try_recv().is_err());
     }
 
     #[tokio::test]

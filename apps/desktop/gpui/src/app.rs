@@ -27870,13 +27870,17 @@ mod tests {
         let mitsuro = ConnectionId::primary(BackendKind::MitsuroHttp);
         let codex_key = SessionKey::new(codex, "same-session").unwrap();
         let mitsuro_key = SessionKey::new(mitsuro, "same-session").unwrap();
-        let mut codex_state = SessionInteractionState::default();
-        codex_state.user_input_question_index = 1;
+        let mut codex_state = SessionInteractionState {
+            user_input_question_index: 1,
+            ..Default::default()
+        };
         codex_state
             .user_input_answers
             .insert("scope".into(), vec!["workspace".into()]);
-        let mut mitsuro_state = SessionInteractionState::default();
-        mitsuro_state.mcp_form_field_index = 2;
+        let mut mitsuro_state = SessionInteractionState {
+            mcp_form_field_index: 2,
+            ..Default::default()
+        };
         mitsuro_state
             .mcp_form_values
             .insert("branch".into(), serde_json::json!("main"));

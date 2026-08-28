@@ -5,4 +5,3 @@
 ### Patch changes
 
 - Bumped due to fixed dependency group policy
-

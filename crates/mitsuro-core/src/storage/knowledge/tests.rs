@@ -7,7 +7,7 @@ use super::*;
 use crate::agent::loop_events::LoopStopReason;
 use crate::storage::{
     AgentMemory, AutonomousTaskStore, Database, MemoryNamespace, MemorySensitivity, MemorySource,
-    MemoryStatus, MemoryStore, MemoryType, ReportStore, TaskStatus,
+    MemoryStatus, MemoryStore, MemoryType, ReportScope, ReportStore, TaskStatus,
 };
 
 fn create_db() -> (std::path::PathBuf, TempDir) {
@@ -112,6 +112,7 @@ fn refresh_current_snapshot_uses_separate_knowledge_storage() {
             summary: "Wake is stable.",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .expect("seed report");
 
@@ -238,6 +239,7 @@ fn refresh_snapshot_same_project_isolates_memory_reports_and_activity_by_exact_o
                 summary: marker,
                 tags: &[],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .unwrap();
     }

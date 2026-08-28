@@ -1,12 +1,13 @@
 //! Grok/X subscription model catalog helpers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::ai::models::{ApiFormat, ModelMetadata};
 use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat};
+use crate::ai::transport_policy::build_provider_http_client;
 
 const DEFAULT_GROK_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 
@@ -51,15 +52,24 @@ pub async fn fetch_models_with_client(
     let client = match client {
         Some(client) => client,
         None => {
-            owned_client = Client::new();
+            owned_client = build_provider_http_client()
+                .context("failed to build Grok catalog HTTP client without redirects")?;
             &owned_client
         }
     };
 
     let models_url = grok_models_url();
+    fetch_models_from_url(access_token, client, &models_url).await
+}
+
+async fn fetch_models_from_url(
+    access_token: &str,
+    client: &Client,
+    models_url: &str,
+) -> Result<Vec<ModelMetadata>> {
     info!(url = %models_url, "Fetching models from Grok CLI proxy...");
     let response = client
-        .get(&models_url)
+        .get(models_url)
         .bearer_auth(access_token)
         .header(
             "x-grok-client-version",
@@ -243,7 +253,62 @@ fn is_grok_build_reasoning_model(model_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use tiny_http::{Header, Response, Server};
+
     use super::*;
+
+    #[tokio::test]
+    async fn catalog_fetch_returns_redirect_without_following_it() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let base_url = format!("http://{}", server.server_addr());
+        let redirect_url = format!("{base_url}/followed");
+        let (request_tx, request_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let request = server.recv().expect("catalog request should arrive");
+            let initial_path = request.url().to_string();
+            request
+                .respond(
+                    Response::from_string("redirect")
+                        .with_status_code(307)
+                        .with_header(
+                            Header::from_bytes("Location", redirect_url)
+                                .expect("redirect header should be valid"),
+                        ),
+                )
+                .expect("redirect should be sent");
+
+            let followed_path = server
+                .recv_timeout(Duration::from_millis(300))
+                .expect("redirect probe should succeed")
+                .map(|request| {
+                    let path = request.url().to_string();
+                    request
+                        .respond(Response::from_string(r#"{"data":[]}"#))
+                        .expect("followed response should be sent");
+                    path
+                });
+            request_tx
+                .send((initial_path, followed_path))
+                .expect("request evidence should be recorded");
+        });
+
+        let client = build_provider_http_client()
+            .expect("Grok catalog client without redirects should build");
+        fetch_models_from_url("test-token", &client, &format!("{base_url}/models"))
+            .await
+            .expect_err("Grok catalog redirect must be returned as an error");
+
+        server_thread.join().expect("server thread should finish");
+        let (initial_path, followed_path) = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("request evidence should arrive");
+        assert_eq!(initial_path, "/models");
+        assert_eq!(followed_path, None);
+    }
 
     #[test]
     fn parses_grok_proxy_model_response() {

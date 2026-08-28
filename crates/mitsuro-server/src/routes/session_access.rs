@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use mitsuro_core::storage::{AgentState, SessionInfo, SessionType};
+use mitsuro_core::storage::{AgentState, Database, HiveWorkerStore, SessionInfo, SessionType};
 use mitsuro_core::SessionManager;
 
 use crate::auth::CurrentUser;
@@ -11,6 +11,45 @@ use crate::AppState;
 pub(super) struct RequestWorkspaceScope {
     pub base_dir: PathBuf,
     pub allowed_root: PathBuf,
+}
+
+/// The ownership-checked product surface behind a generic Hive session ID.
+///
+/// Hidden group lanes are rejected by `load_owned_session_of_type` before this
+/// value is constructed. Callers must then explicitly choose whether a Worker
+/// DM is a valid target for the requested operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum HiveSessionControlScope {
+    PrimaryHive,
+    WorkerDm { worker_id: String },
+}
+
+impl HiveSessionControlScope {
+    pub(super) fn reject_generic_worker_control(&self) -> Result<(), AppError> {
+        match self {
+            Self::PrimaryHive => Ok(()),
+            Self::WorkerDm { worker_id } => Err(AppError::Conflict(format!(
+                "Hive Worker DM lifecycle controls must use the Worker-specific API under /api/hive/workers/{worker_id}"
+            ))),
+        }
+    }
+
+    pub(super) fn require_exact_worker_schedule(
+        &self,
+        schedule_worker_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::PrimaryHive => Ok(()),
+            Self::WorkerDm { worker_id }
+                if schedule_worker_id == Some(worker_id.as_str()) =>
+            {
+                Ok(())
+            }
+            Self::WorkerDm { worker_id } => Err(AppError::Conflict(format!(
+                "Hive Worker DM schedules must be explicitly bound to the exact Worker with worker_id {worker_id}"
+            ))),
+        }
+    }
 }
 
 pub(super) fn current_user_id(user: Option<&CurrentUser>) -> Option<&str> {
@@ -61,6 +100,12 @@ pub(super) fn load_owned_session(
     if !session_visible_to_user(&session, current_user_id(user)) {
         return Err(session_not_found(session_id));
     }
+    if session_manager.is_internal_hive_group_lane(session_id)? {
+        // Group lanes are an execution detail, not user-addressable sessions.
+        // Returning the same shape as a missing session avoids leaking their
+        // identifiers and blocks generic read/update/delete/chat routes.
+        return Err(session_not_found(session_id));
+    }
     Ok(session)
 }
 
@@ -96,6 +141,28 @@ pub(super) fn load_owned_session_of_type(
         )));
     }
     Ok(session)
+}
+
+pub(super) fn load_owned_hive_session_control_scope(
+    state: &AppState,
+    session_manager: &SessionManager,
+    session_id: &str,
+    user: Option<&CurrentUser>,
+) -> Result<HiveSessionControlScope, AppError> {
+    load_owned_session_of_type(session_manager, session_id, SessionType::Hive, "Hive", user)?;
+
+    let store = HiveWorkerStore::new(Database::new(&state.db_path)?);
+    let Some(worker) = store.get_by_dm_session(session_id)? else {
+        return Ok(HiveSessionControlScope::PrimaryHive);
+    };
+    if worker.user_id.as_deref() != current_user_id(user)
+        || worker.dm_session_id.as_deref() != Some(session_id)
+    {
+        return Err(session_not_found(session_id));
+    }
+    Ok(HiveSessionControlScope::WorkerDm {
+        worker_id: worker.id,
+    })
 }
 
 pub(super) fn load_agent_state_or_idle(

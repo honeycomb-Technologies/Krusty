@@ -14,7 +14,10 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use mentions::{parse_group_mentions, GroupMentionTarget, MentionResolution};
+pub use mentions::{
+    parse_group_mentions, AmbiguousGroupMention, GroupMentionTarget, MentionResolution,
+    MentionResolutionError,
+};
 pub use model::{
     HiveGroup, HiveGroupExecutionMode, HiveGroupMember, HiveGroupMessage, HiveGroupRunContext,
     HiveGroupSenderKind, HiveGroupStatus, HiveGroupTurn, HiveGroupTurnPolicy, HiveGroupTurnStatus,

@@ -7,12 +7,14 @@ use super::shell::{
     contains_embedded_background_operator, normalize_tracked_background_command,
     strip_shell_background_suffix,
 };
+#[cfg(target_os = "linux")]
+use super::workspace_only_shell_command;
 use super::{
     background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path,
     sandboxed_shell_command, BashTool,
 };
 use crate::process::{CommandEnvironmentPolicy, ProcessRegistry};
-use crate::tools::registry::Tool;
+use crate::tools::registry::{ShellIsolationPolicy, Tool};
 use crate::tools::{ToolContext, ToolResult};
 use serde_json::json;
 use std::sync::Arc;
@@ -193,7 +195,6 @@ async fn foreground_shell_uses_the_sanitized_environment_contract() {
         "MITSURO_TEST_SECRET".to_string(),
         "must-not-escape".to_string(),
     );
-
     let output = build_shell_command(
         "printf '%s|%s' \"${MITSURO_TEST_SECRET-unset}\" \"$HOME\"",
         &ctx,
@@ -454,6 +455,135 @@ fn linux_bubblewrap_user_namespaces_work() -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_goal_shell_command_uses_private_mount_network_and_pid_namespaces_only() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let working_dir = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let strict = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        shell_isolation_policy: ShellIsolationPolicy::WorkspaceOnly,
+        ..Default::default()
+    };
+    let wrapped = sandboxed_shell_command("printf safe", &strict).expect("strict command");
+
+    for required in [
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--hostname mitsuro-worker",
+        "--cap-drop ALL",
+        "--proc /proc",
+    ] {
+        assert!(wrapped.contains(required), "missing {required}: {wrapped}");
+    }
+    assert!(!wrapped.contains("--ro-bind / /"), "{wrapped}");
+    assert!(wrapped.contains(&format!("--bind {0} {0}", working_dir.display())));
+
+    let missing_root = ToolContext {
+        shell_isolation_policy: ShellIsolationPolicy::WorkspaceOnly,
+        ..Default::default()
+    };
+    assert!(
+        sandboxed_shell_command("printf unsafe", &missing_root).is_err(),
+        "strict isolation must fail closed without a configured workspace root"
+    );
+
+    let compatible = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir),
+        ..Default::default()
+    };
+    let compatible_command =
+        sandboxed_shell_command("printf compatible", &compatible).expect("compatible command");
+    assert!(compatible_command.contains("--ro-bind / /"));
+    assert!(!compatible_command.contains("--unshare-net"));
+    assert!(!compatible_command.contains("--unshare-pid"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_goal_shell_rejects_root_and_system_runtime_workspaces() {
+    for candidate in ["/", "/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+        let candidate = std::path::Path::new(candidate);
+        if !candidate.exists() {
+            continue;
+        }
+        let canonical = candidate.canonicalize().expect("canonical runtime root");
+        let error = workspace_only_shell_command("printf unsafe", &canonical, &canonical)
+            .expect_err("broad or runtime workspace root must fail closed");
+        assert!(
+            error.contains("refused unsafe workspace root"),
+            "unexpected rejection for {}: {error}",
+            candidate.display()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn worker_goal_shell_hides_sensitive_env_host_files_processes_and_routes() {
+    if !linux_bubblewrap_user_namespaces_work() {
+        eprintln!(
+            "skipping Worker Goal shell isolation test: bubblewrap user namespaces are unavailable"
+        );
+        return;
+    }
+
+    let parent = tempfile::tempdir().expect("temp parent");
+    let working_dir = parent.path().join("assigned");
+    let outside = parent.path().join("outside-secret.txt");
+    std::fs::create_dir(&working_dir).expect("assigned workspace");
+    std::fs::write(&outside, "must-not-be-visible").expect("outside canary");
+    let working_dir = working_dir.canonicalize().expect("canonical workspace");
+    let mut ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        command_environment_policy: CommandEnvironmentPolicy::Explicit,
+        shell_isolation_policy: ShellIsolationPolicy::WorkspaceOnly,
+        ..Default::default()
+    };
+    ctx.command_environment.insert(
+        "PATH".to_string(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+    );
+    ctx.command_environment
+        .insert("HOME".to_string(), working_dir.display().to_string());
+    ctx.command_environment.insert(
+        "MITSURO_TEST_SECRET".to_string(),
+        "must-not-escape".to_string(),
+    );
+    ctx.command_environment
+        .insert("JAVA_HOME".to_string(), "/host/private/jdk".to_string());
+    let outside = shell_words::quote(&outside.display().to_string()).into_owned();
+    let host_pid = std::process::id();
+    let command = format!(
+        "outside=hidden; test -r {outside} && outside=visible; \
+         etc=hidden; test -r /etc/passwd && etc=visible; \
+         process=hidden; test -e /proc/{host_pid} && process=visible; \
+         route=isolated; route_header=1; \
+         while IFS= read -r _route_line; do \
+           if [ \"$route_header\" = 1 ]; then route_header=0; else route=routed; break; fi; \
+         done < /proc/net/route; \
+         printf '%s|%s|%s|%s|%s|%s' \
+           \"${{MITSURO_TEST_SECRET-unset}}\" \"${{JAVA_HOME-unset}}\" \
+           \"$outside\" \"$etc\" \"$process\" \"$route\""
+    );
+
+    let result = BashTool.execute(json!({"command": command}), &ctx).await;
+    assert!(!result.is_error, "{}", result.output);
+    let envelope: serde_json::Value = serde_json::from_str(&result.output).expect("tool JSON");
+    assert_eq!(
+        envelope["data"]["output"].as_str().map(str::trim),
+        Some("unset|unset|hidden|hidden|hidden|isolated")
+    );
 }
 
 #[cfg(target_os = "linux")]

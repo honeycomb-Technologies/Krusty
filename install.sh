@@ -191,6 +191,15 @@ get_latest_version() {
         grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
+valid_release_tag() {
+    candidate=$1
+    case "$candidate" in
+        ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+    esac
+    printf '%s\n' "$candidate" | \
+        grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
 sha256_file() {
     checksum_path=$1
     if command -v sha256sum >/dev/null 2>&1; then
@@ -916,6 +925,7 @@ prepare_activation_snapshot() {
     snapshot_activation_path current "$CURRENT_LINK" || return 1
     snapshot_activation_path mitsuro "$INSTALL_DIR/$BINARY" || return 1
     snapshot_activation_path hive "$INSTALL_DIR/$DAEMON_BINARY" || return 1
+    snapshot_activation_path atlas "$INSTALL_DIR/agent-browser" || return 1
     snapshot_activation_path compat-cli "$INSTALL_DIR/$COMPAT_BINARY" || return 1
     snapshot_activation_path compat-hive "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" || return 1
     if [ "$MANAGE_SYSTEMD" = true ]; then
@@ -936,6 +946,7 @@ restore_activation_snapshot() {
     restore_activation_path current "$CURRENT_LINK" || restore_failed=true
     restore_activation_path mitsuro "$INSTALL_DIR/$BINARY" || restore_failed=true
     restore_activation_path hive "$INSTALL_DIR/$DAEMON_BINARY" || restore_failed=true
+    restore_activation_path atlas "$INSTALL_DIR/agent-browser" || restore_failed=true
     restore_activation_path compat-cli "$INSTALL_DIR/$COMPAT_BINARY" || restore_failed=true
     restore_activation_path compat-hive "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" || restore_failed=true
     if [ "$MANAGE_SYSTEMD" = true ]; then
@@ -2164,6 +2175,13 @@ activate_unix_release() {
         { fail_activation "$COMPAT_BINARY compatibility link publication failed"; return 1; }
     activation_checkpoint after-compat-cli-link || \
         { fail_activation "fixture after compatibility CLI link"; return 1; }
+    if [ -f "$RELEASE_DIR/agent-browser" ] || [ -f "$CURRENT_LINK/agent-browser" ]; then
+        install_managed_link ".mitsuro-current/agent-browser" \
+            "$INSTALL_DIR/agent-browser" "$MIGRATING_LEGACY" || \
+            { fail_activation "agent-browser link publication failed"; return 1; }
+        activation_checkpoint after-atlas-link || \
+            { fail_activation "fixture after agent-browser link"; return 1; }
+    fi
     if [ -f "$RELEASE_DIR/$COMPAT_DAEMON_BINARY" ] || \
         [ -f "$CURRENT_LINK/$COMPAT_DAEMON_BINARY" ] || \
         [ -e "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ] || \
@@ -2527,6 +2545,20 @@ run_self_test() (
         rm -rf "$self_root"
     }
     trap self_cleanup 0 HUP INT TERM
+    for self_valid_tag in v0.9.23 v1.2.3-rc.1 v1.2.3+build.4; do
+        valid_release_tag "$self_valid_tag"
+    done
+    for self_invalid_tag in v0.9 v1.2.3/../../attacker v1.2.3_bad; do
+        if valid_release_tag "$self_invalid_tag"; then
+            fail "Self-test accepted invalid release tag: $self_invalid_tag"
+            exit 1
+        fi
+    done
+    self_multiline_tag=$(printf 'v1.2.3\nattacker')
+    if valid_release_tag "$self_multiline_tag"; then
+        fail "Self-test accepted a multiline release tag."
+        exit 1
+    fi
     HOME="$self_root/home"
     export HOME
     XDG_RUNTIME_DIR="$HOME/runtime"
@@ -2737,6 +2769,9 @@ run_self_test() (
         chmod 0755 "$self_payload/$COMPAT_BINARY"
         if [ "$self_kind" = complete ]; then
             mkdir "$self_payload/systemd"
+            printf '#!/bin/sh\nprintf "%%s\\n" "atlas-%s"\n' \
+                "$self_value" > "$self_payload/agent-browser"
+            chmod 0755 "$self_payload/agent-browser"
             printf '#!/bin/sh\nprintf "%%s\\n" "hive-%s"\n' \
                 "$self_value" > "$self_payload/$DAEMON_BINARY"
             chmod 0755 "$self_payload/$DAEMON_BINARY"
@@ -2774,6 +2809,7 @@ run_self_test() (
         [ ! -e "$INSTALL_DIR/.mitsuro-current" ] && [ ! -L "$INSTALL_DIR/.mitsuro-current" ]
         [ -f "$INSTALL_DIR/mitsuro" ] && [ ! -L "$INSTALL_DIR/mitsuro" ]
         [ "$("$INSTALL_DIR/mitsuro")" = direct ]
+        [ ! -e "$INSTALL_DIR/agent-browser" ] && [ ! -L "$INSTALL_DIR/agent-browser" ]
         [ ! -e "$INSTALL_DIR/$COMPAT_BINARY" ] && [ ! -L "$INSTALL_DIR/$COMPAT_BINARY" ]
         [ ! -e "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ] && \
             [ ! -L "$INSTALL_DIR/$COMPAT_DAEMON_BINARY" ]
@@ -3019,6 +3055,7 @@ run_self_test() (
         after-mitsuro-link \
         after-hive-link \
         after-compat-cli-link \
+        after-atlas-link \
         after-compat-hive-link \
         after-mitsuro-hive.socket-link \
         after-mitsuro-hive.service-link \
@@ -3047,6 +3084,8 @@ run_self_test() (
     [ "$(readlink "$INSTALL_DIR/.mitsuro-current")" = ".mitsuro-releases/$v1_release_id" ]
     [ "$("$INSTALL_DIR/mitsuro")" = one ]
     [ "$("$INSTALL_DIR/$COMPAT_BINARY")" = one ]
+    [ "$(readlink "$INSTALL_DIR/agent-browser")" = ".mitsuro-current/agent-browser" ]
+    [ "$("$INSTALL_DIR/agent-browser")" = atlas-one ]
     [ "$("$INSTALL_DIR/$COMPAT_DAEMON_BINARY")" = hive-one ]
     regular_file_with_mode "$INSTALL_DIR/.mitsuro-systemd-managed" 600
     v1_marker_contents=$(sed -n '1p' "$INSTALL_DIR/.mitsuro-systemd-managed")
@@ -3610,6 +3649,10 @@ install() {
     if [ -z "$VERSION" ]; then
         fail "Could not determine latest version."
         exit 1
+    fi
+    if ! valid_release_tag "$VERSION"; then
+        fail "Release tag must look like v0.9.23, got: $VERSION"
+        exit 2
     fi
 
     echo "Installing Mitsuro $VERSION for $PLATFORM..."

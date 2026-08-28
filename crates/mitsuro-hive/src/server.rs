@@ -408,7 +408,7 @@ async fn serve_connection(
     let (reply, shutdown_reason) = dispatch_request(*request, peer, &services).await;
     match reply {
         Ok(HandlerReply::Response(payload)) => {
-            let response = ResponseEnvelope::success(request_id, payload);
+            let response = ResponseEnvelope::success(request_id, *payload);
             write_server_frame(
                 &mut stream,
                 &ServerFrame::Response(response),
@@ -536,14 +536,14 @@ async fn dispatch_request(
 
     match request.command {
         Command::Ping => (
-            Ok(HandlerReply::Response(ResponsePayload::Pong(
+            Ok(HandlerReply::Response(Box::new(ResponsePayload::Pong(
                 PongResponse {
                     instance_id: services.info.instance_id.clone(),
                     daemon_version: services.info.daemon_version.clone(),
                     uptime_secs: services.info.uptime().as_secs(),
                     server_time_unix_ms: unix_time_millis(),
                 },
-            ))),
+            )))),
             None,
         ),
         Command::Stats => {
@@ -551,7 +551,7 @@ async fn dispatch_request(
                 tokio::time::timeout(timeout, services.handler.runtime_stats(&context.actor)).await;
             match runtime {
                 Ok(runtime) => (
-                    Ok(HandlerReply::Response(ResponsePayload::Stats(
+                    Ok(HandlerReply::Response(Box::new(ResponsePayload::Stats(
                         DaemonStats {
                             instance_id: services.info.instance_id.clone(),
                             daemon_version: services.info.daemon_version.clone(),
@@ -567,7 +567,7 @@ async fn dispatch_request(
                                 .load(Ordering::Relaxed),
                             runtime,
                         },
-                    ))),
+                    )))),
                     None,
                 ),
                 Err(_) => (
@@ -596,10 +596,12 @@ async fn dispatch_request(
                 None => "requested over authenticated IPC".to_string(),
             };
             (
-                Ok(HandlerReply::Response(ResponsePayload::Ack(AckResponse {
-                    accepted: true,
-                    message: Some("daemon shutdown requested".to_string()),
-                }))),
+                Ok(HandlerReply::Response(Box::new(ResponsePayload::Ack(
+                    AckResponse {
+                        accepted: true,
+                        message: Some("daemon shutdown requested".to_string()),
+                    },
+                )))),
                 Some(reason),
             )
         }
@@ -864,12 +866,12 @@ mod tests {
     impl CommandHandler for TestHandler {
         async fn handle(&self, _context: CommandContext, command: Command) -> HandlerResult {
             match command {
-                Command::Extension(extension) => Ok(HandlerReply::Response(
+                Command::Extension(extension) => Ok(HandlerReply::Response(Box::new(
                     ResponsePayload::Extension(ExtensionResponse {
                         name: extension.name,
                         payload: extension.payload,
                     }),
-                )),
+                ))),
                 _ => Err(ProtocolErrorPayload::new(
                     "unsupported",
                     "unsupported test command",

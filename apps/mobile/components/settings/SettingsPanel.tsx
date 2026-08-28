@@ -102,7 +102,6 @@ function SettingsDisclosure({
 		</View>
 	);
 }
-
 export function SettingsPanel({
 	active = true,
 	onClose,
@@ -115,6 +114,7 @@ export function SettingsPanel({
 		isConfigured,
 		serverUrl,
 		status,
+		error: connectionError,
 		connect,
 		disconnect,
 		reconnect,
@@ -289,8 +289,26 @@ export function SettingsPanel({
 				text: "Disconnect",
 				style: "destructive",
 				onPress: () => {
-					void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-					disconnect();
+					void (async () => {
+						setIsConnecting(true);
+						setConnectError(null);
+						void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+						try {
+							await disconnect();
+						} catch (logoutError) {
+							setConnectError(
+								toErrorMessage(
+									logoutError,
+									"Saved server credentials could not be removed. Try Disconnect again.",
+								),
+							);
+							await Haptics.notificationAsync(
+								Haptics.NotificationFeedbackType.Error,
+							);
+						} finally {
+							setIsConnecting(false);
+						}
+					})();
 				},
 			},
 		]);
@@ -564,7 +582,7 @@ export function SettingsPanel({
 					isConnected={isConnected}
 					status={status}
 					serverUrl={serverUrl}
-					connectError={connectError}
+					connectError={connectError ?? connectionError}
 					inputUrl={inputUrl}
 					inputToken={inputToken}
 					isConnecting={isConnecting}

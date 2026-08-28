@@ -246,6 +246,36 @@ export function codeProjectThreadGroups(
     });
 }
 
+export type SessionListOverride =
+  | { type: "remove" }
+  | { type: "archive"; archived_at: string | null };
+
+/**
+ * Apply drawer-local delete/archive patches so the visible list can change
+ * in the same render as the swipe action, even if the parent store is late.
+ */
+export function applySessionListOverrides<T extends { id: string; archived_at?: string | null }>(
+  sessions: T[],
+  overrides: Record<string, SessionListOverride>,
+  extras: T[] = [],
+): T[] {
+  const seen = new Set(sessions.map((session) => session.id));
+  const merged = [
+    ...sessions,
+    ...extras.filter((session) => !seen.has(session.id)),
+  ];
+  return merged.flatMap((session) => {
+    const override = overrides[session.id];
+    if (!override) {
+      return [session];
+    }
+    if (override.type === "remove") {
+      return [];
+    }
+    return [{ ...session, archived_at: override.archived_at }];
+  });
+}
+
 export function codeDirectoryToAutoExpand(
   sessions: SessionResponse[],
   activeSessionId: string | null,

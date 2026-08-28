@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::storage::{Database, ReportStore};
 use crate::tools::registry::{ToolContext, ToolResult};
 
-use super::Params;
+use super::{resolve_reader_scope, Params};
 
 pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
     let Some(report_id) = params
@@ -24,9 +24,18 @@ pub(super) fn execute(params: Params, ctx: &ToolContext) -> ToolResult {
         Err(e) => return ToolResult::error(format!("Database error: {e}")),
     };
 
+    let reader = match resolve_reader_scope(ctx, &db) {
+        Ok(reader) => reader,
+        Err(e) => return ToolResult::error(format!("Report access denied: {e}")),
+    };
+
     let store = ReportStore::new(db);
 
-    match store.get_report(report_id) {
+    match store.get_report_for_memory_reader(
+        report_id,
+        reader.user_id.as_deref(),
+        reader.worker_id.as_deref(),
+    ) {
         Ok(Some(report)) => ToolResult::success_data(json!({
             "id": report.id,
             "title": report.title,

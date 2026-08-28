@@ -393,12 +393,21 @@ fn render_status_line(
         }
     }
     let _ = metadata;
-    let status = if parts.is_empty() {
+    let status = if let Some(notice) = &state.update {
+        format!(" {}", notice.banner())
+    } else if parts.is_empty() {
         String::new()
     } else {
         format!(" {}", parts.join(separator))
     };
-    frame.render_widget(Paragraph::new(status).style(style), status_meta);
+    let status_style = if state.update.as_ref().is_some_and(|notice| notice.can_apply) {
+        Style::default().fg(theme.success).bg(theme.surface)
+    } else if state.update.is_some() {
+        Style::default().fg(theme.warning).bg(theme.surface)
+    } else {
+        style
+    };
+    frame.render_widget(Paragraph::new(status).style(status_style), status_meta);
     let footer = required_region(layout, LayoutRegionId::ActionFooter);
     frame.render_widget(Block::default().style(style), footer);
     ActionFooter::render(

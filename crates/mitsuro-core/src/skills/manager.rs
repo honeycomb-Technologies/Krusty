@@ -516,9 +516,7 @@ impl SkillsManager {
         self.ensure_cache();
         sorted_info(self.cache.values().filter(|skill| {
             (include_project_skills || skill.source == SkillSource::Global)
-                && skill.enabled
-                && skill.permission != SkillPermission::Deny
-                && !skill.disable_model_invocation
+                && skill.is_model_invocable()
         }))
     }
 

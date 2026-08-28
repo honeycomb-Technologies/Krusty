@@ -897,7 +897,7 @@ fn validate_manifest_component_paths(manifest: &PluginManifestV1) -> Result<()> 
 
 #[cfg(test)]
 mod signed_bundle_tests {
-    use std::io::{Cursor, Write as _};
+    use std::io::Cursor;
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use ed25519_dalek::{Signer as _, SigningKey};

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Modal,
   Pressable,
@@ -32,11 +33,18 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { HiveScreen } from "../../components/hive/HiveScreen";
+import { HiveMobileThreadControls } from "../../components/hive/HiveMobileThreadControls";
+import {
+  assertCurrentHiveWorkerSendBinding,
+  assertHiveWorkerSendAvailable,
+} from "../../components/hive/workerSessionSendFence";
+import { useHiveWorkers } from "../../components/hive/hooks/useHiveWorkers";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { createLatestIntentScheduler } from "../../components/navigation/latestIntentScheduler";
 import { resolveRouteNavigationIntent } from "../../components/navigation/routeNavigationIntent";
+import { isCurrentSessionNavigationIntent } from "../../components/navigation/sessionNavigationIntentFence";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
@@ -72,6 +80,7 @@ import {
 import { useSessionActions } from "../../components/chat-screen/useSessionActions";
 import { useSessionController } from "../../components/chat-screen/useSessionController";
 import { ActiveConversationSurface } from "../../components/chat-screen/ActiveConversationSurface";
+import { buildEmptyHiveDispatchSelection } from "../../components/chat-screen/emptyHiveDispatchSelection";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type MobileSheet = "threads" | "toolbox" | null;
@@ -131,7 +140,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // sustained stress input, allowing surface activations to accumulate.
   const modeIntentSchedulerRef = useRef<
     ReturnType<
-    typeof createLatestIntentScheduler<SessionType>
+      typeof createLatestIntentScheduler<SessionType>
     > | null
   >(null);
   if (!modeIntentSchedulerRef.current) {
@@ -165,7 +174,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // header reflects requestedMode immediately, so a rapid send can never pair
   // the destination tab with the previous mode's session store.
   const activeTab = tabForSessionType(activeMode);
+  const navigationIntentGenerationRef = useRef(0);
   const setActiveTab = useCallback((index: number) => {
+    navigationIntentGenerationRef.current += 1;
     const mode = sessionTypeForTab(index);
     setRequestedMode(mode);
     modeIntentSchedulerRef.current?.submit(mode);
@@ -228,10 +239,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     setActiveSheet(open ? "threads" : null);
   }, []);
   const [hiveTopLevel, setHiveTopLevel] = useState<HiveTopLevelView>("hive");
+  // A Worker selection is visible immediately, but transcript hydration stays
+  // behind the existing quiet-window scheduler. Keep the old Hive session
+  // fenced off until the store has synchronously adopted the exact target.
+  const [pendingHiveThreadSessionId, setPendingHiveThreadSessionId] = useState<
+    string | null
+  >(null);
   const [hiveNotificationTarget, setHiveNotificationTarget] = useState<
     {
-    messageId?: string;
-    reportId?: string;
+      messageId?: string;
+      reportId?: string;
     } | null
   >(null);
   const toolboxOpen = isDesktop
@@ -263,6 +280,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [composerReserveHeight, setComposerReserveHeight] = useState(
     CHAT_BAR_ZONE,
   );
+  const [
+    mobileHiveIntroductionReserveHeight,
+    setMobileHiveIntroductionReserveHeight,
+  ] = useState(0);
+  const [
+    mobileHiveGoalTrackerReserveHeight,
+    setMobileHiveGoalTrackerReserveHeight,
+  ] = useState(0);
   const [mobileHeaderHeight, setMobileHeaderHeight] = useState(88);
   const [errorBannerHeight, setErrorBannerHeight] = useState(0);
   /** Measured desktop chat pane width (split host, before soft-cap). */
@@ -270,6 +295,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const {
     models,
     ensureModelReady,
+    recordSharedModelSelection,
     lastSessionIdByTypeRef,
   } = useSessionController({
     client,
@@ -280,6 +306,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     modeStores: stores.modes,
     sessions,
   });
+  // One roster owner serves both the desktop Hive surface and the stable
+  // mobile transcript controls. Only the committed Hive mode enables reads.
+  const hiveWorkers = useHiveWorkers(activeMode === "hive");
 
   const selectedModelInfo = useMemo(
     () =>
@@ -339,7 +368,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           );
         }
       } catch {
-        if (currentSessionId === targetSessionId) {
+        if (
+          currentSessionId === targetSessionId &&
+          sessionStore.getState().sessionId === targetSessionId
+        ) {
           await sessionStore.getState().loadSession(targetSessionId, true);
         }
       } finally {
@@ -440,9 +472,58 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     modeStores: stores.modes,
     sessions,
     models,
+    onSharedModelSelect: recordSharedModelSelection,
     suppressCompletionRef,
     lastSessionIdByTypeRef,
+    navigationIntentGenerationRef,
   });
+
+  const handleOpenHiveWorkerDm = useCallback(
+    (targetSessionId: string) => {
+      setPendingHiveThreadSessionId(targetSessionId);
+      void loadSessionById(targetSessionId);
+    },
+    [loadSessionById],
+  );
+
+  const handleOpenSession = useCallback(
+    (session: SessionResponse) => {
+      setPendingHiveThreadSessionId(null);
+      void loadSession(session);
+    },
+    [loadSession],
+  );
+
+  const handleOpenSessionById = useCallback(
+    (targetSessionId: string) => {
+      setPendingHiveThreadSessionId(null);
+      return loadSessionById(targetSessionId);
+    },
+    [loadSessionById],
+  );
+
+  useEffect(() => {
+    if (!pendingHiveThreadSessionId) {
+      return;
+    }
+    if (activeMode !== "hive") {
+      // A drawer-origin Worker selection requests Hive immediately, while the
+      // committed mode still waits behind the same 72 ms quiet-window used by
+      // every mode switch. Preserve the exact-session fence during that gap;
+      // explicit navigation away from Hive clears both requested intent and
+      // the pending target through the handlers above.
+      if (requestedMode !== "hive") {
+        setPendingHiveThreadSessionId(null);
+      }
+      return;
+    }
+    if (sessionId !== pendingHiveThreadSessionId) return;
+
+    // loadSession adopts the destination shell synchronously before network
+    // hydration. Only now may the single transcript surface replace Workers.
+    setPendingHiveThreadSessionId(null);
+    setHiveTopLevel("hive");
+  }, [activeMode, pendingHiveThreadSessionId, requestedMode, sessionId]);
 
   const handleSessionToolApproval = useCallback(
     (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -463,14 +544,18 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [handleSessionToolApproval],
   );
   const handleSubmitTranscriptTool = useCallback(
-    (toolCallId: string, result: string) => {
-      void handleInteractiveToolResult(toolCallId, result);
+    (targetSessionId: string, toolCallId: string, result: string) => {
+      void handleInteractiveToolResult(targetSessionId, toolCallId, result);
     },
     [handleInteractiveToolResult],
   );
   const handleTranscriptPlanConfirm = useCallback(
-    (toolCallId: string, choice: "execute" | "abandon") => {
-      void handlePlanConfirm(toolCallId, choice);
+    (
+      targetSessionId: string,
+      toolCallId: string,
+      choice: "execute" | "abandon",
+    ) => {
+      void handlePlanConfirm(targetSessionId, toolCallId, choice);
     },
     [handlePlanConfirm],
   );
@@ -491,36 +576,63 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         if (!client || !task) {
           return;
         }
+        const hiveStore = stores.modes.hive.session;
+        const dispatchIntentGeneration = navigationIntentGenerationRef.current;
+        const isCurrentDispatchPhase = (expectedSessionId: string | null) =>
+          activeModeRef.current === "hive" &&
+          isCurrentSessionNavigationIntent(
+            dispatchIntentGeneration,
+            navigationIntentGenerationRef.current,
+            expectedSessionId,
+            hiveStore.getState().sessionId,
+          );
         if (normalizedAttachments.length > 0) {
-          sessionStore.setState({
+          if (!isCurrentDispatchPhase(null)) return;
+          hiveStore.setState({
             error:
               "Start the Hive thread with text, then attach files in the conversation.",
           });
           return;
         }
+        if (!isCurrentDispatchPhase(null)) return;
         const resolvedModel = await ensureModelReady();
+        if (!isCurrentDispatchPhase(null)) return;
         if (!resolvedModel) {
-          sessionStore.setState({
+          hiveStore.setState({
             error: "Choose an available model before starting Hive.",
           });
           return;
         }
+        const dispatchModelSelection = buildEmptyHiveDispatchSelection(
+          resolvedModel,
+          hiveStore.getState().modelKey,
+        );
+        let dispatchedSessionId: string | null = null;
         try {
+          if (!isCurrentDispatchPhase(null)) return;
           const response = await client.dispatchHive(task, {
             projectDir: workspaceDirectory ?? undefined,
-            model: resolvedModel,
+            ...dispatchModelSelection,
           });
+          if (!isCurrentDispatchPhase(null)) return;
+          dispatchedSessionId = response.session_id;
           lastSessionIdByTypeRef.current.hive = response.session_id;
           await sessionsStore.getState().loadSessions();
-          await sessionStore.getState().loadSession(response.session_id, true);
+          if (!isCurrentDispatchPhase(null)) return;
+          await hiveStore.getState().loadSession(response.session_id, true);
+          if (!isCurrentDispatchPhase(response.session_id)) return;
           void Haptics.notificationAsync(
             Haptics.NotificationFeedbackType.Success,
           );
         } catch (dispatchError) {
-          sessionStore.setState({
+          const isCurrentFailure = isCurrentDispatchPhase(null) ||
+            (dispatchedSessionId != null &&
+              isCurrentDispatchPhase(dispatchedSessionId));
+          if (!isCurrentFailure) return;
+          hiveStore.setState({
             error: dispatchError instanceof Error
-                ? dispatchError.message
-                : "Failed to start the Hive thread.",
+              ? dispatchError.message
+              : "Failed to start the Hive thread.",
           });
         }
         return;
@@ -535,8 +647,50 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       handleSend,
       sessionStore,
       sessionsStore,
+      stores.modes.hive.session,
       workspaceDirectory,
     ],
+  );
+
+  const handleHiveWorkerSend = useCallback(
+    async (expectedSessionId: string, content: string) => {
+      const assertCurrentTarget = () => {
+        assertCurrentHiveWorkerSendBinding(expectedSessionId, {
+          activeMode: activeModeRef.current,
+          sessionId: stores.modes.hive.session.getState().sessionId,
+        });
+      };
+      assertCurrentTarget();
+      // The dedicated composer clears optimistically. Reject before entering
+      // the generic sender when disconnected so this exact Worker's draft is
+      // restored instead of being silently discarded.
+      assertHiveWorkerSendAvailable(Boolean(client) && isConnected);
+      await handleSend(content, [], {
+        assertCurrent: assertCurrentTarget,
+        skipModelReadiness: true,
+        rethrowErrors: true,
+        sendOptions: { hiveConversationKind: "worker_dm" },
+      });
+    },
+    [client, handleSend, isConnected, stores.modes.hive.session],
+  );
+
+  const handleHiveWorkerStop = useCallback(
+    (expectedSessionId: string) => {
+      try {
+        assertCurrentHiveWorkerSendBinding(expectedSessionId, {
+          activeMode: activeModeRef.current,
+          sessionId: stores.modes.hive.session.getState().sessionId,
+        });
+      } catch {
+        return;
+      }
+      stopCurrentStream(true, {
+        expectedSessionId,
+        hiveConversationKind: "worker_dm",
+      });
+    },
+    [stopCurrentStream, stores.modes.hive.session],
   );
 
   const handleRenameSession = useCallback(() => {
@@ -621,15 +775,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // previous mode's title. The committed selector resumes ownership once both
   // modes agree.
   const requestedModeDisplayTitle = requestedMode === activeMode
-      ? displayTitle
-      : displayThreadTitle(
-          stores.modes[requestedMode].session.getState().title,
-        );
+    ? displayTitle
+    : displayThreadTitle(
+      stores.modes[requestedMode].session.getState().title,
+    );
 
   const handleModeChange = useCallback(
     (mode: SessionType) => {
       if (mode === requestedMode) return;
       cancelPendingSessionSelection();
+      setPendingHiveThreadSessionId(null);
       finishModeSwitchSpanRef.current?.();
       finishModeSwitchSpanRef.current = beginMitsuroPerformanceSpan(
         "mode.switch",
@@ -651,20 +806,28 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [activeMode]);
 
   const handleNewHiveSession = useCallback(() => {
+    // handleModeChange intentionally elides same-mode requests. New Hive is a
+    // distinct navigation intent even while already in Hive, so invalidate
+    // every older async continuation before clearing the current thread.
+    navigationIntentGenerationRef.current += 1;
+    cancelPendingSessionSelection();
+    setPendingHiveThreadSessionId(null);
     handleModeChange("hive");
     setActiveSheet(null);
     const hiveStore = stores.modes.hive.session;
     hiveStore.getState().detachSession();
     hiveStore.getState().clearSession();
-  }, [handleModeChange, stores.modes]);
+  }, [cancelPendingSessionSelection, handleModeChange, stores.modes]);
 
   const handleSelectHiveView = useCallback(
     (view: HiveTopLevelView) => {
+      cancelPendingSessionSelection();
+      setPendingHiveThreadSessionId(null);
       handleModeChange("hive");
       setHiveTopLevel(view);
       setDrawerOpen(false);
     },
-    [handleModeChange],
+    [cancelPendingSessionSelection, handleModeChange],
   );
   const modeSwipeBlocked = isDesktop || drawerOpen || toolboxOpen ||
     bottomControlsOpen;
@@ -706,85 +869,85 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const topBar = isDesktop
     ? (
-    <Animated.View
-      style={[styles.topBar, styles.topBarDesktop, entrance.topBarStyle]}
-    >
-      <Pressable
-        onPress={handleRenameSession}
-        style={[
-          styles.titleBtn,
-          displayTitle
-            ? {
+      <Animated.View
+        style={[styles.topBar, styles.topBarDesktop, entrance.topBarStyle]}
+      >
+        <Pressable
+          onPress={handleRenameSession}
+          style={[
+            styles.titleBtn,
+            displayTitle
+              ? {
                 borderColor: t.glass.border,
                 backgroundColor: t.glass.background,
               }
-            : { borderColor: "transparent", backgroundColor: "transparent" },
-        ]}
-        disabled={!sessionId || !displayTitle}
-        accessibilityRole="button"
-        accessibilityLabel="Rename thread"
-      >
-        <Text
-          style={[
-            styles.title,
-            {
-              color: displayTitle ? t.foreground : "transparent",
-            },
+              : { borderColor: "transparent", backgroundColor: "transparent" },
           ]}
-          numberOfLines={1}
+          disabled={!sessionId || !displayTitle}
+          accessibilityRole="button"
+          accessibilityLabel="Rename thread"
         >
-          {displayTitle || " "}
-        </Text>
-      </Pressable>
+          <Text
+            style={[
+              styles.title,
+              {
+                color: displayTitle ? t.foreground : "transparent",
+              },
+            ]}
+            numberOfLines={1}
+          >
+            {displayTitle || " "}
+          </Text>
+        </Pressable>
 
-      <View style={styles.topBarActions}>
-        <Pressable
-          onPress={() => handleSelectHiveView("hive")}
-          style={styles.toolboxCornerBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Open Hive"
-        >
-          <HiveIcon
-            size={20}
-            color={t.mutedForeground}
-            strokeWidth={1.8}
-          />
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            if (toolboxOpen) {
-              handleToolboxClose();
-            } else {
-              handleToolboxOpen();
-            }
-          }}
-          style={[
-            styles.toolboxCornerBtn,
-            toolboxOpen ? { backgroundColor: `${t.thinking}22` } : null,
-          ]}
-          accessibilityRole="button"
-          accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
-        >
-          <Toolbox
-            size={20}
-            color={toolboxOpen ? t.thinking : t.mutedForeground}
-            strokeWidth={1.8}
-          />
-        </Pressable>
-      </View>
-    </Animated.View>
+        <View style={styles.topBarActions}>
+          <Pressable
+            onPress={() => handleSelectHiveView("hive")}
+            style={styles.toolboxCornerBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Open Hive"
+          >
+            <HiveIcon
+              size={20}
+              color={t.mutedForeground}
+              strokeWidth={1.8}
+            />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              if (toolboxOpen) {
+                handleToolboxClose();
+              } else {
+                handleToolboxOpen();
+              }
+            }}
+            style={[
+              styles.toolboxCornerBtn,
+              toolboxOpen ? { backgroundColor: `${t.thinking}22` } : null,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
+          >
+            <Toolbox
+              size={20}
+              color={toolboxOpen ? t.thinking : t.mutedForeground}
+              strokeWidth={1.8}
+            />
+          </Pressable>
+        </View>
+      </Animated.View>
     )
     : (
       <Animated.View
         style={[styles.mobileTopBarOverlay, entrance.topBarStyle]}
       >
-      <MobileAppHeader
-        mode={requestedMode}
-        title={requestedModeDisplayTitle}
-        onModeChange={handleModeChange}
-        onOpenThreads={() => setActiveSheet("threads")}
-        onOpenToolbox={handleToolboxOpen}
+        <MobileAppHeader
+          mode={requestedMode}
+          title={requestedModeDisplayTitle}
+          onModeChange={handleModeChange}
+          onOpenThreads={() => setActiveSheet("threads")}
+          onOpenToolbox={handleToolboxOpen}
           onHeightChange={(nextHeight) =>
             setMobileHeaderHeight((current) =>
               current === nextHeight ? current : nextHeight
@@ -795,6 +958,48 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               activeMode !== "hive"
             ? handleRenameSession
             : undefined}
+        />
+      </Animated.View>
+    );
+
+  const sharedComposer = (
+    <Animated.View
+      style={[
+        entrance.bottomBarStyle,
+        { overflow: "visible", zIndex: 300 },
+      ]}
+    >
+      <ChatBar
+        draftKey={activeMode}
+        onSend={handleChatBarSend}
+        onStop={handleStop}
+        onHeightChange={setComposerReserveHeight}
+        isStreaming={isStreaming}
+        disabled={!isConnected}
+        thinkingLevel={thinkingLevel as ThinkingLevel}
+        onThinkingChange={(level) =>
+          sessionStore.getState().setThinkingLevel(level)}
+        permissionMode={permissionMode as PermissionMode}
+        onPermissionModeToggle={() =>
+          sessionStore.getState().togglePermissionMode()}
+        fastModeEnabled={fastModeEnabled}
+        fastModeSupported={fastModeSupported}
+        onFastModeToggle={handleFastModeToggle}
+        mode={mode}
+        onModeToggle={() =>
+          sessionStore
+            .getState()
+            .setMode(mode === "build" ? "plan" : "build")}
+        onModelSelect={handleModelSelect}
+        model={model}
+        modelKey={modelKey}
+        models={models}
+        sessionType={sessionTypeForTab(activeTab)}
+        workspaceDirectory={workspaceDirectory}
+        targetBranch={workspaceTargetBranch}
+        tokenCount={tokenCount}
+        onOverlayOpenChange={setBottomControlsOpen}
+        contentMaxWidth={isDesktop ? desktopChatMaxWidth : undefined}
       />
     </Animated.View>
   );
@@ -802,73 +1007,54 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // One transcript tree only. Keeping three absolute FlatLists mounted for
   // "warm modes" crashed native on mode switch (especially leaving chat).
   // Session switches still avoid remount via no key + scroll restore.
-  // Messages subscription is isolated inside ActiveConversationSurface.
+  // Messages and their primitive Worker-control projection are both owned by
+  // ActiveConversationSurface; the outer shell never subscribes to messages.
   const chatTranscriptSurface = (
-      <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <ActiveConversationSurface
-          activeMode={activeMode}
-          sessionType={activeMode}
-          activeToolCallId={activeToolCallId}
-          bottomPadding={composerReserveHeight}
+    <Animated.View style={[styles.flex, entrance.contentStyle]}>
+      <ActiveConversationSurface
+        activeMode={activeMode}
+        sessionType={activeMode}
+        activeToolCallId={activeToolCallId}
+        bottomPadding={composerReserveHeight +
+          (activeMode === "hive" && !isDesktop
+            ? mobileHiveIntroductionReserveHeight +
+              mobileHiveGoalTrackerReserveHeight +
+              (mobileHiveGoalTrackerReserveHeight > 0 ? 8 : 0)
+            : 0)}
         topFadeHeight={isDesktop ? undefined : mobileHeaderHeight + 128}
         topFadeOffset={isDesktop ? undefined : 0}
         topContentPadding={isDesktop ? undefined : mobileHeaderHeight + 16}
-          hideJumpToLatest={bottomControlsOpen}
-          showPlanTracker={activeMode !== "hive"}
+        hideJumpToLatest={bottomControlsOpen}
+        showPlanTracker={activeMode !== "hive"}
         hidePlanTracker={bottomControlsOpen}
-          errorBannerHeight={errorBannerHeight}
-          onErrorBannerHeightChange={(nextHeight) => {
-            setErrorBannerHeight((current) =>
+        errorBannerHeight={errorBannerHeight}
+        onErrorBannerHeightChange={(nextHeight) => {
+          setErrorBannerHeight((current) =>
             current === nextHeight ? current : nextHeight
-            );
-          }}
-          onApproveTool={handleApproveTranscriptTool}
-          onDenyTool={handleDenyTranscriptTool}
-          onSubmitToolResult={handleSubmitTranscriptTool}
-          onPlanConfirm={handleTranscriptPlanConfirm}
-        />
-      </Animated.View>
-  );
-
-  const sharedComposer = (
-      <Animated.View
-        style={[
-          entrance.bottomBarStyle,
-          { overflow: "visible", zIndex: 300 },
-        ]}
-      >
-        <ChatBar
-          draftKey={activeMode}
-          onSend={handleChatBarSend}
-          onStop={handleStop}
-          onHeightChange={setComposerReserveHeight}
-          isStreaming={isStreaming}
-          disabled={!isConnected}
-          thinkingLevel={thinkingLevel as ThinkingLevel}
-          onThinkingChange={(level) =>
-          sessionStore.getState().setThinkingLevel(level)}
-          permissionMode={permissionMode as PermissionMode}
-          onPermissionModeToggle={() =>
-          sessionStore.getState().togglePermissionMode()}
-          fastModeEnabled={fastModeEnabled}
-          fastModeSupported={fastModeSupported}
-          onFastModeToggle={handleFastModeToggle}
-          mode={mode}
-          onModeToggle={() =>
-            sessionStore
-              .getState()
-            .setMode(mode === "build" ? "plan" : "build")}
-          onModelSelect={handleModelSelect}
-          model={model}
-          models={models}
-          sessionType={sessionTypeForTab(activeTab)}
-          workspaceDirectory={workspaceDirectory}
-          targetBranch={workspaceTargetBranch}
-          tokenCount={tokenCount}
-          onOverlayOpenChange={setBottomControlsOpen}
-          contentMaxWidth={isDesktop ? desktopChatMaxWidth : undefined}
-        />
-      </Animated.View>
+          );
+        }}
+        onApproveTool={handleApproveTranscriptTool}
+        onDenyTool={handleDenyTranscriptTool}
+        onSubmitToolResult={handleSubmitTranscriptTool}
+        onPlanConfirm={handleTranscriptPlanConfirm}
+        renderThreadControls={!isDesktop && activeMode === "hive"
+          ? (activity) => (
+            <HiveMobileThreadControls
+              {...activity}
+              workers={hiveWorkers}
+              primaryComposer={sharedComposer}
+              onSend={handleHiveWorkerSend}
+              onStop={handleHiveWorkerStop}
+              composerHeight={composerReserveHeight}
+              introductionHeight={mobileHiveIntroductionReserveHeight}
+              onComposerHeightChange={setComposerReserveHeight}
+              onIntroductionHeightChange={setMobileHiveIntroductionReserveHeight}
+              onGoalTrackerHeightChange={setMobileHiveGoalTrackerReserveHeight}
+            />
+          )
+          : undefined}
+      />
+    </Animated.View>
   );
 
   const transcriptAndComposer = (
@@ -882,35 +1068,35 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     <View style={styles.flex}>
       {isDesktop
         ? (
-        <View
-          style={styles.desktopChatColumnHost}
-          onLayout={(event) => {
-            const next = Math.round(event.nativeEvent.layout.width);
-            setDesktopPaneWidth((prev) => (prev === next ? prev : next));
-          }}
-        >
-          {/* Full-pane chrome: title + toolbox button in the true top-right. */}
-          {topBar}
-          {/* Messages + composer share a centered soft-capped band. */}
           <View
-            style={[
-              styles.desktopChatColumn,
-              {
-                maxWidth: desktopChatMaxWidth || DESKTOP_CHAT_MAX_WIDTH,
-                width: "100%",
-              },
-            ]}
+            style={styles.desktopChatColumnHost}
+            onLayout={(event) => {
+              const next = Math.round(event.nativeEvent.layout.width);
+              setDesktopPaneWidth((prev) => (prev === next ? prev : next));
+            }}
           >
-            {transcriptAndComposer}
+            {/* Full-pane chrome: title + toolbox button in the true top-right. */}
+            {topBar}
+            {/* Messages + composer share a centered soft-capped band. */}
+            <View
+              style={[
+                styles.desktopChatColumn,
+                {
+                  maxWidth: desktopChatMaxWidth || DESKTOP_CHAT_MAX_WIDTH,
+                  width: "100%",
+                },
+              ]}
+            >
+              {transcriptAndComposer}
+            </View>
           </View>
-        </View>
         )
         : (
-        <>
-          {topBar}
-          {transcriptAndComposer}
-        </>
-      )}
+          <>
+            {topBar}
+            {transcriptAndComposer}
+          </>
+        )}
     </View>
   );
 
@@ -921,49 +1107,49 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     >
       {isDesktop
         ? (
-        // Desktop: chat fills remaining width; toolbox is a fixed-width rail.
-        <View style={styles.desktopSplit}>
-          <View style={styles.desktopSplitChat}>{chatMain}</View>
+          // Desktop: chat fills remaining width; toolbox is a fixed-width rail.
+          <View style={styles.desktopSplit}>
+            <View style={styles.desktopSplitChat}>{chatMain}</View>
             {toolboxOpen
               ? (
+                <ToolboxPanel
+                  variant="dock"
+                  visible={toolboxOpen}
+                  onClose={handleToolboxClose}
+                  activeTab={toolboxTab}
+                  onTabChange={setToolboxTab}
+                  sessionType={activeMode}
+                  projectDirectory={workspaceDirectory}
+                  onOpenSettings={() => router.navigate("/(tabs)/settings")}
+                  onOpenHiveRun={(id) => void handleOpenSessionById(id)}
+                  onOpenProject={(path, branch) =>
+                    void openProjectInCode(path, branch)}
+                />
+              )
+              : null}
+          </View>
+        )
+        : (
+          <>
+            {chatMain}
             <ToolboxPanel
-              variant="dock"
+              variant="overlay"
               visible={toolboxOpen}
               onClose={handleToolboxClose}
               activeTab={toolboxTab}
               onTabChange={setToolboxTab}
               sessionType={activeMode}
               projectDirectory={workspaceDirectory}
-              onOpenSettings={() => router.navigate("/(tabs)/settings")}
-              onOpenHiveRun={(id) => void loadSessionById(id)}
+              onOpenSettings={() => {
+                setActiveSheet(null);
+                router.navigate("/(tabs)/settings");
+              }}
+              onOpenHiveRun={(id) => void handleOpenSessionById(id)}
               onOpenProject={(path, branch) =>
-                    void openProjectInCode(path, branch)}
-            />
-              )
-              : null}
-        </View>
-        )
-        : (
-        <>
-          {chatMain}
-          <ToolboxPanel
-            variant="overlay"
-            visible={toolboxOpen}
-            onClose={handleToolboxClose}
-            activeTab={toolboxTab}
-            onTabChange={setToolboxTab}
-            sessionType={activeMode}
-            projectDirectory={workspaceDirectory}
-            onOpenSettings={() => {
-              setActiveSheet(null);
-              router.navigate("/(tabs)/settings");
-            }}
-            onOpenHiveRun={(id) => void loadSessionById(id)}
-            onOpenProject={(path, branch) =>
                 void openProjectInCode(path, branch)}
-          />
-        </>
-      )}
+            />
+          </>
+        )}
     </SafeAreaView>
   );
 
@@ -981,17 +1167,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     fastModeSupported,
     mode,
     model,
+    modelKey,
     models,
     tokenCount,
     onApproveTool: (targetSessionId, toolCallId) =>
       handleSessionToolApproval(targetSessionId, toolCallId, true),
     onDenyTool: (targetSessionId, toolCallId) =>
       handleSessionToolApproval(targetSessionId, toolCallId, false),
-    onSubmitToolResult: (toolCallId, result) =>
-      void handleInteractiveToolResult(toolCallId, result),
-    onPlanConfirm: (toolCallId, choice) =>
-      void handlePlanConfirm(toolCallId, choice),
+    onSubmitToolResult: (targetSessionId, toolCallId, result) =>
+      void handleInteractiveToolResult(targetSessionId, toolCallId, result),
+    onPlanConfirm: (targetSessionId, toolCallId, choice) =>
+      void handlePlanConfirm(targetSessionId, toolCallId, choice),
     onSend: handleChatBarSend,
+    onWorkerSend: handleHiveWorkerSend,
+    onWorkerStop: handleHiveWorkerStop,
     onStop: handleStop,
     onThinkingChange: (level) =>
       sessionStore.getState().setThinkingLevel(level),
@@ -1003,8 +1192,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     onModelSelect: handleModelSelect,
   };
 
-  // Desktop owns the full Hive product surface. Mobile uses a single active
-  // conversation surface so mode switches stay crash-free.
+  // Desktop owns the full Hive product surface. Mobile mounts this tree only
+  // for non-thread management views; its thread stays in the single stable
+  // transcript/composer surface below.
   const hiveContent = (
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
       <HiveScreen
@@ -1012,13 +1202,44 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         requestedTopLevel={hiveTopLevel}
         requestedThreadMessageId={hiveNotificationTarget?.messageId}
         requestedReportId={hiveNotificationTarget?.reportId}
-        onOpenRunById={loadSessionById}
+        onOpenRunById={handleOpenSessionById}
+        onOpenWorkerDm={handleOpenHiveWorkerDm}
         onOpenProject={openProjectInCode}
-        onDeleteRun={handleDeleteSession}
+        onDeleteRun={(id) =>
+          handleDeleteSession(id, "hive")}
+        onOpenMenu={!isDesktop ? () => setDrawerOpen(true) : undefined}
         onTopLevelChange={setHiveTopLevel}
         chat={hiveChat}
+        workers={hiveWorkers}
       />
     </Animated.View>
+  );
+
+  const showMobileHiveManagement = activeMode === "hive" &&
+    hiveTopLevel !== "hive";
+  const showMobileHiveThreadTransition = activeMode === "hive" &&
+    pendingHiveThreadSessionId !== null &&
+    sessionId !== pendingHiveThreadSessionId;
+
+  const mobileHiveThreadTransition = (
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: t.background }]}
+      edges={["top"]}
+    >
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 12,
+        }}
+        accessibilityRole="progressbar"
+        accessibilityLabel="Opening Hive Worker conversation"
+      >
+        <ActivityIndicator color={t.thinking} />
+        <Text style={{ color: t.mutedForeground }}>Opening Worker…</Text>
+      </View>
+    </SafeAreaView>
   );
 
   const mobileConversationSurface = (
@@ -1056,7 +1277,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     >
       {topBar}
       {mobileConversationSurface}
-      {sharedComposer}
+      {activeMode === "hive" ? null : sharedComposer}
       <ToolboxPanel
         variant="overlay"
         visible={toolboxOpen}
@@ -1152,7 +1373,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     <DesktopShell
       sessions={sessions}
       activeSessionId={sessionId}
-      onSelectSession={(session) => void loadSession(session)}
+      onSelectSession={handleOpenSession}
       onNewSession={() => void handleNewSession("chat")}
       onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
       onDeleteSession={handleDeleteSession}
@@ -1169,8 +1390,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       {renameModal}
       {isDesktop
         ? (
-        activeTab === 2 ? hiveContent : chatContent
+          activeTab === 2 ? hiveContent : chatContent
         )
+        : showMobileHiveManagement
+        ? hiveContent
+        : showMobileHiveThreadTransition
+        ? mobileHiveThreadTransition
         : mobileContent}
 
       {!isDesktop && (
@@ -1179,8 +1404,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onClose={() => setDrawerOpen(false)}
           sessions={sessions}
           activeSessionId={sessionId}
-          onSelectSession={(session) => void loadSession(session)}
-          onSelectHiveSession={(id) => void loadSessionById(id)}
+          onSelectSession={handleOpenSession}
+          onSelectHiveSession={handleOpenHiveWorkerDm}
+          activeHiveView={hiveTopLevel}
+          onSelectHiveView={handleSelectHiveView}
           onNewSession={(type) => void handleNewSession(type)}
           onNewHiveSession={handleNewHiveSession}
           onNewSessionWithDir={(path) => void handleDirectorySelected(path)}

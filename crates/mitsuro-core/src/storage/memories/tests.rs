@@ -685,6 +685,66 @@ fn hive_reader_isolates_worker_private_and_secret_memories() {
 }
 
 #[test]
+fn standard_reader_excludes_every_hive_private_acl_and_secret() {
+    let (store, _tmp) = create_store();
+    let mut shared = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "shared.canary",
+        "Shared canary",
+        "STANDARD-SHARED-CANARY",
+    );
+    shared.user_id = Some("alice".into());
+
+    let mut worker = shared.clone();
+    worker.canonical_key = "worker.canary".into();
+    worker.title = "Worker canary".into();
+    worker.content = "WORKER-A-PRIVATE-CANARY".into();
+    worker.namespace = MemoryNamespace::Crew;
+    worker.namespace_id = Some("worker-a".into());
+
+    let mut hive = shared.clone();
+    hive.canonical_key = "hive.canary".into();
+    hive.title = "Hive canary".into();
+    hive.content = "PRIMARY-HIVE-CANARY".into();
+    hive.namespace = MemoryNamespace::Hive;
+
+    let mut group = shared.clone();
+    group.canonical_key = "group.canary".into();
+    group.title = "Group canary".into();
+    group.content = "GROUP-PRIVATE-CANARY".into();
+    group.acl_scope = MemoryAclScope::Group;
+    group.conversation_id = Some("group-a".into());
+
+    let mut conversation = shared.clone();
+    conversation.canonical_key = "conversation.canary".into();
+    conversation.title = "Conversation canary".into();
+    conversation.content = "CONVERSATION-PRIVATE-CANARY".into();
+    conversation.acl_scope = MemoryAclScope::Conversation;
+    conversation.conversation_id = Some("session-a".into());
+
+    let mut secret = shared.clone();
+    secret.canonical_key = "secret.canary".into();
+    secret.title = "Secret canary".into();
+    secret.content = "SECRET-CANARY".into();
+    secret.sensitivity = MemorySensitivity::Secret;
+
+    for input in [&shared, &worker, &hive, &group, &conversation, &secret] {
+        store.save_canonical(input).unwrap();
+    }
+
+    let visible = store.list_for_standard_reader(None, Some("alice"));
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].content, "STANDARD-SHARED-CANARY");
+    assert!(MemoryStore::visible_to_standard_reader(&visible[0]));
+    let worker = store
+        .list(None, Some("alice"))
+        .into_iter()
+        .find(|memory| memory.content == "WORKER-A-PRIVATE-CANARY")
+        .unwrap();
+    assert!(!MemoryStore::visible_to_standard_reader(&worker));
+}
+
+#[test]
 fn decay_stale_lowers_unpinned_confidence_and_spares_pinned() {
     let (store, tmp) = create_store();
     let mut stale = CanonicalMemoryInput::new(

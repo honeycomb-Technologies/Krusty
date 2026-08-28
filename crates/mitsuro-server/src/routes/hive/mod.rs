@@ -28,10 +28,12 @@ mod attention;
 mod capabilities;
 mod control_plane;
 mod current;
+mod governor;
 mod groups;
 mod home;
 mod learning;
 mod sessions;
+mod worker_goals;
 mod workers;
 
 pub fn router() -> Router<AppState> {
@@ -64,9 +66,19 @@ fn router_with_wire_identity(legacy_wire: bool) -> Router<AppState> {
         .route("/home/crew/:slug/:kind", put(home::update_crew_document))
         .route("/crew", get(home::crew))
         .route("/channels", get(home::channels))
+        // Every public wire identity is assistant-first. Keep the explicit
+        // introductions path as a compatibility alias to the same handler.
         .route(
             "/workers",
-            get(workers::list_workers).post(workers::create_worker),
+            get(workers::list_workers).post(workers::create_worker_introduction),
+        )
+        .route(
+            "/workers/introductions",
+            post(workers::create_worker_introduction),
+        )
+        .route(
+            "/workers/by-session/:session_id",
+            get(workers::get_worker_by_session),
         )
         .route(
             "/workers/:id",
@@ -76,6 +88,55 @@ fn router_with_wire_identity(legacy_wire: bool) -> Router<AppState> {
         )
         .route("/workers/:id/pause", post(workers::pause_worker))
         .route("/workers/:id/resume", post(workers::resume_worker))
+        .route("/workers/:id/governor", get(governor::get_worker_governor))
+        .route(
+            "/workers/:id/governor/recovery",
+            post(governor::grant_worker_governor_recovery),
+        )
+        .route(
+            "/workers/:id/workflow",
+            get(worker_goals::get_worker_goal).post(worker_goals::create_worker_goal),
+        )
+        .route(
+            "/workers/:id/workflow/approve",
+            post(worker_goals::approve_worker_goal),
+        )
+        .route(
+            "/workers/:id/workflow/activate",
+            post(worker_goals::activate_worker_goal),
+        )
+        .route(
+            "/workers/:id/workflow/pause",
+            post(worker_goals::pause_worker_goal),
+        )
+        .route(
+            "/workers/:id/workflow/cancel",
+            post(worker_goals::cancel_worker_goal),
+        )
+        .route(
+            "/workers/:id/workflow/acceptance",
+            post(worker_goals::resolve_worker_goal_acceptance),
+        )
+        .route(
+            "/workers/:id/workspace",
+            put(worker_goals::set_worker_goal_workspace),
+        )
+        .route(
+            "/workers/:id/introduction/retry",
+            post(workers::retry_worker_introduction),
+        )
+        .route(
+            "/workers/:id/introduction/skip",
+            post(workers::skip_worker_introduction),
+        )
+        .route(
+            "/workers/:id/introduction/confirm",
+            post(workers::confirm_worker_introduction),
+        )
+        .route(
+            "/workers/:id/introduction/keep-talking",
+            post(workers::keep_talking_worker_introduction),
+        )
         .route("/workers/:id/dm", post(workers::ensure_worker_dm))
         .route(
             "/workers/:id/deliveries",

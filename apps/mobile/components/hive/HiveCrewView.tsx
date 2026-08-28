@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Pressable,
   RefreshControl,
@@ -15,6 +15,7 @@ import { HiveWorkerEditorModal } from "./HiveWorkerEditorModal";
 import { HivePresenceDetails } from "./HivePresenceDetails";
 import type { HiveWorkersState } from "./hooks/useHiveWorkers";
 import type { HiveHomeState } from "./types";
+import { createWorkerDmNavigationFence } from "./workerDmNavigationFence";
 import {
   workerAvatarColor,
   workerInitials,
@@ -42,20 +43,48 @@ function WorkerRow({
   onEdit,
   onEditIdentity,
   onEditSoul,
+  onRetryIntroduction,
+  onSkipIntroduction,
+  isSaving,
 }: {
   worker: HiveWorker;
   onOpen: () => void;
   onEdit: () => void;
   onEditIdentity: () => void;
   onEditSoul: () => void;
+  onRetryIntroduction: () => void;
+  onSkipIntroduction: () => void;
+  isSaving: boolean;
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const color = workerAvatarColor(worker);
   const paused = worker.status === "paused";
   const working = worker.dm_agent_state === "running";
-  const statusLabel = paused ? "Paused" : working ? "Working" : "Active";
-  const statusColor = paused ? t.warning : working ? t.success : t.mutedForeground;
+  const introductionNeedsRecovery = worker.introduction_status === "failed" ||
+    worker.introduction_status === "needs_recovery";
+  const introductionRunning = worker.introduction_status === "queued" ||
+    worker.introduction_status === "running";
+  const introductionGathering =
+    worker.introduction_status === "awaiting_context";
+  const statusLabel = introductionNeedsRecovery
+    ? "Needs attention"
+    : introductionRunning
+    ? "Waking up"
+    : introductionGathering
+    ? "Setting up"
+    : paused
+    ? "Paused"
+    : working
+    ? "Working"
+    : "Active";
+  const statusColor = introductionNeedsRecovery
+    ? t.error
+    : introductionRunning || introductionGathering || paused
+    ? t.warning
+    : working
+    ? t.success
+    : t.mutedForeground;
 
   return (
     <View style={[styles.workerRow, { borderColor: t.border }]}>
@@ -77,28 +106,87 @@ function WorkerRow({
         </View>
         <View style={styles.workerCopy}>
           <View style={styles.workerHeader}>
-            <Text style={[styles.workerName, { color: t.foreground }]} numberOfLines={1}>
+            <Text
+              style={[styles.workerName, { color: t.foreground }]}
+              numberOfLines={1}
+            >
               {worker.display_name}
             </Text>
             <View style={styles.statusChip}>
-              <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-              <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
+              <View
+                style={[styles.statusDot, { backgroundColor: statusColor }]}
+              />
+              <Text style={[styles.statusText, { color: statusColor }]}>
+                {statusLabel}
+              </Text>
             </View>
           </View>
-          <Text style={[styles.workerMeta, { color: t.mutedForeground }]} numberOfLines={1}>
+          <Text
+            style={[styles.workerMeta, { color: t.mutedForeground }]}
+            numberOfLines={1}
+          >
             {workerMetaLine(worker)}
           </Text>
         </View>
       </Pressable>
+      {introductionNeedsRecovery && worker.introduction_last_error
+        ? (
+          <Text
+            style={[styles.introductionError, { color: t.error }]}
+            numberOfLines={2}
+          >
+            {worker.introduction_last_error}
+          </Text>
+        )
+        : null}
       <View style={styles.workerActions}>
+        {introductionNeedsRecovery
+          ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Retry ${worker.display_name} Introduction`}
+              disabled={isSaving}
+              onPress={onRetryIntroduction}
+              style={styles.rowAction}
+            >
+              <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+                Retry
+              </Text>
+            </Pressable>
+          )
+          : null}
+        {introductionNeedsRecovery || introductionRunning ||
+            introductionGathering
+          ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Skip ${worker.display_name} Introduction`}
+              disabled={isSaving}
+              onPress={onSkipIntroduction}
+              style={styles.rowAction}
+            >
+              <Text
+                style={[styles.rowActionText, { color: t.mutedForeground }]}
+              >
+                Skip
+              </Text>
+            </Pressable>
+          )
+          : null}
         <Pressable onPress={onEditIdentity} style={styles.rowAction}>
-          <Text style={[styles.rowActionText, { color: t.userMessage }]}>Identity</Text>
+          <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+            Identity
+          </Text>
         </Pressable>
         <Pressable onPress={onEditSoul} style={styles.rowAction}>
-          <Text style={[styles.rowActionText, { color: t.userMessage }]}>Soul</Text>
+          <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+            Soul
+          </Text>
         </Pressable>
         <Pressable onPress={onEdit} style={styles.rowAction}>
-          <Text style={[styles.rowActionText, { color: t.userMessage }]}>Edit</Text>
+          <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+            Edit
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -118,27 +206,51 @@ export function HiveCrewView({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [editorTarget, setEditorTarget] = useState<
-    { mode: "create" } | { mode: "edit"; worker: HiveWorker } | null
+    { mode: "create" } | { mode: "edit"; workerId: string } | null
   >(null);
   const [docTarget, setDocTarget] = useState<WorkerDocTarget | null>(null);
-  const [openingWorkerId, setOpeningWorkerId] = useState<string | null>(null);
+  const openingWorkerIdRef = useRef<string | null>(null);
+  const workerDmNavigationFenceRef = useRef(
+    createWorkerDmNavigationFence(),
+  );
+  const editingWorker = editorTarget?.mode === "edit"
+    ? workers.workers.find((worker) => worker.id === editorTarget.workerId) ??
+      null
+    : null;
+
+  useEffect(() => {
+    const fence = workerDmNavigationFenceRef.current;
+    fence.mount();
+    return () => fence.unmount();
+  }, []);
+
+  const invalidateWorkerDmNavigation = useCallback(() => {
+    workerDmNavigationFenceRef.current.invalidate();
+  }, []);
 
   const openWorkerDm = async (worker: HiveWorker) => {
-    if (openingWorkerId) {
+    const intent = workerDmNavigationFenceRef.current.beginIntent();
+    if (openingWorkerIdRef.current) {
       return;
     }
-    setOpeningWorkerId(worker.id);
+    openingWorkerIdRef.current = worker.id;
     try {
       const dm = await workers.ensureWorkerDm(worker.id);
-      if (dm) {
+      if (dm && workerDmNavigationFenceRef.current.isCurrent(intent)) {
         onOpenWorkerDm(dm.session_id);
       }
     } finally {
-      setOpeningWorkerId(null);
+      if (openingWorkerIdRef.current === worker.id) {
+        openingWorkerIdRef.current = null;
+      }
     }
   };
 
-  const openDocEditor = async (worker: HiveWorker, kind: "identity" | "soul") => {
+  const openDocEditor = async (
+    worker: HiveWorker,
+    kind: "identity" | "soul",
+  ) => {
+    invalidateWorkerDmNavigation();
     const detail = await workers.loadWorkerDetail(worker.id);
     if (!detail) {
       return;
@@ -147,10 +259,9 @@ export function HiveCrewView({
       workerId: worker.id,
       kind,
       title: `Edit ${worker.display_name} ${kind}`,
-      subtitle:
-        kind === "identity"
-          ? "Name, role, and outward presence for this Worker."
-          : "How this Worker thinks, writes, and behaves.",
+      subtitle: kind === "identity"
+        ? "Name, role, and outward presence for this Worker."
+        : "How this Worker thinks, writes, and behaves.",
       initialValue: (kind === "identity" ? detail.identity : detail.soul) ?? "",
     });
   };
@@ -172,8 +283,9 @@ export function HiveCrewView({
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Hive Workers are durable teammates. Each Worker carries its own identity,
-        soul, model, and a private DM — open a Worker to talk to it directly.
+        Hive Workers are durable teammates. Each Worker carries its own
+        identity, soul, model, and a private DM — open a Worker to talk to it
+        directly.
       </Text>
 
       <View style={styles.section}>
@@ -184,7 +296,10 @@ export function HiveCrewView({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Create a new Worker"
-            onPress={() => setEditorTarget({ mode: "create" })}
+            onPress={() => {
+              invalidateWorkerDmNavigation();
+              setEditorTarget({ mode: "create" });
+            }}
             style={styles.rowAction}
           >
             <Text style={[styles.rowActionText, { color: t.userMessage }]}>
@@ -193,21 +308,30 @@ export function HiveCrewView({
           </Pressable>
         </View>
 
-        {workers.error ? (
-          <Text style={[styles.errorText, { color: t.error }]}>{workers.error}</Text>
-        ) : null}
-
-        {(workers.isLoading || workers.isRefreshing) && workers.workers.length === 0 ? (
-          <ListRowsSkeleton rows={3} />
-        ) : null}
-
-        {!workers.isLoading && !workers.isRefreshing && workers.workers.length === 0 ? (
-          <View style={[styles.workerRow, { borderColor: t.border }]}>
-            <Text style={[styles.workerMeta, { color: t.mutedForeground }]}>
-              No Workers yet. Create one to give the Hive a dedicated teammate.
+        {workers.error
+          ? (
+            <Text style={[styles.errorText, { color: t.error }]}>
+              {workers.error}
             </Text>
-          </View>
-        ) : null}
+          )
+          : null}
+
+        {(workers.isLoading || workers.isRefreshing) &&
+            workers.workers.length === 0
+          ? <ListRowsSkeleton rows={3} />
+          : null}
+
+        {!workers.isLoading && !workers.isRefreshing &&
+            workers.workers.length === 0
+          ? (
+            <View style={[styles.workerRow, { borderColor: t.border }]}>
+              <Text style={[styles.workerMeta, { color: t.mutedForeground }]}>
+                No Workers yet. Create one to give the Hive a dedicated
+                teammate.
+              </Text>
+            </View>
+          )
+          : null}
 
         {workers.workers.map((worker) => (
           <WorkerRow
@@ -216,13 +340,38 @@ export function HiveCrewView({
             onOpen={() => {
               void openWorkerDm(worker);
             }}
-            onEdit={() => setEditorTarget({ mode: "edit", worker })}
+            onEdit={() => {
+              invalidateWorkerDmNavigation();
+              setEditorTarget({ mode: "edit", workerId: worker.id });
+            }}
             onEditIdentity={() => {
               void openDocEditor(worker, "identity");
             }}
             onEditSoul={() => {
               void openDocEditor(worker, "soul");
             }}
+            onRetryIntroduction={() => {
+              const intent = workerDmNavigationFenceRef.current.beginIntent();
+              void workers
+                .retryIntroduction(worker.id)
+                .then((detail) => {
+                  if (
+                    detail.dm_session_id &&
+                    workerDmNavigationFenceRef.current.isCurrent(intent)
+                  ) {
+                    onOpenWorkerDm(detail.dm_session_id);
+                  }
+                })
+                // The hook already projects the failure into workers.error.
+                // Consume the event-handler promise so a visible API failure
+                // does not also become an unhandled rejection.
+                .catch(() => undefined);
+            }}
+            onSkipIntroduction={() => {
+              invalidateWorkerDmNavigation();
+              void workers.skipIntroduction(worker.id).catch(() => undefined);
+            }}
+            isSaving={workers.isSaving}
           />
         ))}
       </View>
@@ -234,14 +383,24 @@ export function HiveCrewView({
       />
 
       <HiveWorkerEditorModal
-        visible={editorTarget !== null}
-        worker={editorTarget?.mode === "edit" ? editorTarget.worker : null}
+        visible={editorTarget?.mode === "create" || editingWorker !== null}
+        worker={editingWorker}
         models={models}
         isSaving={workers.isSaving}
-        onClose={() => setEditorTarget(null)}
-        onCreate={async (request) => {
-          await workers.createWorker(request);
+        onClose={() => {
+          invalidateWorkerDmNavigation();
           setEditorTarget(null);
+        }}
+        onCreate={async (request) => {
+          const intent = workerDmNavigationFenceRef.current.beginIntent();
+          const created = await workers.createWorker(request);
+          setEditorTarget(null);
+          if (
+            created.dm_session_id &&
+            workerDmNavigationFenceRef.current.isCurrent(intent)
+          ) {
+            onOpenWorkerDm(created.dm_session_id);
+          }
         }}
         onUpdate={async (id, request) => {
           await workers.updateWorker(id, request);
@@ -374,6 +533,11 @@ const styles = StyleSheet.create({
   workerActions: {
     alignItems: "flex-end",
     gap: 6,
+  },
+  introductionError: {
+    fontSize: 11,
+    lineHeight: 16,
+    paddingLeft: 50,
   },
   rowAction: {
     paddingVertical: 4,

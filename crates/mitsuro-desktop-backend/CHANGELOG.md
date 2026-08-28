@@ -6,4 +6,3 @@
 
 - Bumped due to fixed dependency group policy
 - Updated dependencies: mitsuro-client@0.9.23
-

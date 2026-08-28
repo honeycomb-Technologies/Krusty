@@ -17,3 +17,4 @@ pub use handler::{start_runtime, DurableHiveCommandHandler, HiveRuntimeHandle};
 
 #[cfg(test)]
 mod tests;
+mod worker_context;

@@ -36,7 +36,8 @@ pub(crate) mod usage;
 
 // Re-export main types from new module
 pub use client::{
-    AiClient, AiClientConfig, CallOptions, PromptCacheRetention, MITSURO_SYSTEM_PROMPT,
+    AiClient, AiClientConfig, CallOptions, PromptCacheRetention, RemoteAttemptPolicy,
+    MITSURO_SYSTEM_PROMPT,
 };
 
 pub use title::{derive_pinch_title, derive_title, generate_pinch_title, generate_title};

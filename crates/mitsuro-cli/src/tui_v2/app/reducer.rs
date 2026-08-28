@@ -275,6 +275,12 @@ fn invoke(state: &mut UiState, action: ActionId) -> Vec<UiEffect> {
             state.lifecycle = AppLifecycle::ExitRequested;
             Vec::new()
         }
+        ActionId::ApplyUpdate => {
+            if state.update.as_ref().is_some_and(|notice| notice.can_apply) {
+                state.lifecycle = AppLifecycle::ApplyUpdateRequested;
+            }
+            Vec::new()
+        }
         ActionId::Escape => unwind_nearest(state),
         ActionId::OpenCommandPalette => open_overlay(state, OverlayKind::CommandPalette),
         ActionId::OpenSessionPicker => open_overlay(state, OverlayKind::SessionPicker),
@@ -517,6 +523,27 @@ mod tests {
             glyph_mode: GlyphMode::Unicode,
             color_depth: ColorDepth::TrueColor,
         })
+    }
+
+    #[test]
+    fn apply_update_exits_only_when_a_managed_release_is_ready() {
+        let mut state = state();
+        reduce(&mut state, UiAction::Invoke(ActionId::ApplyUpdate));
+        assert_eq!(state.lifecycle, AppLifecycle::Running);
+
+        state.update = Some(crate::tui_v2::app::state::UpdateNotice {
+            current_version: "0.9.22".to_owned(),
+            new_version: "0.9.23".to_owned(),
+            can_apply: false,
+            hint: "brew upgrade".to_owned(),
+        });
+        reduce(&mut state, UiAction::Invoke(ActionId::ApplyUpdate));
+        assert_eq!(state.lifecycle, AppLifecycle::Running);
+
+        state.update.as_mut().expect("notice").can_apply = true;
+        reduce(&mut state, UiAction::Invoke(ActionId::ApplyUpdate));
+        assert_eq!(state.lifecycle, AppLifecycle::ApplyUpdateRequested);
+        assert_eq!(state.apply_update_version().as_deref(), Some("0.9.23"));
     }
 
     #[test]

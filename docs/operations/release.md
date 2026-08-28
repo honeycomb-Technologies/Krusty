@@ -41,6 +41,7 @@ sh scripts/honey-upgrade.sh v0.9.23
 | Binary job failed | Fix the job, re-run the same workflow; existing assets are not overwritten |
 | Honey `404` | Do not restart services. Wait for the archive, then `honey-upgrade.sh` |
 | Honey `is-active` but `/health` fails | `journalctl --user -u mitsuro-serve.service -u mitsuro-hive.service -n 120` |
+| Browser `API 503` / missing Atlas runtime | The linux archive already has `agent-browser`. On the Honey host run `sh scripts/honey-atlas-repair.sh`. Do not only restart units. |
 
 Do not retag a protected `v*`. Do not `cargo publish`. Do not restart
 `mitsuro-hive.socket` by itself (`RemoveOnStop=true` deletes the IPC socket).

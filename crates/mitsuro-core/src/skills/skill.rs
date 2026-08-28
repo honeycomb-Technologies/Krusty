@@ -202,10 +202,16 @@ impl Skill {
             path: self.definition_path.clone(),
             enabled: self.enabled,
             permission: self.permission,
-            model_invocable: self.enabled
-                && self.permission != SkillPermission::Deny
-                && !self.disable_model_invocation,
+            model_invocable: self.is_model_invocable(),
         }
+    }
+
+    /// Whether this skill may be advertised for model-driven disclosure.
+    ///
+    /// `Ask` stays invocable; only `Deny` is excluded. Load-time supervision
+    /// for `Ask` stays on the tool/user path, not this predicate.
+    pub(crate) fn is_model_invocable(&self) -> bool {
+        self.enabled && self.permission != SkillPermission::Deny && !self.disable_model_invocation
     }
 
     pub fn get_content(&self) -> &str {

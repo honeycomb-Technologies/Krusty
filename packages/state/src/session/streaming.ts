@@ -22,6 +22,7 @@ import {
 import {
 	createChatMessageId,
 	createStreamingAssistantMessage,
+	discardTransientAssistantMessages,
 	finalizeTransientAssistantMessages,
 	pruneEmptyAssistantMessages,
 	upsertTransientAssistantMessage,
@@ -48,8 +49,21 @@ interface StreamCallbackDependencies {
 		mode: SessionMode,
 	) => Promise<void>;
 	isActive?: () => boolean;
+	/** Worker prose is provisional until its exact response boundary commits. */
+	isWorkerResponseExpected?: () => boolean;
+	/** Terminal-independent exact-session ownership for queued successors. */
+	isSessionCurrent?: (sessionId: string) => boolean;
+	expectedSessionId?: string | null;
+	onSessionOwnershipChange?: (sessionId: string) => void;
 	onFirstEvent?: () => void;
 	onDelegationEvent?: () => void;
+	onWorkerResponseBoundaryChange?: (
+		boundary:
+			| { sessionId: string; runId: string }
+			| null,
+	) => void;
+	deferCanonicalReload?: (sessionId: string) => void;
+	consumeCanonicalReload?: (sessionId: string) => boolean;
 }
 
 function appendBounded(existing: string, delta: string, max: number): string {
@@ -133,11 +147,20 @@ export function createStreamCallbacks(
 		sessionsStore,
 		persistSessionMode,
 		isActive = () => true,
+		isWorkerResponseExpected = () => false,
+		isSessionCurrent = () => isActive(),
+		expectedSessionId = null,
+		onSessionOwnershipChange,
 		onFirstEvent,
 		onDelegationEvent,
+		onWorkerResponseBoundaryChange,
+		deferCanonicalReload,
+		consumeCanonicalReload,
 	}: StreamCallbackDependencies,
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
+	let queuedRecoverySourceSessionId: string | null = null;
+	let ownedSessionId = expectedSessionId;
 	let compactedInPlace = false;
 	let streamLagged = false;
 	let pendingTextDelta = "";
@@ -145,7 +168,19 @@ export function createStreamCallbacks(
 	const pendingToolOutputDeltas = new Map<string, string>();
 	let streamFlushScheduled = false;
 	let firstEventPending = true;
+	let workerResponseBoundary: {
+		workerId: string;
+		sessionId: string;
+		runId: string;
+		committed: boolean;
+	} | null = null;
 	const finishFirstEventSpan = beginMitsuroPerformanceSpan("stream.first_event");
+
+	function clearPendingPresentationDeltas() {
+		pendingTextDelta = "";
+		pendingThinkingDelta = "";
+		pendingToolOutputDeltas.clear();
+	}
 
 	function noteFirstEvent() {
 		if (!firstEventPending) return;
@@ -555,6 +590,74 @@ export function createStreamCallbacks(
 			});
 		},
 
+		onWorkerInputStaged: (event) => {
+			noteFirstEvent();
+			flushPendingDeltas();
+			set((state) => {
+				const targetIndex = state.messages.findIndex(
+					(message) => message.workerStagedInputId === event.staged_input_id,
+				);
+				if (targetIndex < 0) return {};
+				const successorRunId = event.successor_run_id ?? undefined;
+				return {
+					messages: state.messages.map((message, index) =>
+						index === targetIndex
+							? {
+								...message,
+								isQueued: successorRunId === undefined,
+								queuedUntilNextRun: successorRunId === undefined,
+								workerStagedInputId: event.staged_input_id,
+								successorRunId,
+							}
+							: message
+					),
+				};
+			});
+		},
+
+		onWorkerResponsePending: (event) => {
+			noteFirstEvent();
+			if (ownedSessionId !== null && event.session_id !== ownedSessionId) {
+				streamLagged = true;
+				return;
+			}
+			workerResponseBoundary = {
+				workerId: event.worker_id,
+				sessionId: event.session_id,
+				runId: event.run_id,
+				committed: false,
+			};
+			onWorkerResponseBoundaryChange?.({
+				sessionId: event.session_id,
+				runId: event.run_id,
+			});
+		},
+
+		onWorkerResponseCommitted: (event) => {
+			const boundary = workerResponseBoundary;
+			if (
+				boundary &&
+				boundary.workerId === event.worker_id &&
+				boundary.sessionId === event.session_id &&
+				boundary.runId === event.run_id
+			) {
+				boundary.committed = true;
+				return;
+			}
+			// A commit boundary for another Worker/run cannot authenticate the
+			// draft currently on screen. Keep it provisional and force the normal
+			// terminal path to discard it.
+			if (!boundary) {
+				workerResponseBoundary = {
+					workerId: event.worker_id,
+					sessionId: event.session_id,
+					runId: event.run_id,
+					committed: false,
+				};
+			}
+			streamLagged = true;
+		},
+
 		onUsage: (promptTokens, completionTokens, metrics) => {
 			flushPendingDeltas();
 			set({
@@ -571,7 +674,17 @@ export function createStreamCallbacks(
 		onSessionPinched: (event: SessionContinuationEvent) => {
 			flushPendingDeltas();
 			if (event.type === "session_pinched") {
+				if (
+					ownedSessionId !== null &&
+					event.source_session_id !== ownedSessionId
+				) {
+					streamLagged = true;
+					return;
+				}
 				pinchedSessionId = event.new_session_id;
+				queuedRecoverySourceSessionId ??= event.source_session_id;
+				ownedSessionId = event.new_session_id;
+				onSessionOwnershipChange?.(event.new_session_id);
 				return;
 			}
 
@@ -590,39 +703,128 @@ export function createStreamCallbacks(
 			sessionsStore.getState().loadSessions();
 		},
 
-		onFinish: (sessionId, _stopReason) => {
-			flushPendingDeltas();
+		onFinish: (sessionId, stopReason) => {
+			if (ownedSessionId !== null && sessionId !== ownedSessionId) {
+				clearPendingPresentationDeltas();
+				onWorkerResponseBoundaryChange?.(null);
+				set({
+					isLoading: false,
+					isStreaming: false,
+					isThinking: false,
+					thinkingContent: "",
+					error: "The stream finished for a different conversation. Reload to reconcile it.",
+				});
+				return;
+			}
+			const responseBoundary = workerResponseBoundary;
+			const discardWorkerDraft = isWorkerResponseExpected()
+				? responseBoundary === null ||
+					responseBoundary.sessionId !== sessionId ||
+					!responseBoundary.committed ||
+					stopReason !== "completed"
+				: responseBoundary !== null &&
+					(
+						responseBoundary.sessionId !== sessionId ||
+						!responseBoundary.committed ||
+						stopReason !== "completed"
+					);
+			if (discardWorkerDraft) {
+				clearPendingPresentationDeltas();
+			} else {
+				flushPendingDeltas();
+			}
+			workerResponseBoundary = null;
+			onWorkerResponseBoundaryChange?.(null);
 			const currentState = get();
 			const queued = currentState.queuedMessages;
 			const activeSessionId = pinchedSessionId ?? sessionId;
+			const queuedSourceSessionId = queuedRecoverySourceSessionId;
+			const queuedSendOptions = queued[0]?.sendOptions;
+			const localQueuedMessageIds = new Set(
+				queued.map((message) => message.id),
+			);
+			const sendQueuedMessages = (expectedSessionId: string) => {
+				if (
+					queued.length === 0 || !isSessionCurrent(expectedSessionId)
+				) {
+					return;
+				}
+				const combinedContent = queued
+					.map((message) => message.content)
+					.join("\n\n");
+				const combinedAttachments = queued.flatMap(
+					(message) => message.attachments,
+				);
+				void get().sendMessage(
+					combinedContent,
+					combinedAttachments,
+					{
+						...queuedSendOptions,
+						queuedSuccessor: {
+							id: createChatMessageId("queued-successor"),
+							sessionId: expectedSessionId,
+							sourceSessionId: queuedSourceSessionId ?? undefined,
+							queuedMessages: queued,
+						},
+					},
+				).catch(() => {
+					// The store restores the exact claimed batch. Always observe the
+					// promise so a provider rejection cannot become an unhandled error.
+				});
+			};
 			const shouldLoadPinchedSession =
 				pinchedSessionId !== null && pinchedSessionId !== sessionId;
+			const inheritedCanonicalReload =
+				consumeCanonicalReload?.(activeSessionId) ?? false;
 			const shouldReloadCurrentSession =
-				(compactedInPlace || streamLagged) && !shouldLoadPinchedSession;
+				(inheritedCanonicalReload || compactedInPlace || streamLagged) &&
+				!shouldLoadPinchedSession;
 
-			const messages = finalizeTransientAssistantMessages(
-				currentState.messages.map((message) =>
+			const terminalMessages = currentState.messages.map((message) =>
+				localQueuedMessageIds.has(message.id)
+					? message
+					:
 					message.isQueued && message.id.startsWith("user-steering-")
 						? { ...message, queuedUntilNextRun: true }
 						: message.isQueued && !message.queuedUntilNextRun
 							? { ...message, isQueued: false }
 							: message,
-				),
-			);
+				);
+			const messages = discardWorkerDraft
+				? discardTransientAssistantMessages(terminalMessages)
+				: finalizeTransientAssistantMessages(terminalMessages);
 
 			set({
 				sessionId: activeSessionId,
 				messages: pruneEmptyAssistantMessages(messages),
-				queuedMessages: [],
+				queuedMessages: queued,
 				isStreaming: false,
 				isThinking: false,
 				thinkingContent: "",
 			});
 			sessionsStore.getState().loadSessions();
 
+			if (queued.length > 0) {
+				// Start the bound follow-up in the same JavaScript turn. Waiting for
+				// transcript rehydration (or even a timer) opened a navigation window
+				// where A's input could be dropped or sent to B. The server owns the
+				// canonical compacted/pinched context, so it is safe to start the exact
+				// next turn before a presentation-only reload.
+				if (shouldLoadPinchedSession || shouldReloadCurrentSession) {
+					deferCanonicalReload?.(activeSessionId);
+				}
+				pinchedSessionId = null;
+				queuedRecoverySourceSessionId = null;
+				compactedInPlace = false;
+				streamLagged = false;
+				sendQueuedMessages(activeSessionId);
+				return;
+			}
+
 			if (shouldLoadPinchedSession) {
 				const nextSessionId = pinchedSessionId;
 				pinchedSessionId = null;
+				queuedRecoverySourceSessionId = null;
 				if (nextSessionId) {
 					void (async () => {
 						try {
@@ -631,24 +833,14 @@ export function createStreamCallbacks(
 							// loadSession already updates error state
 						}
 
-						if (queued.length > 0) {
-							const combinedContent = queued
-								.map((message) => message.content)
-								.join("\n\n");
-							const combinedAttachments = queued.flatMap(
-								(message) => message.attachments,
-							);
-								void get().sendMessage(
-									combinedContent,
-									combinedAttachments,
-								);
-						}
+						sendQueuedMessages(nextSessionId);
 					})();
 				}
 				return;
 			}
 
 			pinchedSessionId = null;
+			queuedRecoverySourceSessionId = null;
 
 			if (shouldReloadCurrentSession) {
 				compactedInPlace = false;
@@ -660,18 +852,7 @@ export function createStreamCallbacks(
 						// loadSession already updates error state
 					}
 
-					if (queued.length > 0) {
-						const combinedContent = queued
-							.map((message) => message.content)
-							.join("\n\n");
-						const combinedAttachments = queued.flatMap(
-							(message) => message.attachments,
-						);
-							void get().sendMessage(
-								combinedContent,
-								combinedAttachments,
-							);
-					}
+					sendQueuedMessages(sessionId);
 				})();
 				return;
 			}
@@ -679,33 +860,30 @@ export function createStreamCallbacks(
 			compactedInPlace = false;
 			streamLagged = false;
 
-			if (queued.length > 0) {
-				const combinedContent = queued
-					.map((message) => message.content)
-					.join("\n\n");
-				const combinedAttachments = queued.flatMap(
-					(message) => message.attachments,
-				);
-					setTimeout(
-						() =>
-							get().sendMessage(
-								combinedContent,
-								combinedAttachments,
-							),
-					50,
-				);
-			}
 		},
 
 		onError: (error) => {
-			// Flush frame-batched stream content so the final update is not dropped.
-			flushPendingDeltas();
+			const discardWorkerDraft = isWorkerResponseExpected() ||
+				workerResponseBoundary !== null;
+			if (discardWorkerDraft) {
+				// Provider text was never authenticated by a completed exact-run
+				// response boundary. Never promote it into local transcript state.
+				clearPendingPresentationDeltas();
+			} else {
+				// Flush ordinary frame-batched stream content so the final update is
+				// not dropped.
+				flushPendingDeltas();
+			}
+			workerResponseBoundary = null;
+			onWorkerResponseBoundaryChange?.(null);
 			set((state) => ({
 				isLoading: false,
 				isStreaming: false,
 				isThinking: false,
 				thinkingContent: "",
-				messages: pruneEmptyAssistantMessages(
+				messages: discardWorkerDraft
+					? discardTransientAssistantMessages(state.messages)
+					: pruneEmptyAssistantMessages(
 					finalizeTransientAssistantMessages(state.messages),
 				),
 				error,

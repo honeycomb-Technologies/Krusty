@@ -372,6 +372,7 @@ export function HiveRunView({
             onModeToggle={chat.onModeToggle}
             onModelSelect={chat.onModelSelect}
             model={chat.model ?? null}
+            modelKey={chat.modelKey}
             models={chat.models}
             sessionType="hive"
             tokenCount={chat.tokenCount}

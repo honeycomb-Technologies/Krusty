@@ -5,13 +5,15 @@
 //! context, external references).
 
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, is_current_snapshot_title,
-    refresh_current_snapshot, AgentMemory, CanonicalMemoryInput, Database, HiveMemoryReader,
-    HiveWorkerStore, MemoryAclScope, MemoryNamespace, MemorySource, MemoryStore, MemoryType,
+    refresh_current_snapshot, resolve_worker_conversation_with_conn, AgentMemory,
+    CanonicalMemoryInput, Database, HiveMemoryReader, MemoryAclScope, MemoryNamespace,
+    MemorySource, MemoryStore, MemoryType,
 };
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
@@ -122,7 +124,14 @@ Actions:
             .as_deref()
             .map(|p| p.to_string_lossy().to_string());
         let user_id = ctx.user_id.as_deref();
-        let hive_scope = resolve_hive_tool_scope(ctx, db_path);
+        let hive_scope = match resolve_hive_tool_scope(ctx, db_path) {
+            Ok(scope) => scope,
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "memory scope could not be resolved safely: {error}"
+                ))
+            }
+        };
 
         match params.action.as_str() {
             "save" => execute_save(
@@ -173,55 +182,72 @@ impl HiveToolScope {
     }
 }
 
-fn resolve_hive_tool_scope(ctx: &ToolContext, db_path: &std::path::Path) -> Option<HiveToolScope> {
+fn resolve_hive_tool_scope(
+    ctx: &ToolContext,
+    db_path: &std::path::Path,
+) -> anyhow::Result<Option<HiveToolScope>> {
+    let Some(session_id) = ctx.session_id.as_deref() else {
+        anyhow::ensure!(
+            ctx.hive_group_run.is_none(),
+            "group Worker memory access has no conversation session"
+        );
+        return Ok(None);
+    };
+    let db = Database::new(db_path)?;
+    let binding = resolve_worker_conversation_with_conn(db.conn(), session_id)?;
+
     if let Some(run) = ctx.hive_group_run.as_ref() {
-        let worker_namespace_id = Database::new(db_path).ok().and_then(|db| {
-            HiveWorkerStore::new(db)
-                .get(&run.worker_id)
-                .ok()
-                .flatten()
-                .filter(|worker| worker.user_id.as_deref() == ctx.user_id.as_deref())
-                .map(|worker| worker.memory_namespace_id)
-        });
-        return Some(HiveToolScope {
-            worker_namespace_id,
-            conversation_id: ctx.session_id.clone(),
-            group_id: Some(run.group_id.clone()),
-        });
+        let binding = binding.ok_or_else(|| {
+            anyhow::anyhow!("group Worker memory access has no persisted lane binding")
+        })?;
+        anyhow::ensure!(
+            binding.group_id.as_deref() == Some(run.group_id.as_str())
+                && binding.worker.id == run.worker_id,
+            "group Worker memory access does not match its persisted lane"
+        );
+        anyhow::ensure!(
+            binding.worker.user_id.as_deref() == ctx.user_id.as_deref(),
+            "group Worker memory access does not match the session owner"
+        );
+        return Ok(Some(HiveToolScope {
+            worker_namespace_id: Some(binding.worker.memory_namespace_id),
+            conversation_id: Some(session_id.to_string()),
+            group_id: binding.group_id,
+        }));
     }
 
-    let session_id = ctx.session_id.as_deref()?;
-    if let Some(worker) = Database::new(db_path).ok().and_then(|db| {
-        HiveWorkerStore::new(db)
-            .get_by_dm_session(session_id)
-            .ok()
-            .flatten()
-            .filter(|worker| worker.user_id.as_deref() == ctx.user_id.as_deref())
-    }) {
-        return Some(HiveToolScope {
-            worker_namespace_id: Some(worker.memory_namespace_id),
+    if let Some(binding) = binding {
+        anyhow::ensure!(
+            binding.group_id.is_none(),
+            "internal group Worker lanes require an explicit group run scope"
+        );
+        anyhow::ensure!(
+            binding.worker.user_id.as_deref() == ctx.user_id.as_deref(),
+            "Worker memory access does not match the session owner"
+        );
+        return Ok(Some(HiveToolScope {
+            worker_namespace_id: Some(binding.worker.memory_namespace_id),
             conversation_id: Some(session_id.to_string()),
             group_id: None,
-        });
+        }));
     }
 
-    let session_type: Option<String> = Database::new(db_path).ok().and_then(|db| {
-        db.conn()
-            .query_row(
-                "SELECT session_type FROM sessions WHERE id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .ok()
-    });
+    let session_type = db
+        .conn()
+        .query_row(
+            "SELECT session_type FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     if session_type.as_deref() == Some("hive") {
-        return Some(HiveToolScope {
+        return Ok(Some(HiveToolScope {
             worker_namespace_id: None,
             conversation_id: Some(session_id.to_string()),
             group_id: None,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 fn tool_canonical_key(title: &str) -> String {
@@ -429,7 +455,7 @@ fn can_mutate_memory(
     }
     match hive_scope {
         Some(scope) => MemoryStore::visible_to_hive_reader(memory, &scope.reader(user_id, None)),
-        None => true,
+        None => MemoryStore::visible_to_standard_reader(memory),
     }
 }
 
@@ -461,10 +487,12 @@ fn execute_list(
             memories.retain(|memory| memory.memory_type == memory_type);
         }
         memories
-    } else if let Some(memory_type) = type_filter {
-        store.list_by_type(memory_type, project_dir, user_id)
     } else {
-        store.list(project_dir, user_id)
+        let mut memories = store.list_for_standard_reader(project_dir, user_id);
+        if let Some(memory_type) = type_filter {
+            memories.retain(|memory| memory.memory_type == memory_type);
+        }
+        memories
     };
 
     let include_content = params.include_content.unwrap_or(false);
@@ -773,6 +801,12 @@ mod tests {
                          '2026-08-16T00:00:00.000000Z', 'hive');
                  INSERT INTO sessions (id, title, created_at, updated_at, session_type)
                  VALUES ('builder-dm', 'Builder', '2026-08-16T00:00:00.000000Z',
+                         '2026-08-16T00:00:00.000000Z', 'hive');
+                 INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+                 VALUES ('ordinary-code', 'Ordinary Code', '2026-08-16T00:00:00.000000Z',
+                         '2026-08-16T00:00:00.000000Z', 'code');
+                 INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+                 VALUES ('unbound-group-lane', 'Unbound lane', '2026-08-16T00:00:00.000000Z',
                          '2026-08-16T00:00:00.000000Z', 'hive');",
             )
             .expect("seed hive sessions");
@@ -792,8 +826,13 @@ mod tests {
 
         researcher_ctx.session_id = Some("researcher-dm".into());
         let builder_ctx = ToolContext {
-            db_path: Some(db_path),
+            db_path: Some(db_path.clone()),
             session_id: Some("builder-dm".into()),
+            ..Default::default()
+        };
+        let ordinary_ctx = ToolContext {
+            db_path: Some(db_path.clone()),
+            session_id: Some("ordinary-code".into()),
             ..Default::default()
         };
 
@@ -832,18 +871,57 @@ mod tests {
         let builder_parsed: Value = serde_json::from_str(&builder_list.output).unwrap();
         assert_eq!(builder_parsed["data"]["count"], 0);
 
+        let ordinary_list = MemoryTool
+            .execute(
+                json!({ "action": "list", "include_content": true }),
+                &ordinary_ctx,
+            )
+            .await;
+        let ordinary_parsed: Value = serde_json::from_str(&ordinary_list.output).unwrap();
+        assert_eq!(ordinary_parsed["data"]["count"], 0);
+
         let parsed: Value = serde_json::from_str(&save_result.output).unwrap();
         let id = parsed["data"]["id"].as_str().unwrap().to_string();
         let update = MemoryTool
             .execute(
                 json!({
                     "action": "update",
-                    "memory_id": id,
+                    "memory_id": id.clone(),
                     "content": "builder cannot change this"
                 }),
                 &builder_ctx,
             )
             .await;
         assert!(update.is_error);
+        let ordinary_update = MemoryTool
+            .execute(
+                json!({
+                    "action": "update",
+                    "memory_id": id,
+                    "content": "ordinary Code cannot change this"
+                }),
+                &ordinary_ctx,
+            )
+            .await;
+        assert!(ordinary_update.is_error);
+
+        let unresolved_group_ctx = ToolContext {
+            db_path: Some(db_path),
+            session_id: Some("unbound-group-lane".into()),
+            hive_group_run: Some(crate::storage::HiveGroupRunContext {
+                group_id: "missing-group".into(),
+                group_turn_id: "turn-1".into(),
+                run_id: "run-1".into(),
+                worker_id: researcher.id,
+                max_member_messages_per_turn: 1,
+                context_window_messages: 10,
+            }),
+            ..Default::default()
+        };
+        let unresolved = MemoryTool
+            .execute(json!({ "action": "list" }), &unresolved_group_ctx)
+            .await;
+        assert!(unresolved.is_error);
+        assert!(unresolved.output.contains("persisted lane binding"));
     }
 }

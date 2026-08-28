@@ -121,8 +121,41 @@ impl<'a> EpisodeStore<'a> {
                AND (?3 IS NULL OR s.project_dir = ?3)
                AND (?4 IS NULL OR s.session_type = ?4)
                AND (?5 IS NULL OR e.session_id = ?5)
+               AND (
+                   (
+                       ?6 IS NOT NULL
+                       AND (
+                           EXISTS (
+                               SELECT 1 FROM hive_workers worker
+                               WHERE worker.id = ?6
+                                 AND worker.dm_session_id = e.session_id
+                           )
+                           OR EXISTS (
+                               SELECT 1 FROM hive_group_worker_lanes lane
+                               WHERE lane.worker_id = ?6
+                                 AND lane.session_id = e.session_id
+                           )
+                       )
+                   )
+                   OR (
+                       ?6 IS NULL
+                       AND (
+                           ?7 != 0
+                           OR (
+                               NOT EXISTS (
+                                   SELECT 1 FROM hive_workers worker
+                                   WHERE worker.dm_session_id = e.session_id
+                               )
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM hive_group_worker_lanes lane
+                                   WHERE lane.session_id = e.session_id
+                               )
+                           )
+                       )
+                   )
+               )
              ORDER BY bm25(conversation_episodes_fts), e.occurred_at DESC
-             LIMIT ?6",
+             LIMIT ?8",
         )?;
         let episodes = statement
             .query_map(
@@ -132,6 +165,12 @@ impl<'a> EpisodeStore<'a> {
                     search.project_dir,
                     search.session_type,
                     search.session_id,
+                    search.worker_id,
+                    if search.include_worker_sessions {
+                        1_i64
+                    } else {
+                        0_i64
+                    },
                     limit
                 ],
                 |row| {

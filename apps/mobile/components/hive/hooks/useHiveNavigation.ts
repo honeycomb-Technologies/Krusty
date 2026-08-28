@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { HiveRunSection, HiveTopLevelView } from "../types";
 
-export function useHiveNavigation() {
-  const [topLevel, setTopLevel] = useState<HiveTopLevelView>("hive");
+export function useHiveNavigation(initialTopLevel: HiveTopLevelView = "hive") {
+  const [topLevel, setTopLevel] = useState<HiveTopLevelView>(initialTopLevel);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runSection, setRunSection] = useState<HiveRunSection>("overview");
 
