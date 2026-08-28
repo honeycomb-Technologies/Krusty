@@ -14,6 +14,7 @@ use anyhow::Result;
 
 use super::config::CallOptions;
 use super::core::AiClient;
+use super::RemoteAttemptPolicy;
 use crate::ai::types::{ModelMessage, Usage};
 
 /// Text and normalized provider usage from one non-streaming request.
@@ -51,6 +52,25 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<SimpleCallResult> {
+        self.call_simple_with_usage_and_attempt_policy(
+            model,
+            system_prompt,
+            user_message,
+            max_tokens,
+            RemoteAttemptPolicy::ConfiguredRetries,
+        )
+        .await
+    }
+
+    /// Make a simple call with an explicit remote-attempt policy.
+    pub async fn call_simple_with_usage_and_attempt_policy(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_message: &str,
+        max_tokens: usize,
+        attempt_policy: RemoteAttemptPolicy,
+    ) -> Result<SimpleCallResult> {
         self.ensure_run_model(model)?;
         let options = self.canonical_call_options(
             model,
@@ -73,6 +93,7 @@ impl AiClient {
                     user_message,
                     max_tokens,
                     &options,
+                    attempt_policy,
                 )
                 .await;
         }
@@ -131,6 +152,27 @@ impl AiClient {
         appended_user_message: &str,
         max_tokens: usize,
     ) -> Result<SimpleCallResult> {
+        self.call_with_conversation_with_usage_and_attempt_policy(
+            model,
+            base_system_prompt,
+            conversation,
+            appended_user_message,
+            max_tokens,
+            RemoteAttemptPolicy::ConfiguredRetries,
+        )
+        .await
+    }
+
+    /// Cache-safe conversation call with an explicit remote-attempt policy.
+    pub async fn call_with_conversation_with_usage_and_attempt_policy(
+        &self,
+        model: &str,
+        base_system_prompt: &str,
+        conversation: &[ModelMessage],
+        appended_user_message: &str,
+        max_tokens: usize,
+        attempt_policy: RemoteAttemptPolicy,
+    ) -> Result<SimpleCallResult> {
         self.ensure_run_model(model)?;
         let options = self.canonical_call_options(
             model,
@@ -154,6 +196,7 @@ impl AiClient {
                     appended_user_message,
                     max_tokens,
                     &options,
+                    attempt_policy,
                 )
                 .await;
         }

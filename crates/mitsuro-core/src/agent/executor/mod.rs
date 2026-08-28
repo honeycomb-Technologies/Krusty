@@ -41,8 +41,29 @@ use super::tool_control::{AuthorizationDecision, RetryDirective, ToolControl};
 use super::ProviderCallTraceContext;
 
 use self::plan_updates::emit_plan_update;
-use self::regular::{execute_regular_tool, successful_background_agent_start};
+use self::regular::{
+    execute_regular_tool, successful_background_agent_start, RegistryExtensionDispatch,
+};
 use self::user_message::execute_send_user_message;
+
+/// Whether optional agent extensions are in scope for this execution batch.
+/// Isolated Hive Worker modes pass `Disabled` at the orchestrator boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtensionExecutionPolicy {
+    Enabled,
+    Disabled,
+    DisabledWorkerGoal,
+}
+
+impl ExtensionExecutionPolicy {
+    const fn extensions_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+
+    const fn worker_goal_shell_isolation(self) -> bool {
+        matches!(self, Self::DisabledWorkerGoal)
+    }
+}
 
 pub(crate) struct ToolExecutionBatch {
     pub(crate) results: Vec<Content>,
@@ -80,14 +101,29 @@ pub(crate) async fn execute_tools(
     disabled_tools: Option<&[String]>,
     hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
+    extension_policy: ExtensionExecutionPolicy,
 ) -> ToolExecutionBatch {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
     let mut yield_after_background_agent = false;
     let tool_control = ToolControl::new(permission_mode);
     let mut parallel_calls_to_skip = 0usize;
-    let configured_extension_manager = tool_registry.agent_extension_manager();
-    let extension_snapshot_prepared = configured_extension_manager.is_some();
+    let configured_extension_manager = if extension_policy.extensions_enabled() {
+        tool_registry.agent_extension_manager()
+    } else {
+        None
+    };
+    let registry_extension_dispatch = match extension_policy {
+        ExtensionExecutionPolicy::Disabled | ExtensionExecutionPolicy::DisabledWorkerGoal => {
+            RegistryExtensionDispatch::Disabled
+        }
+        ExtensionExecutionPolicy::Enabled if configured_extension_manager.is_some() => {
+            // The effective call is prepared before approval below; the
+            // registry retains only the post-result observer stage.
+            RegistryExtensionDispatch::Prepared
+        }
+        ExtensionExecutionPolicy::Enabled => RegistryExtensionDispatch::Standard,
+    };
     let extension_manager =
         configured_extension_manager.filter(|manager| manager.has_tool_interceptors());
 
@@ -224,7 +260,8 @@ pub(crate) async fn execute_tools(
                             execution_tool_allowlist,
                             hive_group_run,
                             Arc::clone(&file_observations),
-                            extension_snapshot_prepared,
+                            extension_policy.worker_goal_shell_isolation(),
+                            registry_extension_dispatch,
                             None,
                         )
                         .await;
@@ -433,7 +470,8 @@ pub(crate) async fn execute_tools(
                 execution_tool_allowlist,
                 hive_group_run,
                 Arc::clone(&file_observations),
-                extension_snapshot_prepared,
+                extension_policy.worker_goal_shell_isolation(),
+                registry_extension_dispatch,
                 Some(execution_cancellation.clone()),
             );
             tokio::pin!(execution);
@@ -643,8 +681,9 @@ fn persist_tool_executing_recovery_after_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::CommandEnvironmentPolicy;
     use crate::storage::RecoveryToolCall;
-    use crate::tools::registry::{Tool, ToolContext};
+    use crate::tools::registry::{ShellIsolationPolicy, Tool, ToolContext};
     use crate::tools::{ToolSearchTool, WriteTool};
     use async_trait::async_trait;
     use serde_json::json;
@@ -670,6 +709,18 @@ mod tests {
     struct CapturingAgentTool {
         calls: Arc<StdMutex<Vec<Value>>>,
         governance: Option<Arc<StdMutex<Vec<CapturedDelegationGovernance>>>>,
+    }
+
+    struct CapturingBashContextTool {
+        contexts: Arc<StdMutex<Vec<CapturedBashContext>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedBashContext {
+        environment_policy: CommandEnvironmentPolicy,
+        shell_isolation_policy: ShellIsolationPolicy,
+        path: Option<String>,
+        home: Option<String>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,6 +761,34 @@ mod tests {
                         execution_tool_allowlist: ctx.execution_tool_allowlist.clone(),
                     });
             }
+            ToolResult::success("captured")
+        }
+    }
+
+    #[async_trait]
+    impl Tool for CapturingBashContextTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+
+        fn description(&self) -> &str {
+            "capture shell execution context"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value, ctx: &ToolContext) -> ToolResult {
+            self.contexts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedBashContext {
+                    environment_policy: ctx.command_environment_policy,
+                    shell_isolation_policy: ctx.shell_isolation_policy,
+                    path: ctx.command_environment.get("PATH").cloned(),
+                    home: ctx.command_environment.get("HOME").cloned(),
+                });
             ToolResult::success("captured")
         }
     }
@@ -803,6 +882,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_goal_shell_profile_is_structural_and_non_goal_profile_is_unchanged() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let working_dir = temp_dir.path().canonicalize().expect("canonical workspace");
+        let registry = Arc::new(ToolRegistry::new());
+        let contexts = Arc::new(StdMutex::new(Vec::new()));
+        registry
+            .register(Arc::new(CapturingBashContextTool {
+                contexts: Arc::clone(&contexts),
+            }))
+            .await;
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            working_dir.join("skills"),
+            None,
+        )));
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let call = AiToolCall {
+            id: "shell-policy".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "printf ok"}),
+        };
+        let allowlist = HashSet::from(["bash".to_string()]);
+
+        for worker_goal in [true, false] {
+            let result = execute_regular_tool(
+                &call,
+                &registry,
+                &ai_client,
+                &working_dir,
+                Some(&working_dir),
+                &process_registry,
+                &skills_manager,
+                if worker_goal {
+                    "worker-goal"
+                } else {
+                    "standard"
+                },
+                &working_dir.join("state.db"),
+                None,
+                PermissionMode::Autonomous,
+                false,
+                WorkMode::Build,
+                None,
+                &event_tx,
+                None,
+                None,
+                None,
+                Some(&allowlist),
+                None,
+                Arc::new(FileObservationTracker::new()),
+                worker_goal,
+                RegistryExtensionDispatch::Disabled,
+                None,
+            )
+            .await;
+            assert!(!result.is_error, "{}", result.output);
+        }
+
+        assert!(ExtensionExecutionPolicy::DisabledWorkerGoal.worker_goal_shell_isolation());
+        assert!(!ExtensionExecutionPolicy::Disabled.worker_goal_shell_isolation());
+        assert!(!ExtensionExecutionPolicy::Enabled.worker_goal_shell_isolation());
+        let captured = contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[0].environment_policy,
+            CommandEnvironmentPolicy::Explicit
+        );
+        assert_eq!(
+            captured[0].shell_isolation_policy,
+            ShellIsolationPolicy::WorkspaceOnly
+        );
+        assert_eq!(
+            captured[0].path.as_deref(),
+            Some("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        );
+        assert_eq!(captured[0].home.as_deref(), working_dir.to_str());
+        assert_eq!(
+            captured[1].environment_policy,
+            CommandEnvironmentPolicy::Inherit
+        );
+        assert_eq!(
+            captured[1].shell_isolation_policy,
+            ShellIsolationPolicy::Compatible
+        );
+        assert!(captured[1].path.is_none());
+        assert!(captured[1].home.is_none());
+    }
+
+    #[tokio::test]
     async fn independent_read_only_calls_execute_concurrently_and_preserve_result_order() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let registry = Arc::new(ToolRegistry::new());
@@ -862,6 +1033,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -954,6 +1126,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1017,6 +1190,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1103,6 +1277,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1166,6 +1341,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1225,6 +1401,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
         assert!(matches!(
@@ -1306,6 +1483,7 @@ mod tests {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1423,7 +1601,7 @@ export default (mitsuro) => {
         let advertised = HashSet::from(["agent".to_string()]);
 
         let batch = execute_tools(
-            &[original_call],
+            std::slice::from_ref(&original_call),
             &registry,
             &ai_client,
             temp_dir.path(),
@@ -1447,6 +1625,7 @@ export default (mitsuro) => {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1465,6 +1644,50 @@ export default (mitsuro) => {
                 "prompt": "inspect only",
                 "rewrite_count": 1
             })]
+        );
+
+        captured_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let (_isolated_input_tx, isolated_input_rx) = mpsc::unbounded_channel();
+        let mut isolated_input_inbox = LoopInputInbox::new(isolated_input_rx);
+        let isolated = execute_tools(
+            &[original_call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "isolated-worker-run",
+            &temp_dir.path().join("isolated.db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut isolated_input_inbox,
+            None,
+            None,
+            &advertised,
+            None,
+            None,
+            None,
+            Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Disabled,
+        )
+        .await;
+        assert!(!isolated.cancelled);
+        assert_eq!(
+            captured_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[json!({"agent_type": "explore", "prompt": "inspect only"})],
+            "isolated Worker runs must bypass extension interception"
         );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
@@ -1550,6 +1773,7 @@ export default (mitsuro) => {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await;
 
@@ -1623,6 +1847,7 @@ export default (mitsuro) => {
             None,
             None,
             Arc::new(FileObservationTracker::new()),
+            ExtensionExecutionPolicy::Enabled,
         )
         .await
     }

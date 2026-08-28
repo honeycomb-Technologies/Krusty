@@ -397,9 +397,7 @@ function ScheduleRow({
 function ScheduleDetailSheet({
   visible,
   target,
-  titleValue,
   wakeInput,
-  onChangeTitle,
   onChangeWakeInput,
   onSave,
   onClose,
@@ -411,9 +409,7 @@ function ScheduleDetailSheet({
 }: {
   visible: boolean;
   target: ScheduleDetailTarget | null;
-  titleValue: string;
   wakeInput: string;
-  onChangeTitle: (value: string) => void;
   onChangeWakeInput: (value: string) => void;
   onSave: () => void;
   onClose: () => void;
@@ -447,7 +443,7 @@ function ScheduleDetailSheet({
             <View style={styles.sheetCopy}>
               <Text style={[styles.sheetTitle, { color: t.foreground }]}>Schedule item</Text>
               <Text style={[styles.sheetSubtitle, { color: t.mutedForeground }]}>
-                Minimal timing and naming controls
+                Timing controls and run details
               </Text>
             </View>
             <Pressable onPress={onClose} style={styles.sheetClose}>
@@ -456,21 +452,10 @@ function ScheduleDetailSheet({
           </View>
 
           <View style={styles.fieldBlock}>
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Title</Text>
-            <TextInput
-              value={titleValue}
-              onChangeText={onChangeTitle}
-              placeholder="Schedule title"
-              placeholderTextColor={`${t.mutedForeground}aa`}
-              style={[
-                styles.fieldInput,
-                {
-                  color: t.foreground,
-                  backgroundColor: t.card,
-                  borderColor: t.border,
-                },
-              ]}
-            />
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Run title</Text>
+            <Text style={[styles.readonlyValue, { color: t.foreground }]}>
+              {target.item.title}
+            </Text>
           </View>
 
           <View style={styles.fieldBlock}>
@@ -607,18 +592,15 @@ export function HiveScheduleView({
   const [selectedDate, setSelectedDate] = useState(firstScheduledDate);
   const [hasInitializedSelection, setHasInitializedSelection] = useState(false);
   const [detailTarget, setDetailTarget] = useState<ScheduleDetailTarget | null>(null);
-  const [detailTitle, setDetailTitle] = useState("");
   const [detailWakeInput, setDetailWakeInput] = useState("");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [isSavingDetail, setIsSavingDetail] = useState(false);
   useEffect(() => {
     if (!detailTarget) {
-      setDetailTitle("");
       setDetailWakeInput("");
       setDetailError(null);
       return;
     }
-    setDetailTitle(detailTarget.item.title);
     setDetailWakeInput(formatScheduleInputValue(detailTarget.item.wakeAt));
     setDetailError(null);
   }, [detailTarget]);
@@ -666,12 +648,6 @@ export function HiveScheduleView({
       return;
     }
 
-    const nextTitle = detailTitle.trim();
-    if (!nextTitle) {
-      setDetailError("Title cannot be empty.");
-      return;
-    }
-
     const schedule = resolveScheduleSelection("custom", detailWakeInput);
     if (schedule.error || !schedule.startAt) {
       setDetailError(schedule.error ?? "Enter a valid future time.");
@@ -681,9 +657,6 @@ export function HiveScheduleView({
     setIsSavingDetail(true);
     setDetailError(null);
     try {
-      if (nextTitle !== detailTarget.item.run.title) {
-        await client.updateSession(detailTarget.item.run.session_id, { title: nextTitle });
-      }
       if (schedule.startAt !== detailTarget.item.wakeAt) {
         await client.scheduleHiveSession(detailTarget.item.run.session_id, schedule.startAt);
       }
@@ -937,9 +910,7 @@ export function HiveScheduleView({
       <ScheduleDetailSheet
         visible={detailTarget !== null}
         target={detailTarget}
-        titleValue={detailTitle}
         wakeInput={detailWakeInput}
-        onChangeTitle={setDetailTitle}
         onChangeWakeInput={setDetailWakeInput}
         onSave={() => {
           void handleSaveDetail();

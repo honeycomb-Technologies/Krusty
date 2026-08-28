@@ -1,17 +1,21 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 import { HiveThreadSurface } from "./HiveThreadSurface";
 import { InlineReportCard } from "../reports/InlineReportCard";
-import type {
-  HiveChatContext,
-  HiveCurrentState,
-  HiveHomeState,
-} from "./types";
+import type { HiveChatContext, HiveCurrentState, HiveHomeState } from "./types";
+import type { HiveWorkersState } from "./hooks/useHiveWorkers";
 
 interface HiveCurrentViewProps {
   state: HiveCurrentState;
   homeState: HiveHomeState;
   chat: HiveChatContext;
+  workers: HiveWorkersState;
   threadJumpMessageId?: string | null;
   reportJumpId?: string | null;
   onThreadJumpHandled?: () => void;
@@ -22,6 +26,7 @@ export function HiveCurrentView({
   state,
   homeState,
   chat,
+  workers,
   threadJumpMessageId,
   reportJumpId,
   onThreadJumpHandled,
@@ -30,8 +35,8 @@ export function HiveCurrentView({
   const { theme } = useThemeContext();
   const t = theme.colors;
 
-  const showBootstrapLoading =
-    state.isLoading && !state.current && homeState.isLoading && !homeState.home;
+  const showBootstrapLoading = state.isLoading && !state.current &&
+    homeState.isLoading && !homeState.home;
 
   const status = state.current?.status;
   const pendingApprovalCount = state.current?.approvals.length ?? 0;
@@ -43,28 +48,24 @@ export function HiveCurrentView({
       run.blocked_tasks > 0
     );
   });
-  const blockedPrompt =
-    pendingApprovalCount > 0
-      ? {
-          title: "Hive needs your approval",
-          detail:
-            pendingApprovalCount === 1
-              ? "Review the pending request and reply in this thread to continue."
-              : `${pendingApprovalCount} requests are waiting. Reply in this thread to continue.`,
-        }
-      : waitingRun
-        ? {
-            title: "Hive needs your input",
-            detail:
-              waitingRun.diagnostic?.detail ||
-              waitingRun.diagnostic?.summary ||
-              "Reply in this thread with the missing direction. Hive will wait here until you do.",
-          }
-        : null;
+  const blockedPrompt = pendingApprovalCount > 0
+    ? {
+      title: "Hive needs your approval",
+      detail: pendingApprovalCount === 1
+        ? "Review the pending request and reply in this thread to continue."
+        : `${pendingApprovalCount} requests are waiting. Reply in this thread to continue.`,
+    }
+    : waitingRun
+    ? {
+      title: "Hive needs your input",
+      detail: waitingRun.diagnostic?.detail ||
+        waitingRun.diagnostic?.summary ||
+        "Reply in this thread with the missing direction. Hive will wait here until you do.",
+    }
+    : null;
 
   const home = homeState.home;
-  const needsBootstrap =
-    !homeState.isLoading &&
+  const needsBootstrap = !homeState.isLoading &&
     !home?.soul &&
     !home?.identity &&
     !home?.heartbeat &&
@@ -82,73 +83,91 @@ export function HiveCurrentView({
       <View style={[styles.metaBlock, { borderBottomColor: t.border }]}>
         <View style={styles.statusLine}>
           <Text style={[styles.statusText, { color: t.mutedForeground }]}>
-            {showBootstrapLoading ? "Connecting to Hive…" : stateBits.join(" • ")}
+            {showBootstrapLoading
+              ? "Connecting to Hive…"
+              : stateBits.join(" • ")}
           </Text>
-          {showBootstrapLoading || state.isRefreshing || homeState.isRefreshing ? (
-            <ActivityIndicator color={t.userMessage} size="small" />
-          ) : null}
+          {showBootstrapLoading || state.isRefreshing || homeState.isRefreshing
+            ? <ActivityIndicator color={t.userMessage} size="small" />
+            : null}
         </View>
 
-        {needsBootstrap ? (
-          <View style={[styles.focusRow, { borderColor: t.border }]}>
-            <View style={styles.focusCopy}>
+        {needsBootstrap
+          ? (
+            <View style={[styles.focusRow, { borderColor: t.border }]}>
+              <View style={styles.focusCopy}>
+                <Text style={[styles.focusTitle, { color: t.foreground }]}>
+                  Initialize Hive
+                </Text>
+                <Text
+                  style={[styles.focusDetail, { color: t.mutedForeground }]}
+                >
+                  Create identity, voice, heartbeat, memory, channels, and Hive
+                  Workers.
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => {
+                  void homeState.bootstrap();
+                }}
+                style={styles.focusAction}
+                disabled={homeState.isBootstrapping}
+              >
+                <Text
+                  style={[styles.focusActionText, { color: t.userMessage }]}
+                >
+                  {homeState.isBootstrapping ? "Initializing..." : "Initialize"}
+                </Text>
+              </Pressable>
+            </View>
+          )
+          : null}
+
+        {blockedPrompt
+          ? (
+            <View
+              style={[
+                styles.blockedPrompt,
+                {
+                  borderColor: `${t.warning}55`,
+                  backgroundColor: `${t.warning}10`,
+                },
+              ]}
+            >
               <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                Initialize Hive
+                {blockedPrompt.title}
               </Text>
               <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                Create identity, voice, heartbeat, memory, channels, and Hive Workers.
+                {blockedPrompt.detail}
               </Text>
             </View>
-            <Pressable
-              onPress={() => {
-                void homeState.bootstrap();
-              }}
-              style={styles.focusAction}
-              disabled={homeState.isBootstrapping}
-            >
-              <Text style={[styles.focusActionText, { color: t.userMessage }]}>
-                {homeState.isBootstrapping ? "Initializing..." : "Initialize"}
-              </Text>
-            </Pressable>
-          </View>
-        ) : null}
+          )
+          : null}
 
-        {blockedPrompt ? (
-          <View
-            style={[
-              styles.blockedPrompt,
-              {
-                borderColor: `${t.warning}55`,
-                backgroundColor: `${t.warning}10`,
-              },
-            ]}
-          >
-            <Text style={[styles.focusTitle, { color: t.foreground }]}>
-              {blockedPrompt.title}
+        {topError
+          ? (
+            <Text style={[styles.errorText, { color: t.error }]}>
+              {topError}
             </Text>
-            <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-              {blockedPrompt.detail}
-            </Text>
-          </View>
-        ) : null}
-
-        {topError ? (
-          <Text style={[styles.errorText, { color: t.error }]}>{topError}</Text>
-        ) : null}
+          )
+          : null}
       </View>
 
       <View style={styles.threadWrap}>
-        {reportJumpId ? (
-          <View style={styles.reportJump}>
-            <InlineReportCard
-              reportId={reportJumpId}
-              defaultExpanded
-              onDismiss={onReportJumpHandled}
-            />
-          </View>
-        ) : null}
+        {reportJumpId
+          ? (
+            <View style={styles.reportJump}>
+              <InlineReportCard
+                reportId={reportJumpId}
+                defaultExpanded
+                onDismiss={onReportJumpHandled}
+              />
+            </View>
+          )
+          : null}
         <HiveThreadSurface
           chat={chat}
+          workers={workers}
           scrollToMessageId={threadJumpMessageId}
           onScrollTargetHandled={onThreadJumpHandled}
         />

@@ -1,4 +1,5 @@
-use super::{create_store_with_users, CreateReportInput};
+use super::{create_store_with_users, CreateReportInput, ReportScope};
+use crate::storage::{Database, HiveWorkerStore, NewHiveWorker, ReportStore};
 
 #[test]
 fn list_reports_for_user_filters_via_session_owner() {
@@ -13,6 +14,7 @@ fn list_reports_for_user_filters_via_session_owner() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -25,6 +27,7 @@ fn list_reports_for_user_filters_via_session_owner() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -57,6 +60,7 @@ fn exact_owner_report_listing_isolates_alice_bob_and_local() {
                 summary: "queue ownership evidence",
                 tags: &[],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .unwrap();
     }
@@ -92,6 +96,7 @@ fn get_report_for_user_hides_foreign_reports() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -120,6 +125,7 @@ fn search_reports_for_user_honors_owner_scope() {
             summary: "queue policy notes",
             tags: &["ops".into()],
             sources: &["alice.md".into()],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -132,6 +138,7 @@ fn search_reports_for_user_honors_owner_scope() {
             summary: "queue policy notes",
             tags: &["ops".into()],
             sources: &["bob.md".into()],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -152,4 +159,197 @@ fn search_reports_for_user_honors_owner_scope() {
         .unwrap();
     assert_eq!(hidden_results.len(), 1);
     assert_eq!(hidden_results[0].title, "Bob Architecture");
+}
+
+#[test]
+fn frozen_worker_report_scope_survives_dm_and_session_owner_rebinds() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("frozen-report-scope.db");
+    let db = Database::new(&path).expect("database");
+    db.conn()
+        .execute_batch(
+            "INSERT INTO users (id, email, license_tier) VALUES
+                 ('alice', 'alice@example.com', 'free'),
+                 ('bob', 'bob@example.com', 'free');
+             INSERT INTO sessions (
+                 id, title, created_at, updated_at, session_type, user_id
+             ) VALUES
+                 ('ordinary', 'ordinary', datetime('now'), datetime('now'), 'code', 'alice'),
+                 ('primary-hive', 'primary', datetime('now'), datetime('now'), 'hive', 'alice'),
+                 ('worker-a-old', 'old dm', datetime('now'), datetime('now'), 'hive', 'alice'),
+                 ('worker-a-new', 'new dm', datetime('now'), datetime('now'), 'hive', 'alice'),
+                 ('worker-b-dm', 'worker b', datetime('now'), datetime('now'), 'hive', 'alice');",
+        )
+        .expect("seed owners and sessions");
+    drop(db);
+
+    let worker_store = HiveWorkerStore::new(Database::new(&path).unwrap());
+    let worker_a = worker_store
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some("worker-a-old".into()),
+            memory_namespace_id: Some("crew-a".into()),
+            ..NewHiveWorker::new("worker-a")
+        })
+        .unwrap();
+    let worker_b = worker_store
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some("worker-b-dm".into()),
+            memory_namespace_id: Some("crew-b".into()),
+            ..NewHiveWorker::new("worker-b")
+        })
+        .unwrap();
+
+    let reports = ReportStore::new(Database::new(&path).unwrap());
+    let shared_id = reports
+        .create_report(CreateReportInput {
+            title: "Shared report",
+            session_id: "ordinary",
+            project_dir: Some("/project"),
+            report_root: None,
+            content: "shared",
+            summary: "frozen-scope-canary",
+            tags: &[],
+            sources: &[],
+            scope: ReportScope::owner_shared(),
+        })
+        .unwrap();
+    let private_id = reports
+        .create_report(CreateReportInput {
+            title: "Worker A old report",
+            session_id: "worker-a-old",
+            project_dir: Some("/project"),
+            report_root: None,
+            content: "private",
+            summary: "frozen-scope-canary",
+            tags: &[],
+            sources: &[],
+            scope: ReportScope::worker_private(
+                worker_a.id.clone(),
+                worker_a.memory_namespace_id.clone(),
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    assert!(reports
+        .create_report(CreateReportInput {
+            title: "Forged shared report",
+            session_id: "worker-a-old",
+            project_dir: None,
+            report_root: None,
+            content: "forged",
+            summary: "",
+            tags: &[],
+            sources: &[],
+            scope: ReportScope::owner_shared(),
+        })
+        .is_err());
+    assert!(reports
+        .create_report(CreateReportInput {
+            title: "Forged Worker report",
+            session_id: "ordinary",
+            project_dir: None,
+            report_root: None,
+            content: "forged",
+            summary: "",
+            tags: &[],
+            sources: &[],
+            scope: ReportScope::worker_private(
+                worker_a.id.clone(),
+                worker_a.memory_namespace_id.clone(),
+            )
+            .unwrap(),
+        })
+        .is_err());
+
+    worker_store
+        .bind_dm_session(&worker_a.id, Some("worker-a-new"))
+        .unwrap();
+    Database::new(&path)
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE sessions SET user_id = 'bob' WHERE id = 'worker-a-old'",
+            [],
+        )
+        .expect("mutate historical source session owner");
+
+    let reports = ReportStore::new(Database::new(&path).unwrap());
+    assert!(reports
+        .get_report_for_memory_reader(&private_id, Some("alice"), Some(&worker_a.id))
+        .unwrap()
+        .is_some());
+    for reader in [None, Some(worker_b.id.as_str())] {
+        assert!(reports
+            .get_report_for_memory_reader(&private_id, Some("alice"), reader)
+            .unwrap()
+            .is_none());
+    }
+    assert!(reports
+        .get_report_for_memory_reader(&private_id, Some("bob"), Some(&worker_a.id))
+        .unwrap()
+        .is_none());
+    assert!(reports
+        .get_report_for_user(&private_id, Some("alice"))
+        .unwrap()
+        .is_none());
+    assert!(reports
+        .get_report_for_memory_reader(&shared_id, Some("alice"), None)
+        .unwrap()
+        .is_some());
+
+    let listed = reports
+        .list_reports_for_memory_reader(Some("/project"), Some("alice"), Some(&worker_a.id))
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    let searched = reports
+        .search_reports_for_memory_reader(
+            "frozen-scope-canary",
+            Some("/project"),
+            Some("alice"),
+            Some(&worker_a.id),
+        )
+        .unwrap();
+    assert_eq!(searched.len(), 2);
+    let primary = reports
+        .list_reports_for_memory_reader(Some("/project"), Some("alice"), None)
+        .unwrap();
+    assert_eq!(primary.len(), 1);
+    assert_eq!(primary[0].id, shared_id);
+
+    let raw_db = Database::new(&path).unwrap();
+    assert!(raw_db
+        .conn()
+        .execute(
+            "UPDATE reports SET source_worker_id = NULL WHERE id = ?1",
+            [&private_id],
+        )
+        .is_err());
+    assert!(raw_db
+        .conn()
+        .execute(
+            "INSERT INTO reports (
+                 id, title, session_id, content, owner_user_id,
+                 memory_namespace, namespace_id, acl_scope, source_worker_id
+             ) VALUES (
+                 'malformed', 'malformed', 'ordinary', 'malformed', 'alice',
+                 'shared', NULL, 'worker', ?1
+             )",
+            [&worker_a.id],
+        )
+        .is_err());
+    assert!(raw_db
+        .conn()
+        .execute(
+            "INSERT INTO reports (
+                 id, title, session_id, content, owner_user_id,
+                 memory_namespace, namespace_id, acl_scope, source_worker_id
+             ) VALUES (
+                 'forged-shared', 'forged', 'worker-a-new', 'forged', 'alice',
+                 'shared', NULL, 'owner', NULL
+             )",
+            [],
+        )
+        .is_err());
 }

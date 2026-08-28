@@ -6,6 +6,12 @@ import type {
   HiveGroupTurn,
 } from "@mitsuro/api";
 import { useConnection } from "../../../hooks/useConnection";
+import {
+  clearAcceptedHiveGroupMessageAttempt,
+  type HiveGroupMessageAttempt,
+  retainHiveGroupMessageAttempt,
+  sameHiveGroupMessageAttempt,
+} from "./groupMessageReplay";
 
 export interface HiveGroupRoomState {
   detail: HiveGroupDetail | null;
@@ -48,6 +54,7 @@ export function useHiveGroupRoom(
     turn: HiveGroupTurn | null;
   }>({ messages: [], turn: null });
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sendAttemptRef = useRef<HiveGroupMessageAttempt | null>(null);
 
   const appendMessages = useCallback((incoming: HiveGroupMessage[]) => {
     if (incoming.length === 0) return;
@@ -163,18 +170,33 @@ export function useHiveGroupRoom(
       if (!client || !isConnected || !groupId) {
         throw new Error("Not connected to the Hive server");
       }
+      const request = { message };
+      const attempt = retainHiveGroupMessageAttempt(
+        sendAttemptRef.current,
+        groupId,
+        request,
+      );
+      sendAttemptRef.current = attempt;
       setIsSending(true);
       setError(null);
       try {
         await client.sendHiveGroupMessage(
           groupId,
-          { message },
-          `group-send-${groupId}-${Date.now()}`,
+          request,
+          attempt.idempotencyKey,
+        );
+        sendAttemptRef.current = clearAcceptedHiveGroupMessageAttempt(
+          sendAttemptRef.current,
+          attempt,
         );
       } catch (sendError) {
-        setError(
-          sendError instanceof Error ? sendError.message : "Failed to send",
-        );
+        // A rejected or uncertain response retains this exact attempt for a
+        // same-body retry. Do not let an older request overwrite newer UI.
+        if (sameHiveGroupMessageAttempt(sendAttemptRef.current, attempt)) {
+          setError(
+            sendError instanceof Error ? sendError.message : "Failed to send",
+          );
+        }
         throw sendError;
       } finally {
         setIsSending(false);

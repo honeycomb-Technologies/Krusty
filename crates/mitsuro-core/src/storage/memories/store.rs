@@ -445,11 +445,32 @@ impl MemoryStore {
         memories
     }
 
+    /// Prompt/tool boundary for ordinary Chat and Code sessions.
+    ///
+    /// Standard sessions may consume only owner-scoped Shared memory. Hive,
+    /// Worker, group, and conversation namespaces are deliberately not
+    /// inherited merely because the same user owns both sessions.
+    pub fn list_for_standard_reader(
+        &self,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Vec<AgentMemory> {
+        let mut memories = self.list(project_dir, user_id);
+        memories.retain(memory_visible_to_standard_reader);
+        memories
+    }
+
     /// Whether one already-loaded memory is visible to a Hive reader.
     /// Used by the memory tool so a Worker cannot mutate a guessed id that
     /// belongs to another Worker's private namespace.
     pub fn visible_to_hive_reader(memory: &AgentMemory, reader: &HiveMemoryReader<'_>) -> bool {
         memory_visible_to_hive_reader(memory, reader)
+    }
+
+    /// Whether a standard Chat/Code reader may see or mutate an already
+    /// loaded memory. This is also used to make guessed ids fail closed.
+    pub fn visible_to_standard_reader(memory: &AgentMemory) -> bool {
+        memory_visible_to_standard_reader(memory)
     }
 
     /// List active memories of a specific type.
@@ -773,6 +794,12 @@ fn memory_visible_to_hive_reader(memory: &AgentMemory, reader: &HiveMemoryReader
                 && memory.conversation_id.as_deref() == reader.conversation_id
         }
     }
+}
+
+fn memory_visible_to_standard_reader(memory: &AgentMemory) -> bool {
+    memory.sensitivity != MemorySensitivity::Secret
+        && memory.acl_scope == MemoryAclScope::Owner
+        && memory.namespace == MemoryNamespace::Shared
 }
 
 fn required_trimmed<'a>(field: &str, value: &'a str) -> Result<&'a str> {

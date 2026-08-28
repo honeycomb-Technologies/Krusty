@@ -82,7 +82,6 @@ export function SettingsHeader({ onClose }: { onClose?: () => void }) {
     </View>
   );
 }
-
 export function DiagnosticsSection({
   mode,
   runId,
@@ -241,8 +240,10 @@ export function ConnectionSection({
               <Text style={[styles.rowTitle, { color: t.foreground }]}>
                 {isConnected
                   ? "Connected"
-                  : status === "connecting"
-                    ? "Connecting..."
+                  : status === "disconnecting"
+                    ? "Removing saved connection..."
+                    : status === "connecting"
+                      ? "Connecting..."
                     : "Disconnected"}
               </Text>
               {serverUrl ? (
@@ -256,21 +257,28 @@ export function ConnectionSection({
             </View>
           </View>
 
+          <MessageBanner text={connectError} />
+
           <View style={[styles.separator, { backgroundColor: t.border }]} />
 
           <View style={styles.actions}>
             <Pressable
+              disabled={isConnecting}
               onPress={() => {
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 onReconnect();
               }}
-              style={styles.actionBtn}
+              style={[styles.actionBtn, isConnecting && { opacity: 0.5 }]}
             >
               <RefreshCw size={18} color={t.userMessage} strokeWidth={1.8} />
               <Text style={[styles.actionText, { color: t.userMessage }]}>Reconnect</Text>
             </Pressable>
 
-            <Pressable onPress={onDisconnect} style={styles.actionBtn}>
+            <Pressable
+              disabled={isConnecting}
+              onPress={onDisconnect}
+              style={[styles.actionBtn, isConnecting && { opacity: 0.5 }]}
+            >
               <LogOut size={18} color={t.error} strokeWidth={1.8} />
               <Text style={[styles.actionText, { color: t.error }]}>Disconnect</Text>
             </Pressable>

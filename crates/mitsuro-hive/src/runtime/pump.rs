@@ -3,15 +3,20 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use mitsuro_core::agent::materialize_due_worker_introduction_review_runs_fenced;
 use mitsuro_core::hive::{
     canonical_timestamp, next_retry_at, occurrences_between, parse_timezone, resolve_misfires,
     HiveRunStatus, MisfireDispatch, RetryPolicy,
 };
 use mitsuro_core::storage::{
     hive_groups, load_worker_with_conn, ClaimRunRequest, ClaimedHiveRun, DaemonFence,
-    DaemonLeaseAcquire, Database, HiveDaemonLeaseStore, HiveGroupStatus, HiveRun, HiveRunStore,
-    HiveSchedule, HiveScheduleStore, HiveWorkerStatus, OverlapPolicy, ReconciledRun, RunCompletion,
+    DaemonLeaseAcquire, Database, HiveDaemonLeaseStore, HiveGroupStatus, HiveRun,
+    HiveRunExecutionContextV1, HiveRunExecutionModeV1, HiveRunKind, HiveRunStore, HiveSchedule,
+    HiveScheduleStore, HiveWorkerIntroductionStore, HiveWorkerStatus, OverlapPolicy, ReconciledRun,
+    RunCompletion, WorkerConversationLane, WorkerRunOrigin,
+    WORKER_CONVERSATION_STOP_REQUESTED_REASON,
 };
+use mitsuro_core::workflow::WorkflowManager;
 use mitsuro_hive_protocol::{
     unix_time_millis, Actor, EventEnvelope, ExtensionEvent, GroupMessageCommand, HiveEvent,
     ProtocolVersion, ResponsePayload, RuntimeEvent,
@@ -27,8 +32,8 @@ use super::config::MAX_ABORT_DELIVERY_TIMEOUT;
 use super::deliveries;
 use super::groups;
 use super::handler::{
-    CommittedCancellation, RuntimeShared, DAEMON_LEASE_NAME, MAX_RETRY_ATTEMPTS,
-    MAX_RETRY_DELAY_SECS,
+    CommittedCancellation, CommittedCancellationKind, RuntimeShared, DAEMON_LEASE_NAME,
+    MAX_RETRY_ATTEMPTS, MAX_RETRY_DELAY_SECS,
 };
 use super::persistence::{
     append_event, get_or_create_controller, require_owned_session, ControllerRecord,
@@ -36,6 +41,8 @@ use super::persistence::{
 };
 
 const MAX_DUE_OCCURRENCES: usize = 1_000;
+const MAX_DUE_WORKER_INTRODUCTION_REVIEWS_PER_TICK: usize = 4;
+const MAX_DUE_WORKER_WORKFLOW_ROLLOVERS_PER_TICK: usize = 8;
 const EVENT_JOURNAL_EXHAUSTED_REASON: &str =
     "durable event journal exhausted; execution side effects may be uncertain";
 const FORCED_CANCELLATION_STOP_REASON: &str = "cancellation grace elapsed";
@@ -102,7 +109,29 @@ pub(crate) async fn run(shared: Arc<RuntimeShared>, mut shutdown: watch::Receive
                             tracing::error!(error = ?error, "Hive lease reconciliation failed");
                             continue;
                         }
+                        if let Err(error) = materialize_due_worker_workflow_rollovers(
+                            &shared,
+                            token,
+                        )
+                        .await
+                        {
+                            shared.health.set_scheduler_activated(false);
+                            tracing::error!(
+                                error = ?error,
+                                "Hive Worker Workflow rollover recovery failed"
+                            );
+                            continue;
+                        }
                         shared.health.set_scheduler_activated(true);
+                        if let Err(error) = materialize_due_worker_introduction_reviews(
+                            &shared,
+                            token,
+                        ).await {
+                            tracing::warn!(
+                                error = ?error,
+                                "Hive Worker Introduction review materialization failed"
+                            );
+                        }
                         if let Err(error) = deliver_pending_control(&shared, token).await {
                             tracing::warn!(error = ?error, "Hive durable control delivery failed");
                         }
@@ -491,6 +520,9 @@ async fn reconcile_expired(
                 .map_err(RuntimeStoreError::Internal)?;
         if reconciliation.requeued_runs.is_empty()
             && reconciliation.recovery_required_runs.is_empty()
+            && reconciliation.recovered_succeeded_runs.is_empty()
+            && reconciliation.recovered_failed_runs.is_empty()
+            && reconciliation.recovered_cancelled_runs.is_empty()
         {
             return Ok::<_, RuntimeStoreError>(Vec::new());
         }
@@ -503,16 +535,46 @@ async fn reconcile_expired(
             return Ok(Vec::new());
         }
         let mut events = Vec::new();
-        for (reconciled, event_type, reason) in reconciliation
-            .requeued_runs
+        for (reconciled, event_type, reason, target_status) in reconciliation
+            .recovered_succeeded_runs
             .into_iter()
             .map(|reconciled| {
                 (
                     reconciled,
-                    "run_lease_requeued",
-                    "worker lease expired before execution; requeued",
+                    "run_completed",
+                    "committed Worker Introduction opening recovered after worker lease expiry",
+                    "succeeded",
                 )
             })
+            .chain(reconciliation.requeued_runs.into_iter().map(|reconciled| {
+                (
+                    reconciled,
+                    "run_lease_requeued",
+                    "worker lease expired before execution; requeued",
+                    "queued",
+                )
+            }))
+            .chain(reconciliation.recovered_failed_runs.into_iter().map(|reconciled| {
+                (
+                    reconciled,
+                    "run_failed",
+                    "terminal Worker Introduction review failure recovered after worker lease expiry",
+                    "failed",
+                )
+            }))
+            .chain(
+                reconciliation
+                    .recovered_cancelled_runs
+                    .into_iter()
+                    .map(|reconciled| {
+                        (
+                            reconciled,
+                            "run_cancelled",
+                            "committed Worker conversation Stop recovered after worker lease expiry",
+                            "cancelled",
+                        )
+                    }),
+            )
             .chain(
                 reconciliation
                     .recovery_required_runs
@@ -522,6 +584,7 @@ async fn reconcile_expired(
                             reconciled,
                             "recovery_required",
                             "worker lease expired; side effects may be uncertain",
+                            "recovery_required",
                         )
                     }),
             )
@@ -541,11 +604,6 @@ async fn reconcile_expired(
                     })
                 },
             )?;
-            let target_status = if event_type == "run_lease_requeued" {
-                "queued"
-            } else {
-                "recovery_required"
-            };
             let dedupe_key = format!(
                 "transition:{run_id}:{}:{target_status}",
                 reconciled.attempt_no
@@ -559,6 +617,7 @@ async fn reconcile_expired(
                 Some(&dedupe_key),
                 serde_json::json!({
                     "run_id": run_id,
+                    "status": target_status,
                     "reason": reason
                 }),
                 &now,
@@ -573,6 +632,139 @@ async fn reconcile_expired(
         shared.events.publish(event.envelope());
     }
     Ok(())
+}
+
+async fn materialize_due_worker_introduction_reviews(
+    shared: &RuntimeShared,
+    fencing_token: u64,
+) -> Result<(), RuntimeStoreError> {
+    let _gate = shared.mutation_gate.lock().await;
+    let path = shared.config.database_path.clone();
+    let fence = daemon_fence(shared, fencing_token);
+    let materialized = tokio::task::spawn_blocking(move || {
+        materialize_due_worker_introduction_review_runs_fenced(
+            &path,
+            MAX_DUE_WORKER_INTRODUCTION_REVIEWS_PER_TICK,
+            &fence,
+        )
+        .map_err(RuntimeStoreError::Internal)
+    })
+    .await
+    .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
+    if !materialized.is_empty() {
+        tracing::debug!(
+            materialized_count = materialized.len(),
+            "Materialized due Worker Introduction review runs"
+        );
+    }
+    Ok(())
+}
+
+/// Recover the narrow crash gap after a committed Worker Workflow outcome
+/// reaches `succeeded` but before the daemon can create its next bounded
+/// attempt. The core facade re-reconciles provider usage under the current
+/// daemon fence before it considers a rollover, so token exhaustion or an
+/// uncertain outcome can never be bypassed by this periodic wake.
+async fn materialize_due_worker_workflow_rollovers(
+    shared: &RuntimeShared,
+    fencing_token: u64,
+) -> Result<(), RuntimeStoreError> {
+    let _gate = shared.mutation_gate.lock().await;
+    let path = shared.config.database_path.clone();
+    let fence = daemon_fence(shared, fencing_token);
+    let events = tokio::task::spawn_blocking(move || {
+        let manager = WorkflowManager::new(path.clone())
+            .map_err(|error| RuntimeStoreError::Internal(anyhow::Error::new(error)))?;
+        manager
+            .materialize_due_worker_workflow_rollovers(
+                &fence,
+                MAX_DUE_WORKER_WORKFLOW_ROLLOVERS_PER_TICK,
+                Utc::now(),
+            )
+            .map_err(|error| RuntimeStoreError::Internal(anyhow::Error::new(error)))?;
+
+        // Event publication is deliberately recoverable independently of the
+        // core transaction. If the process died after materialization, this
+        // bounded scan projects the already-authoritative successor exactly
+        // once on the next fenced tick.
+        persist_missing_worker_workflow_rollover_events(
+            &path,
+            &fence,
+            MAX_DUE_WORKER_WORKFLOW_ROLLOVERS_PER_TICK * 2,
+        )
+    })
+    .await
+    .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
+    for event in events {
+        shared.events.publish(event.envelope());
+    }
+    Ok(())
+}
+
+fn persist_missing_worker_workflow_rollover_events(
+    path: &std::path::Path,
+    fence: &DaemonFence,
+    limit: usize,
+) -> Result<Vec<PersistedEvent>, RuntimeStoreError> {
+    let db = Database::new(path).map_err(RuntimeStoreError::Internal)?;
+    let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate)?;
+    let now = canonical_timestamp(Utc::now());
+    if !daemon_fence_is_current(&tx, fence, &now)? {
+        tx.commit()?;
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).map_err(|_| {
+        RuntimeStoreError::Invalid("Worker Workflow rollover event limit overflow".into())
+    })?;
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT run.id, run.status, controller.id, controller.session_id,
+                    controller.status, controller.timezone
+             FROM hive_runs run
+             JOIN hive_controllers controller ON controller.id = run.controller_id
+             WHERE run.kind = 'worker_workflow'
+               AND run.governor_origin = 'workflow_rollover'
+               AND NOT EXISTS (
+                   SELECT 1 FROM hive_controller_events event
+                   WHERE event.controller_id = run.controller_id
+                     AND event.dedupe_key = 'worker-workflow-rollover:' || run.id
+               )
+             ORDER BY run.created_at, run.id
+             LIMIT ?1",
+        )?;
+        let mapped = statement.query_map([limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                ControllerRecord {
+                    id: row.get(2)?,
+                    session_id: row.get(3)?,
+                    status: row.get(4)?,
+                    timezone: row.get(5)?,
+                },
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut events = Vec::with_capacity(rows.len());
+    for (run_id, status, controller) in rows {
+        events.push(append_event(
+            &tx,
+            &controller,
+            "worker_workflow_rollover_queued",
+            Some(&run_id),
+            None,
+            Some(&format!("worker-workflow-rollover:{run_id}")),
+            serde_json::json!({
+                "run_id": run_id,
+                "status": status,
+                "kind": "worker_workflow",
+            }),
+            &now,
+        )?);
+    }
+    tx.commit()?;
+    Ok(events)
 }
 
 async fn materialize_due_schedules(
@@ -699,10 +891,29 @@ pub(crate) fn materialize_schedule_transaction(
         )
         .optional()?;
     let now = canonical_timestamp(Utc::now());
+    let targets_worker = schedule
+        .worker_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty())
+        && schedule
+            .group_id
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|id| id.is_empty());
+    let targets_group = schedule
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    let schedule_identity_is_absent = schedule.model.is_none()
+        && schedule.model_key.is_none()
+        && schedule.model_catalog_revision.is_none();
     let invalid_config = if schedule
         .model
         .as_deref()
         .is_none_or(|model| model.trim().is_empty())
+        && !(targets_worker && schedule_identity_is_absent)
     {
         Some("schedule has no frozen model")
     } else if schedule
@@ -712,10 +923,16 @@ pub(crate) fn materialize_schedule_transaction(
         || (schedule.model_key.is_none() && schedule.model_catalog_revision.is_some())
     {
         Some("schedule has inconsistent frozen model identity")
-    } else if schedule
-        .project_dir
-        .as_deref()
-        .is_none_or(|path| path.trim().is_empty() || !std::path::Path::new(path).is_absolute())
+    } else if (!targets_worker
+        && !targets_group
+        && schedule
+            .project_dir
+            .as_deref()
+            .is_none_or(|path| path.trim().is_empty() || !std::path::Path::new(path).is_absolute()))
+        || ((targets_worker || targets_group)
+            && schedule.project_dir.as_deref().is_some_and(|path| {
+                path.trim().is_empty() || !std::path::Path::new(path).is_absolute()
+            }))
     {
         Some("schedule has no frozen workspace")
     } else if permission_mode
@@ -803,6 +1020,10 @@ struct ScheduleLane {
     controller: ControllerRecord,
     permission_mode: String,
     worker_id: Option<String>,
+    model: Option<String>,
+    model_key: Option<mitsuro_core::ai::models::ModelKey>,
+    model_catalog_revision: Option<String>,
+    execution_context: Option<HiveRunExecutionContextV1>,
 }
 
 fn resolve_schedule_lane(
@@ -822,6 +1043,10 @@ fn resolve_schedule_lane(
             controller: fallback.clone(),
             permission_mode: permission_mode.to_string(),
             worker_id: None,
+            model: schedule.model.clone(),
+            model_key: schedule.model_key.clone(),
+            model_catalog_revision: schedule.model_catalog_revision.clone(),
+            execution_context: None,
         }));
     };
     let Some(worker) = load_worker_with_conn(tx, worker_id).map_err(RuntimeStoreError::Internal)?
@@ -833,6 +1058,15 @@ fn resolve_schedule_lane(
     }
     if worker.status == HiveWorkerStatus::Paused {
         return Ok(Err("targeted Worker is paused"));
+    }
+    if HiveWorkerIntroductionStore::from_connection(tx)
+        .get_by_worker(&worker.id)
+        .map_err(RuntimeStoreError::Internal)?
+        .is_some_and(|introduction| !introduction.status.allows_autonomy())
+    {
+        return Ok(Err(
+            "targeted Worker has not completed or skipped its Introduction",
+        ));
     }
     let Some(session_id) = worker
         .dm_session_id
@@ -848,10 +1082,72 @@ fn resolve_schedule_lane(
     };
     let session = require_owned_session(tx, &actor, session_id)?;
     let controller = get_or_create_controller(tx, &session, now)?;
+    let controller_bound = tx.execute(
+        "UPDATE hive_controllers
+         SET worker_id = ?2, scope_key = ?3, updated_at = ?4
+         WHERE id = ?1 AND session_id = ?5 AND user_id IS ?6
+           AND (worker_id IS NULL OR worker_id = ?2)",
+        params![
+            controller.id,
+            worker.id,
+            format!("worker:{}", worker.id),
+            now,
+            session.id,
+            worker.user_id,
+        ],
+    )?;
+    if controller_bound != 1 {
+        return Ok(Err("targeted Worker controller belongs to another Worker"));
+    }
+    let Some(worker_model) = worker
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return Ok(Err("targeted Worker has no frozen model identity"));
+    };
+    let Some(worker_model_key) = worker.model_key.as_ref() else {
+        return Ok(Err("targeted Worker has no exact provider model identity"));
+    };
+    if worker_model_key.model_id != worker_model {
+        return Ok(Err("targeted Worker has an inconsistent model identity"));
+    }
+    let schedule_identity_is_absent = schedule.model.is_none()
+        && schedule.model_key.is_none()
+        && schedule.model_catalog_revision.is_none();
+    if !schedule_identity_is_absent
+        && (schedule.model.as_deref() != Some(worker_model)
+            || schedule.model_key.as_ref() != worker.model_key.as_ref()
+            || schedule.model_catalog_revision.as_deref()
+                != worker.model_catalog_revision.as_deref())
+    {
+        return Ok(Err(
+            "schedule model identity does not match targeted Worker",
+        ));
+    }
+    let execution = super::worker_context::resolve_worker_conversation_execution_binding(
+        tx,
+        &session.id,
+        &worker.id,
+        worker.revision,
+        WorkerConversationLane::DirectMessage,
+    )
+    .map_err(RuntimeStoreError::Internal)?;
+    if schedule.project_dir.is_some() && schedule.project_dir != execution.project_dir {
+        return Ok(Err(
+            "schedule workspace does not match the targeted Worker's exact DM workspace",
+        ));
+    }
+    let execution_context = execution.context;
     Ok(Ok(ScheduleLane {
         controller,
         permission_mode: worker.permission_mode.as_str().to_string(),
         worker_id: Some(worker.id),
+        model: Some(worker_model.to_string()),
+        model_key: worker.model_key,
+        model_catalog_revision: worker.model_catalog_revision,
+        execution_context: Some(execution_context),
     }))
 }
 
@@ -931,12 +1227,34 @@ fn materialize_dispatch(
     )?;
     if let Some(run_id) = run_id {
         let occurrence_id = deterministic_id("occurrence", &schedule.id, dispatch.scheduled_for);
+        let (working_dir, project_dir) =
+            match lane.execution_context.as_ref().map(|value| &value.mode) {
+                Some(HiveRunExecutionModeV1::WorkerConversationNeutral { .. }) => (None, None),
+                Some(HiveRunExecutionModeV1::WorkerWorkspaceAttached {
+                    working_dir,
+                    project_dir,
+                    ..
+                }) => (Some(working_dir.clone()), project_dir.clone()),
+                Some(HiveRunExecutionModeV1::WorkerGoal { .. }) => {
+                    return Err(RuntimeStoreError::StateConflict(
+                        "schedule materialization cannot reuse a Worker Goal execution context"
+                            .into(),
+                    ));
+                }
+                Some(HiveRunExecutionModeV1::WorkerGoalAcceptance { .. }) => {
+                    return Err(RuntimeStoreError::StateConflict(
+                        "schedule materialization cannot reuse a Worker Goal acceptance context"
+                            .into(),
+                    ));
+                }
+                None => (schedule.project_dir.clone(), schedule.project_dir.clone()),
+            };
         let config_json = serde_json::to_string(&serde_json::json!({
-            "working_dir": schedule.project_dir.clone(),
-            "project_dir": schedule.project_dir,
-            "model": schedule.model,
-            "model_key": schedule.model_key,
-            "model_catalog_revision": schedule.model_catalog_revision,
+            "working_dir": working_dir,
+            "project_dir": project_dir,
+            "model": lane.model,
+            "model_key": lane.model_key,
+            "model_catalog_revision": lane.model_catalog_revision,
             "permission_mode": lane.permission_mode,
             "crew_slug": schedule.crew_slug,
             "retry": schedule.retry,
@@ -946,6 +1264,22 @@ fn materialize_dispatch(
         let concurrency_key = (schedule.overlap_policy != OverlapPolicy::Allow)
             .then(|| format!("schedule:{}", schedule.id));
         let scheduled_for = canonical_timestamp(dispatch.scheduled_for);
+        let governor_origin = lane
+            .worker_id
+            .as_ref()
+            .map(|_| WorkerRunOrigin::Scheduled.as_str());
+        let governor_lane_key = lane
+            .execution_context
+            .as_ref()
+            .map(|context| context.lane().canonical_lane_key())
+            .transpose()
+            .map_err(RuntimeStoreError::Internal)?;
+        let execution_context_json = lane
+            .execution_context
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
         tx.execute(
             "INSERT INTO hive_runs (
                 id, controller_id, session_id, schedule_id, occurrence_id, kind,
@@ -953,10 +1287,11 @@ fn materialize_dispatch(
                 scheduled_for, available_at, wake_at, attempt_count, max_attempts,
                 lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
                 last_stop_reason, last_error, outcome_json, created_at, started_at,
-                finished_at, updated_at, worker_id
+                finished_at, updated_at, worker_id, governor_origin,
+                governor_lane_key, execution_context_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'scheduled', ?6, ?7, 'queued', ?8, ?9,
                        ?10, ?10, NULL, 0, ?11, NULL, NULL, NULL, NULL, NULL,
-                       NULL, NULL, NULL, ?12, NULL, NULL, ?12, ?13)
+                       NULL, NULL, NULL, ?12, NULL, NULL, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO NOTHING",
             params![
                 run_id,
@@ -972,6 +1307,9 @@ fn materialize_dispatch(
                 schedule.retry.max_attempts,
                 now,
                 lane.worker_id,
+                governor_origin,
+                governor_lane_key,
+                execution_context_json,
             ],
         )?;
         events.push(append_event(
@@ -1099,6 +1437,7 @@ fn materialize_group_dispatch(
             mentions_override: None,
         },
         &format!("schedule:{}:{scheduled_for}", schedule.id),
+        WorkerRunOrigin::ScheduledGroup,
     )?;
     let turn_id = match &mutation.response {
         ResponsePayload::GroupTurn(turn) => turn.turn_id.clone(),
@@ -1295,6 +1634,34 @@ async fn advance_group_turns(
         let mut cancellations: Vec<(String, String)> = Vec::new();
         let mut room_updates = 0usize;
 
+        // Defense in depth for archives written by an older client or a
+        // mixed-version server: stop any still-running turn before the
+        // cancelled-turn pass below, so roundtables cannot dispatch another
+        // speaker and live runs retain the normal exact cancellation fence.
+        let archived_group_owners = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT g.id, g.user_id
+                 FROM hive_groups g
+                 JOIN hive_group_turns t ON t.group_id = g.id
+                 WHERE g.status = 'archived' AND t.status = 'running'",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (group_id, user_id) in archived_group_owners {
+            let actor = Actor {
+                user_id,
+                client_kind: "hive-archive-reconciler".into(),
+            };
+            let mutation = groups::group_archive(&tx, &actor, &now, &group_id)?;
+            events.extend(mutation.events);
+            room_updates += 1;
+        }
+
         // Cancelled turns first: durably cancel anything not yet executing
         // and collect exact cancel controls for live executions.
         let cancelled_turn_ids = {
@@ -1409,6 +1776,20 @@ async fn advance_group_turns(
                     mitsuro_core::storage::hive_groups::load_member_workers(&tx, &turn.group_id)
                         .map_err(RuntimeStoreError::Internal)?;
                 let excerpt = trigger_excerpt(&tx, &turn.trigger_message_id)?;
+                let schedule_id = tx
+                    .query_row(
+                        "SELECT schedule_id FROM hive_runs
+                         WHERE group_turn_id = ?1 AND schedule_id IS NOT NULL
+                         ORDER BY created_at ASC, id ASC LIMIT 1",
+                        [&turn.id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let origin = if schedule_id.is_some() {
+                    WorkerRunOrigin::ScheduledGroup
+                } else {
+                    WorkerRunOrigin::UserGroup
+                };
                 let mut dispatched_next = false;
                 if let Some(group) = group {
                     while next_index < turn.speaker_plan.len() {
@@ -1416,9 +1797,23 @@ async fn advance_group_turns(
                         next_index += 1;
                         let worker = roster.iter().find(|worker| worker.id == worker_id);
                         match groups::dispatch_member_run(
-                            &tx, &now, &group, &turn, worker, None, &excerpt,
+                            &tx, &now, &group, &turn, worker, None, &excerpt, origin,
                         )? {
                             Ok((run_id, run_events)) => {
+                                if let Some(schedule_id) = schedule_id.as_deref() {
+                                    let changed = tx.execute(
+                                        "UPDATE hive_runs SET schedule_id = ?2
+                                         WHERE id = ?1 AND group_turn_id = ?3
+                                           AND governor_origin = 'scheduled_group'",
+                                        params![run_id, schedule_id, turn.id],
+                                    )?;
+                                    if changed != 1 {
+                                        return Err(RuntimeStoreError::StateConflict(
+                                            "scheduled group continuation lost its exact schedule binding"
+                                                .into(),
+                                        ));
+                                    }
+                                }
                                 events.extend(run_events);
                                 outcomes.insert(
                                     worker_id,
@@ -1617,6 +2012,7 @@ async fn claim_next(
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
     if let Some(claim) = &claim {
+        reject_worker_goal_acceptance_execution(claim)?;
         let event = record_run_event(
             shared,
             &claim.run,
@@ -1644,6 +2040,7 @@ async fn execute_claim_inner(
     claim: ClaimedHiveRun,
     fencing_token: u64,
 ) -> Result<(), RuntimeStoreError> {
+    reject_worker_goal_acceptance_execution(&claim)?;
     // Subscribe before entering the durable running boundary. If an
     // ownership-checked CancelSession commits at any point after this, this
     // exact worker receives the signal; if it committed earlier,
@@ -1690,6 +2087,11 @@ async fn execute_claim_inner(
         )
         .await;
         return Ok(());
+    }
+    if claim.run.kind == HiveRunKind::GroupTurn
+        && cancellation_committed_for_claim(shared, &claim, fencing_token).await?
+    {
+        return finish_committed_cancellation(shared, &claim, fencing_token, false).await;
     }
 
     let (execution_event_tx, mut execution_events) =
@@ -1763,10 +2165,16 @@ async fn execute_claim_inner(
             cancellation = cancellation_rx.recv(), if cancellation_signals_open && cancellation_deadline.is_none() => {
                 let committed = match cancellation {
                     Ok(cancellation) => cancellation_matches_claim(&cancellation, &claim)
-                        && cancellation_committed_for_claim(shared, &claim, fencing_token).await?,
+                        && cancellation_signal_committed_for_claim(
+                            shared,
+                            &claim,
+                            fencing_token,
+                            &cancellation,
+                        ).await?,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // The durable controller state is authoritative when a
-                        // burst overran this bounded optimization channel.
+                        // Durable session or exact-run cancellation state is
+                        // authoritative when a burst overruns this bounded
+                        // optimization channel.
                         cancellation_committed_for_claim(shared, &claim, fencing_token).await?
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -1786,7 +2194,17 @@ async fn execute_claim_inner(
                 return finish_committed_cancellation(shared, &claim, fencing_token, true).await;
             }
             _ = heartbeat.tick() => {
-                if !heartbeat_run(shared, &claim, fencing_token).await? {
+                let heartbeat_alive = heartbeat_run(shared, &claim, fencing_token).await?;
+                if cancellation_deadline.is_none()
+                    && claim.run.kind == HiveRunKind::GroupTurn
+                    && cancellation_committed_for_claim(shared, &claim, fencing_token).await?
+                {
+                    cancellation_deadline = Some(
+                        begin_cooperative_cancellation(shared, &claim).await
+                    );
+                    continue;
+                }
+                if !heartbeat_alive {
                     if cancellation_committed_for_claim(shared, &claim, fencing_token).await? {
                         if cancellation_deadline.is_none() {
                             cancellation_deadline = Some(
@@ -1809,6 +2227,26 @@ async fn execute_claim_inner(
         RuntimeStoreError::Internal(anyhow::anyhow!("execution ended without an outcome"))
     })?;
     finish_execution(shared, claim, fencing_token, outcome).await
+}
+
+fn reject_worker_goal_acceptance_execution(
+    claim: &ClaimedHiveRun,
+) -> Result<(), RuntimeStoreError> {
+    let acceptance_context = claim.run.execution_context.as_ref().is_some_and(|context| {
+        matches!(
+            &context.mode,
+            HiveRunExecutionModeV1::WorkerGoalAcceptance { .. }
+        )
+    });
+    if claim.run.kind == mitsuro_core::storage::HiveRunKind::WorkerWorkflowAcceptance
+        || acceptance_context
+    {
+        return Err(RuntimeStoreError::StateConflict(
+            "Worker Workflow acceptance is awaiting owner input and cannot be claimed or executed"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn heartbeat_run(
@@ -1975,7 +2413,43 @@ fn cancellation_matches_claim(
     cancellation: &CommittedCancellation,
     claim: &ClaimedHiveRun,
 ) -> bool {
-    claim.run.session_id.as_deref() == Some(cancellation.session_id.as_str())
+    if claim.run.session_id.as_deref() != Some(cancellation.session_id.as_str()) {
+        return false;
+    }
+    match &cancellation.kind {
+        CommittedCancellationKind::Session => true,
+        CommittedCancellationKind::WorkerIntroduction { run_id } => claim.run.id == *run_id,
+        CommittedCancellationKind::WorkerRun {
+            worker_id, run_id, ..
+        } => {
+            claim.run.id == *run_id
+                && (claim.run.worker_id.as_deref() == Some(worker_id.as_str())
+                    || configured_worker_id(&claim.run.config) == Some(worker_id.as_str()))
+        }
+        CommittedCancellationKind::WorkerWorkflow {
+            worker_id,
+            goal_id,
+            run_id,
+            ..
+        } => {
+            claim.run.id == *run_id
+                && claim.run.worker_id.as_deref() == Some(worker_id.as_str())
+                && claim.run.workflow_goal_id.as_deref() == Some(goal_id.as_str())
+                && claim.run.kind == HiveRunKind::WorkerWorkflow
+        }
+    }
+}
+
+fn configured_worker_id(config: &serde_json::Value) -> Option<&str> {
+    config
+        .get("worker_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            config
+                .get("group")
+                .and_then(|group| group.get("worker_id"))
+                .and_then(serde_json::Value::as_str)
+        })
 }
 
 async fn begin_cooperative_cancellation(shared: &RuntimeShared, claim: &ClaimedHiveRun) -> Instant {
@@ -2040,31 +2514,65 @@ async fn finish_committed_cancellation(
     let lease_token = claim.lease_token.clone();
     let fence = daemon_fence(shared, fencing_token);
     let persisted = tokio::task::spawn_blocking(move || {
-        HiveRunStore::new(Database::new(&path).map_err(RuntimeStoreError::Internal)?)
-            .finish_cancelled_claim_fenced(
+        let store = HiveRunStore::new(Database::new(&path).map_err(RuntimeStoreError::Internal)?);
+        let status = match store
+            .finish_stopped_worker_conversation_claim_fenced(
                 &run_id,
                 &lease_token,
                 fencing_token,
                 &completion,
                 &fence,
             )
-            .map_err(RuntimeStoreError::Internal)
+            .map_err(RuntimeStoreError::Internal)?
+        {
+            Some(status) => Some(status),
+            None => match store
+                .finish_cancelled_group_turn_claim_fenced(
+                    &run_id,
+                    &lease_token,
+                    fencing_token,
+                    &completion,
+                    &fence,
+                )
+                .map_err(RuntimeStoreError::Internal)?
+            {
+                Some(status) => Some(status),
+                None => store
+                    .finish_cancelled_claim_fenced(
+                        &run_id,
+                        &lease_token,
+                        fencing_token,
+                        &completion,
+                        &fence,
+                    )
+                    .map_err(RuntimeStoreError::Internal)?,
+            },
+        };
+        status
+            .map(|_| store.get_run(&run_id).map_err(RuntimeStoreError::Internal))
+            .transpose()
+            .map(|run| run.flatten())
     })
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
-    if persisted.is_none() {
+    let Some(persisted) = persisted else {
         return Ok(());
-    }
+    };
+    let event_type = if persisted.status == HiveRunStatus::Succeeded {
+        "run_succeeded"
+    } else {
+        "run_cancelled"
+    };
     let event = record_run_event(
         shared,
         &claim.run,
-        "run_cancelled",
+        event_type,
         serde_json::json!({
             "run_id": claim.run.id,
-            "status": HiveRunStatus::Cancelled.as_str(),
-            "stop_reason": stop_reason,
-            "error": error,
-            "outcome": output,
+            "status": persisted.status.as_str(),
+            "stop_reason": persisted.last_stop_reason,
+            "error": persisted.last_error,
+            "outcome": persisted.outcome,
         }),
     )
     .await?;
@@ -2121,10 +2629,10 @@ async fn finish_execution(
     mut outcome: ExecutionOutcome,
 ) -> Result<(), RuntimeStoreError> {
     let finish_gate = shared.mutation_gate.lock().await;
-    // CancelSession commits under the same mutation gate before delivery to
-    // the hosted loop. If that commit won the race, cancellation is
-    // authoritative even when a slow or imperfect backend races back a
-    // successful terminal result.
+    // Session cancellation and an exact Introduction skip commit under the
+    // same mutation gate before delivery to the hosted loop. If either commit
+    // won the race, cancellation is authoritative even when a slow or
+    // imperfect backend races back a successful terminal result.
     if !matches!(outcome, ExecutionOutcome::Cancelled { .. })
         && cancellation_committed_for_claim(shared, &claim, fencing_token).await?
     {
@@ -2138,6 +2646,7 @@ async fn finish_execution(
     // such input remains hidden: yield the run immediately, then the next
     // execution promotes the orphaned staging rows before loading history.
     if !matches!(outcome, ExecutionOutcome::Cancelled { .. })
+        && claim.run.kind != HiveRunKind::WorkerWorkflow
         && has_pending_user_messages(shared, claim.run.session_id.as_deref()).await?
     {
         outcome = ExecutionOutcome::Sleeping {
@@ -2164,15 +2673,44 @@ async fn finish_execution(
     let fence = daemon_fence(shared, fencing_token);
     let persisted = tokio::task::spawn_blocking(move || {
         let store = HiveRunStore::new(Database::new(&path).map_err(RuntimeStoreError::Internal)?);
-        store
-            .finish_claimed_fenced(&run_id, &lease_token, fencing_token, &completion, &fence)
-            .map_err(RuntimeStoreError::Internal)
+        let status = if target_status == HiveRunStatus::Cancelled {
+            match store
+                .finish_stopped_worker_conversation_claim_fenced(
+                    &run_id,
+                    &lease_token,
+                    fencing_token,
+                    &completion,
+                    &fence,
+                )
+                .map_err(RuntimeStoreError::Internal)?
+            {
+                Some(status) => Some(status),
+                None => store
+                    .finish_claimed_fenced(
+                        &run_id,
+                        &lease_token,
+                        fencing_token,
+                        &completion,
+                        &fence,
+                    )
+                    .map_err(RuntimeStoreError::Internal)?,
+            }
+        } else {
+            store
+                .finish_claimed_fenced(&run_id, &lease_token, fencing_token, &completion, &fence)
+                .map_err(RuntimeStoreError::Internal)?
+        };
+        status
+            .map(|_| store.get_run(&run_id).map_err(RuntimeStoreError::Internal))
+            .transpose()
+            .map(|run| run.flatten())
     })
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
-    let Some(status) = persisted else {
+    let Some(persisted) = persisted else {
         return Ok(());
     };
+    let status = persisted.status;
     let event_type = match status {
         HiveRunStatus::Succeeded => "run_completed",
         HiveRunStatus::RetryWait => "run_retry_scheduled",
@@ -2190,15 +2728,171 @@ async fn finish_execution(
         serde_json::json!({
             "run_id": claim.run.id,
             "status": status.as_str(),
-            "stop_reason": stop_reason,
-            "error": error,
-            "outcome": output,
+            "stop_reason": persisted.last_stop_reason,
+            "error": persisted.last_error,
+            "outcome": persisted.outcome,
         }),
     )
     .await?;
     shared.events.publish(event.envelope());
+    if claim.run.kind == HiveRunKind::WorkerWorkflow
+        && matches!(
+            status,
+            HiveRunStatus::Succeeded
+                | HiveRunStatus::Failed
+                | HiveRunStatus::Cancelled
+                | HiveRunStatus::DeadLetter
+                | HiveRunStatus::RecoveryRequired
+        )
+    {
+        match reconcile_finished_worker_workflow(shared, &claim, status, fencing_token).await {
+            Ok(events) => {
+                for event in events {
+                    shared.events.publish(event.envelope());
+                }
+            }
+            Err(error) => {
+                // The source run is already durably terminal. Leave its
+                // deterministic rollover unmaterialized and let the bounded
+                // fenced sweep adopt it on the next tick rather than guessing
+                // across an uncertain accounting boundary.
+                tracing::warn!(
+                    run_id = %claim.run.id,
+                    error = ?error,
+                    "Hive Worker Workflow terminal reconciliation deferred"
+                );
+            }
+        }
+    }
     drop(finish_gate);
     Ok(())
+}
+
+async fn reconcile_finished_worker_workflow(
+    shared: &RuntimeShared,
+    claim: &ClaimedHiveRun,
+    status: HiveRunStatus,
+    fencing_token: u64,
+) -> Result<Vec<PersistedEvent>, RuntimeStoreError> {
+    let path = shared.config.database_path.clone();
+    let fence = daemon_fence(shared, fencing_token);
+    let run_id = claim.run.id.clone();
+    let worker_id = claim.run.worker_id.clone().ok_or_else(|| {
+        RuntimeStoreError::StateConflict(
+            "Worker Workflow terminal run lost its authoritative Worker binding".into(),
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let owner_user_id = {
+            let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+            db.conn()
+                .query_row(
+                    "SELECT worker.user_id
+                     FROM hive_runs run
+                     JOIN hive_workers worker ON worker.id = run.worker_id
+                     WHERE run.id = ?1 AND run.kind = 'worker_workflow'
+                       AND run.worker_id = ?2",
+                    params![run_id, worker_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    RuntimeStoreError::StateConflict(
+                        "Worker Workflow terminal ownership binding changed".into(),
+                    )
+                })?
+        };
+        let manager = WorkflowManager::new(path.clone())
+            .map_err(|error| RuntimeStoreError::Internal(anyhow::Error::new(error)))?;
+        let reconciliation = manager
+            .reconcile_worker_workflow_run(&fence, &run_id, Utc::now())
+            .map_err(|error| RuntimeStoreError::Internal(anyhow::Error::new(error)))?
+            .ok_or_else(|| {
+                RuntimeStoreError::StateConflict(
+                    "Worker Workflow terminal run has no canonical Workflow linkage".into(),
+                )
+            })?;
+        if reconciliation.run_id != run_id || reconciliation.run_status != status.as_str() {
+            return Err(RuntimeStoreError::StateConflict(
+                "Worker Workflow terminal status changed during reconciliation".into(),
+            ));
+        }
+
+        let rollover_materialized = if status == HiveRunStatus::Succeeded
+            && reconciliation.run_status == HiveRunStatus::Succeeded.as_str()
+            && reconciliation.goal_status == "active"
+            && !reconciliation.recovery_required
+        {
+            manager
+                .finalize_worker_workflow_attempt(
+                    &fence,
+                    &worker_id,
+                    owner_user_id.as_deref(),
+                    &run_id,
+                    &format!("worker-workflow-rollover:{run_id}"),
+                    Utc::now(),
+                )
+                .map_err(|error| RuntimeStoreError::Internal(anyhow::Error::new(error)))?
+                .is_some()
+        } else {
+            false
+        };
+
+        let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+        let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate)?;
+        let now = canonical_timestamp(Utc::now());
+        if !daemon_fence_is_current(&tx, &fence, &now)? {
+            tx.commit()?;
+            return Err(RuntimeStoreError::StateConflict(
+                "Hive daemon generation changed during Worker Workflow reconciliation".into(),
+            ));
+        }
+        let controller = tx.query_row(
+            "SELECT controller.id, controller.session_id, controller.status,
+                    controller.timezone
+             FROM hive_controllers controller
+             JOIN hive_runs run ON run.controller_id = controller.id
+             WHERE run.id = ?1 AND run.worker_id = ?2
+               AND run.kind = 'worker_workflow'",
+            params![run_id, worker_id],
+            |row| {
+                Ok(ControllerRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    status: row.get(2)?,
+                    timezone: row.get(3)?,
+                })
+            },
+        )?;
+        let event = append_event(
+            &tx,
+            &controller,
+            "worker_workflow_reconciled",
+            Some(&run_id),
+            None,
+            Some(&format!(
+                "worker-workflow-reconciled:{run_id}:{}",
+                status.as_str()
+            )),
+            serde_json::json!({
+                "run_id": run_id,
+                "status": status.as_str(),
+                "total_tokens": reconciliation.tokens_used,
+                "rollover_count": if rollover_materialized { 1 } else { 0 },
+            }),
+            &now,
+        )?;
+        tx.commit()?;
+        let mut events = vec![event];
+        if rollover_materialized {
+            events.extend(persist_missing_worker_workflow_rollover_events(
+                &path, &fence, 2,
+            )?);
+        }
+        Ok(events)
+    })
+    .await
+    .map_err(|error| RuntimeStoreError::Internal(error.into()))?
 }
 
 async fn cancellation_committed_for_claim(
@@ -2209,6 +2903,7 @@ async fn cancellation_committed_for_claim(
     let path = shared.config.database_path.clone();
     let run_id = claim.run.id.clone();
     let lease_token = claim.lease_token.clone();
+    let session_id = claim.run.session_id.clone();
     tokio::task::spawn_blocking(move || {
         let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
         db.conn()
@@ -2219,14 +2914,191 @@ async fn cancellation_committed_for_claim(
                      JOIN hive_controllers c ON c.id = r.controller_id
                      WHERE r.id = ?1 AND r.lease_token = ?2 AND r.lease_epoch = ?3
                        AND r.status = 'running' AND c.status = 'disabled'
+                 ) OR EXISTS(
+                     SELECT 1
+                     FROM hive_runs r
+                     JOIN hive_worker_introductions introduction
+                       ON introduction.run_id = r.id
+                      AND introduction.worker_id = r.worker_id
+                     WHERE r.id = ?1 AND r.status = 'cancelled'
+                       AND r.kind = 'worker_introduction'
+                       AND introduction.status = 'skipped'
+                 ) OR EXISTS(
+                     SELECT 1
+                     FROM hive_runs r
+                     JOIN hive_controllers c ON c.id = r.controller_id
+                     JOIN hive_workers worker ON worker.id = r.worker_id
+                     WHERE r.id = ?1 AND r.session_id = ?4
+                       AND r.lease_token = ?2 AND r.lease_epoch = ?3
+                       AND r.status = 'running'
+                       AND r.kind = 'worker_conversation'
+                       AND r.governor_origin = 'user_dm'
+                       AND r.governor_lane_key = 'dm'
+                       AND json_extract(r.execution_context_json, '$.mode.kind')
+                           IN ('worker_conversation_neutral', 'worker_workspace_attached')
+                       AND json_extract(r.execution_context_json, '$.mode.lane.kind')
+                           = 'direct_message'
+                       AND json_extract(r.execution_context_json, '$.mode.worker_id')
+                           = r.worker_id
+                       AND json_extract(r.execution_context_json, '$.mode.worker_revision')
+                           = worker.revision
+                       AND r.last_stop_reason = ?5
+                       AND c.worker_id = worker.id
+                       AND worker.dm_session_id = r.session_id
+                 ) OR EXISTS(
+                     SELECT 1
+                     FROM hive_runs r
+                     JOIN hive_group_turns turn ON turn.id = r.group_turn_id
+                     JOIN hive_groups group_row ON group_row.id = turn.group_id
+                     WHERE r.id = ?1 AND r.lease_token = ?2 AND r.lease_epoch = ?3
+                       AND r.status = 'running'
+                       AND turn.group_id = r.group_id
+                       AND (turn.status = 'cancelled' OR group_row.status = 'archived')
                  )",
-                params![run_id, lease_token, fencing_token],
+                params![
+                    run_id,
+                    lease_token,
+                    fencing_token,
+                    session_id,
+                    WORKER_CONVERSATION_STOP_REQUESTED_REASON
+                ],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(RuntimeStoreError::from)
     })
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+}
+
+async fn cancellation_signal_committed_for_claim(
+    shared: &RuntimeShared,
+    claim: &ClaimedHiveRun,
+    fencing_token: u64,
+    cancellation: &CommittedCancellation,
+) -> Result<bool, RuntimeStoreError> {
+    match &cancellation.kind {
+        CommittedCancellationKind::Session => {
+            cancellation_committed_for_claim(shared, claim, fencing_token).await
+        }
+        CommittedCancellationKind::WorkerIntroduction { run_id } => {
+            let path = shared.config.database_path.clone();
+            let run_id = run_id.clone();
+            let session_id = cancellation.session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+                db.conn()
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1
+                             FROM hive_runs r
+                             JOIN hive_worker_introductions introduction
+                               ON introduction.run_id = r.id
+                              AND introduction.worker_id = r.worker_id
+                             WHERE r.id = ?1 AND r.session_id = ?2
+                               AND r.status = 'cancelled'
+                               AND r.kind = 'worker_introduction'
+                               AND introduction.status = 'skipped'
+                         )",
+                        params![run_id, session_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(RuntimeStoreError::from)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+        }
+        CommittedCancellationKind::WorkerRun { worker_id, run_id } => {
+            let path = shared.config.database_path.clone();
+            let worker_id = worker_id.clone();
+            let run_id = run_id.clone();
+            let session_id = cancellation.session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+                db.conn()
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1
+                             FROM hive_runs run
+                             JOIN hive_controllers controller ON controller.id = run.controller_id
+                             JOIN hive_workers worker ON worker.id = run.worker_id
+                             WHERE run.id = ?1 AND run.session_id = ?2
+                               AND run.worker_id = ?3
+                               AND controller.worker_id = worker.id
+                               AND (
+                                 (
+                                   run.status = 'recovery_required'
+                                   AND controller.status IN ('paused', 'disabled')
+                                   AND worker.status IN ('paused', 'archived')
+                                 ) OR (
+                                   run.status = 'running'
+                                   AND run.kind = 'worker_conversation'
+                                   AND run.governor_origin = 'user_dm'
+                                   AND run.governor_lane_key = 'dm'
+                                   AND json_extract(run.execution_context_json, '$.mode.kind')
+                                       IN (
+                                           'worker_conversation_neutral',
+                                           'worker_workspace_attached'
+                                       )
+                                   AND json_extract(run.execution_context_json, '$.mode.lane.kind')
+                                       = 'direct_message'
+                                   AND json_extract(run.execution_context_json, '$.mode.worker_id')
+                                       = run.worker_id
+                                   AND json_extract(run.execution_context_json, '$.mode.worker_revision')
+                                       = worker.revision
+                                   AND run.last_stop_reason = ?4
+                                   AND worker.dm_session_id = run.session_id
+                                 )
+                               )
+                         )",
+                        params![
+                            run_id,
+                            session_id,
+                            worker_id,
+                            WORKER_CONVERSATION_STOP_REQUESTED_REASON
+                        ],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(RuntimeStoreError::from)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+        }
+        CommittedCancellationKind::WorkerWorkflow {
+            worker_id,
+            goal_id,
+            run_id,
+        } => {
+            let path = shared.config.database_path.clone();
+            let worker_id = worker_id.clone();
+            let goal_id = goal_id.clone();
+            let run_id = run_id.clone();
+            let session_id = cancellation.session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+                db.conn()
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1
+                             FROM hive_runs run
+                             JOIN workflow_goals goal ON goal.id = run.workflow_goal_id
+                             JOIN hive_workers worker ON worker.id = run.worker_id
+                             WHERE run.id = ?1 AND run.session_id = ?2
+                               AND run.worker_id = ?3 AND run.workflow_goal_id = ?4
+                               AND run.kind = 'worker_workflow'
+                               AND run.status = 'cancelled'
+                               AND goal.session_id = run.session_id
+                               AND goal.status IN ('paused', 'cancelled')
+                               AND worker.dm_session_id = run.session_id
+                         )",
+                        params![run_id, session_id, worker_id, goal_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(RuntimeStoreError::from)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+        }
+    }
 }
 
 async fn has_pending_user_messages(
@@ -2470,7 +3342,10 @@ mod completion_tests {
     use mitsuro_core::hive::{canonical_timestamp, HiveRunStatus, RetryPolicy};
     use mitsuro_core::storage::{ClaimedHiveRun, HiveRun, HiveRunKind};
 
-    use super::{completion_for, ExecutionOutcome};
+    use super::{
+        completion_for, reject_worker_goal_acceptance_execution, ExecutionOutcome,
+        RuntimeStoreError,
+    };
 
     fn claim(retry: RetryPolicy) -> ClaimedHiveRun {
         let now = canonical_timestamp(Utc::now());
@@ -2481,6 +3356,16 @@ mod completion_tests {
                 session_id: Some("session-1".into()),
                 schedule_id: None,
                 occurrence_id: None,
+                worker_id: None,
+                objective_message_id: None,
+                execution_context: None,
+                conversation_through_message_id: None,
+                response_message_id: None,
+                response_provider_call_id: None,
+                response_group_message_id: None,
+                workflow_goal_id: None,
+                workflow_attempt_id: None,
+                governor: None,
                 kind: HiveRunKind::Dispatch,
                 objective: "test retry overflow".into(),
                 config: serde_json::json!({"retry": retry}),
@@ -2527,5 +3412,21 @@ mod completion_tests {
         assert_eq!(available_at, None);
         assert_eq!(reason.as_deref(), Some("retry_schedule_unavailable"));
         assert!(!error.unwrap().contains("raw provider error"));
+    }
+
+    #[test]
+    fn worker_goal_acceptance_is_rejected_before_running_or_backend_execution() {
+        let mut claim = claim(RetryPolicy::default());
+        claim.run.kind = HiveRunKind::WorkerWorkflowAcceptance;
+
+        let error = reject_worker_goal_acceptance_execution(&claim)
+            .expect_err("awaiting-input acceptance must be unclaimable");
+        match error {
+            RuntimeStoreError::StateConflict(message) => assert_eq!(
+                message,
+                "Worker Workflow acceptance is awaiting owner input and cannot be claimed or executed"
+            ),
+            other => panic!("unexpected acceptance rejection: {other:?}"),
+        }
     }
 }

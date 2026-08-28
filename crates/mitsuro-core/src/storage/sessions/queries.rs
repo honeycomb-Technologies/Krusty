@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 use rusqlite::types::ValueRef;
+use std::collections::HashSet;
 
 use crate::ai::models::ModelKey;
 use crate::tools::registry::PermissionMode;
@@ -69,9 +70,17 @@ const LIST_SESSIONS_SQL_BY_DIR_USER_AND_TYPE: &str =
              ORDER BY updated_at DESC";
 const LIST_SESSION_DIRS_SQL_ALL: &str = "SELECT DISTINCT working_dir FROM sessions
                  WHERE working_dir IS NOT NULL AND archived_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM hive_group_worker_lanes lane
+                       WHERE lane.session_id = sessions.id
+                   )
                  ORDER BY working_dir";
 const LIST_SESSION_DIRS_SQL_BY_USER: &str = "SELECT DISTINCT working_dir FROM sessions
                  WHERE working_dir IS NOT NULL AND user_id = ?1 AND archived_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM hive_group_worker_lanes lane
+                       WHERE lane.session_id = sessions.id
+                   )
                  ORDER BY working_dir";
 const LIST_SESSIONS_BY_DIRECTORY_SQL: &str =
     "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
@@ -156,9 +165,11 @@ impl SessionManager {
         P: rusqlite::Params,
     {
         let mut stmt = self.db.conn().prepare(sql)?;
-        let sessions = stmt
+        let mut sessions = stmt
             .query_map(params, Self::map_session_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let internal_lanes = self.internal_hive_group_lane_session_ids()?;
+        sessions.retain(|session| !internal_lanes.contains(&session.id));
         Ok(sessions)
     }
 
@@ -293,6 +304,30 @@ impl SessionManager {
         }
     }
 
+    /// Whether a session is an implementation-only `(group, Worker)` lane.
+    /// Runtime code may still load these sessions directly; generic product
+    /// routes use this marker to make them indistinguishable from missing.
+    pub fn is_internal_hive_group_lane(&self, session_id: &str) -> Result<bool> {
+        let exists: bool = self.db.conn().query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM hive_group_worker_lanes WHERE session_id = ?1
+             )",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    fn internal_hive_group_lane_session_ids(&self) -> Result<HashSet<String>> {
+        let mut statement = self
+            .db
+            .conn()
+            .prepare("SELECT session_id FROM hive_group_worker_lanes")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        let session_ids = rows.collect::<rusqlite::Result<HashSet<_>>>()?;
+        Ok(session_ids)
+    }
+
     /// Get sessions grouped by directory
     ///
     /// Returns a map of directory -> sessions for tree display.
@@ -307,8 +342,12 @@ impl SessionManager {
 
         let rows = stmt.query_map([], Self::map_session_row_with_directory)?;
 
+        let internal_lanes = self.internal_hive_group_lane_session_ids()?;
         for row in rows {
             let (dir, session) = row?;
+            if internal_lanes.contains(&session.id) {
+                continue;
+            }
             result.entry(dir).or_default().push(session);
         }
 

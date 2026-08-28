@@ -1,12 +1,12 @@
 import {
+  memo,
+  type ReactNode,
   useCallback,
   useEffect,
-  memo,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import {
   FlatList,
@@ -27,8 +27,8 @@ import { MessageBubble } from "./MessageBubble";
 import {
   findTurnIndexForMessage,
   splitTranscriptTurnsCached,
-  turnContainsMessage,
   type TranscriptTurnsCache,
+  turnContainsMessage,
 } from "./transcriptTurns";
 import {
   findTranscriptRowIndex,
@@ -59,10 +59,12 @@ interface ChatTranscriptProps {
   onApproveTool?: (sessionId: string, toolCallId: string) => void;
   onDenyTool?: (sessionId: string, toolCallId: string) => void;
   onSubmitToolResult?: (
+    sessionId: string,
     toolCallId: string,
     result: string,
   ) => void | Promise<void>;
   onPlanConfirm?: (
+    sessionId: string,
     toolCallId: string,
     choice: "execute" | "abandon",
   ) => void | Promise<void>;
@@ -117,7 +119,6 @@ function setTranscriptScrollCache(
     transcriptScrollCache.delete(oldest);
   }
 }
-
 
 function distanceFromBottom(
   contentHeight: number,
@@ -185,15 +186,16 @@ function ChatTranscriptComponent({
   const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
   const firstPaintGenerationRef = useRef(0);
   const firstPaintFrameRef = useRef<number | null>(null);
-  const firstPaintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const firstPaintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [isNearBottom, setIsNearBottom] = useState(
     restoredScrollStateRef.current?.autoFollow ?? true,
   );
   const t = theme.colors;
-  const blurTint =
-    theme.scheme === "dark"
-      ? "systemChromeMaterialDark"
-      : "systemChromeMaterialLight";
+  const blurTint = theme.scheme === "dark"
+    ? "systemChromeMaterialDark"
+    : "systemChromeMaterialLight";
 
   const messageCount = messages.length;
   const transcriptCacheKey = `${scrollStateKey}::${sessionId ?? "new"}`;
@@ -202,10 +204,10 @@ function ChatTranscriptComponent({
       const previous = committedTurnCachesRef.current.get(transcriptCacheKey);
       const cacheState = !previous
         ? "miss"
-        : previous.sourceMessages === messages
-          && previous.isStreaming === isStreaming
-          ? "hit"
-          : "tail";
+        : previous.sourceMessages === messages &&
+            previous.isStreaming === isStreaming
+        ? "hit"
+        : "tail";
       const finishDeriveSpan = beginMitsuroPerformanceSpan(
         "transcript.derive",
         `${sessionType}:${cacheState}`,
@@ -224,20 +226,18 @@ function ChatTranscriptComponent({
   );
   const { historicalTurns, liveTurn } = turnSplit;
   const cachedScrollState = transcriptScrollCache.get(scrollStateKey) ?? null;
-  const initialHistoricalTurnCount =
-    cachedScrollState?.autoFollow === false
-      ? historicalTurns.length
-      : Math.min(INITIAL_HISTORICAL_TURN_COUNT, historicalTurns.length);
+  const initialHistoricalTurnCount = cachedScrollState?.autoFollow === false
+    ? historicalTurns.length
+    : Math.min(INITIAL_HISTORICAL_TURN_COUNT, historicalTurns.length);
   const [historyWindow, setHistoryWindow] = useState(() => ({
     key: transcriptCacheKey,
     count: initialHistoricalTurnCount,
     sourceLength: historicalTurns.length,
     preserveRevealedWindow: cachedScrollState?.autoFollow === false,
   }));
-  const visibleHistoricalTurnCount =
-    historyWindow.key === transcriptCacheKey
-      ? Math.min(historyWindow.count, historicalTurns.length)
-      : initialHistoricalTurnCount;
+  const visibleHistoricalTurnCount = historyWindow.key === transcriptCacheKey
+    ? Math.min(historyWindow.count, historicalTurns.length)
+    : initialHistoricalTurnCount;
   const hiddenHistoricalTurnCount = Math.max(
     0,
     historicalTurns.length - visibleHistoricalTurnCount,
@@ -253,18 +253,18 @@ function ChatTranscriptComponent({
     ],
   );
   const rowSplit = useMemo(
-    () => splitTranscriptRowsCached(
-      visibleHistoricalTurns,
-      liveTurn,
-      committedRowCachesRef.current.get(transcriptCacheKey),
-    ),
+    () =>
+      splitTranscriptRowsCached(
+        visibleHistoricalTurns,
+        liveTurn,
+        committedRowCachesRef.current.get(transcriptCacheKey),
+      ),
     [liveTurn, transcriptCacheKey, visibleHistoricalTurns],
   );
   const { rows: transcriptRows, liveFooterRow } = rowSplit;
-  const visibleLatestTurn =
-    liveTurn
-    ?? visibleHistoricalTurns[visibleHistoricalTurns.length - 1]
-    ?? null;
+  const visibleLatestTurn = liveTurn ??
+    visibleHistoricalTurns[visibleHistoricalTurns.length - 1] ??
+    null;
   const visibleLatestTurnBudget = useMemo(
     () =>
       visibleLatestTurn
@@ -366,8 +366,8 @@ function ChatTranscriptComponent({
   }, [rowSplit.cache, transcriptCacheKey]);
   const finishFirstPaint = useCallback((generation?: number) => {
     if (
-      generation !== undefined
-      && generation !== firstPaintGenerationRef.current
+      generation !== undefined &&
+      generation !== firstPaintGenerationRef.current
     ) {
       return;
     }
@@ -384,8 +384,8 @@ function ChatTranscriptComponent({
   }, []);
   const markFirstPaintReady = useCallback(() => {
     if (
-      !finishFirstPaintSpanRef.current
-      || firstPaintFrameRef.current !== null
+      !finishFirstPaintSpanRef.current ||
+      firstPaintFrameRef.current !== null
     ) {
       return;
     }
@@ -413,25 +413,23 @@ function ChatTranscriptComponent({
       finishFirstPaint(generation);
     };
   }, [finishFirstPaint, transcriptCacheKey]);
-  const topFadeHeight =
-    topFadeHeightOverride ??
+  const topFadeHeight = topFadeHeightOverride ??
     (isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : MOBILE_TOP_EDGE_HEIGHT);
-  const topFadeOffset =
-    topFadeOffsetOverride ??
+  const topFadeOffset = topFadeOffsetOverride ??
     (isDesktop ? DESKTOP_TOP_EDGE_OFFSET : MOBILE_TOP_EDGE_OFFSET);
   // Content starts lower than the raised fade so the blur sits under header chrome.
-  const topContentGap =
-    topContentPaddingOverride ?? (isDesktop ? 28 : 34);
+  const topContentGap = topContentPaddingOverride ?? (isDesktop ? 28 : 34);
   const bottomScrimHeight = isDesktop
     ? Math.max(DESKTOP_BOTTOM_EDGE_HEIGHT, Math.min(bottomPadding + 40, 188))
     : Math.max(
-        MOBILE_BOTTOM_SCRIM_MIN_HEIGHT,
-        Math.min(bottomPadding + 96, MOBILE_BOTTOM_SCRIM_MAX_HEIGHT),
-      );
+      MOBILE_BOTTOM_SCRIM_MIN_HEIGHT,
+      Math.min(bottomPadding + 96, MOBILE_BOTTOM_SCRIM_MAX_HEIGHT),
+    );
   const bottomScrimOffset = 0;
   const listTopPadding = topContentGap;
   const listBottomPadding = bottomPadding + EDGE_GAP;
-  const showJumpToLatest = messageCount > 0 && !isNearBottom && !hideJumpToLatest;
+  const showJumpToLatest = messageCount > 0 && !isNearBottom &&
+    !hideJumpToLatest;
 
   const cancelBottomAnchor = useCallback(() => {
     if (bottomAnchorFrameRef.current !== null) {
@@ -441,9 +439,12 @@ function ChatTranscriptComponent({
     pendingBottomAnchorAnimatedRef.current = false;
   }, []);
 
-  const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
-    programmaticScrollUntilRef.current = Date.now() + durationMs;
-  }, []);
+  const markProgrammaticScroll = useCallback(
+    (durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
+      programmaticScrollUntilRef.current = Date.now() + durationMs;
+    },
+    [],
+  );
 
   const scrollToBottom = useCallback((animated: boolean) => {
     const contentHeight = contentHeightRef.current;
@@ -504,18 +505,17 @@ function ChatTranscriptComponent({
 
   const revealOlderHistory = useCallback(() => {
     if (
-      hiddenHistoricalTurnCount === 0
-      || !historyRevealArmedRef.current
+      hiddenHistoricalTurnCount === 0 ||
+      !historyRevealArmedRef.current
     ) {
       return;
     }
     historyRevealArmedRef.current = false;
 
     setHistoryWindow((current) => {
-      const currentCount =
-        current.key === transcriptCacheKey
-          ? current.count
-          : initialHistoricalTurnCount;
+      const currentCount = current.key === transcriptCacheKey
+        ? current.count
+        : initialHistoricalTurnCount;
       return {
         key: transcriptCacheKey,
         count: Math.min(
@@ -537,15 +537,14 @@ function ChatTranscriptComponent({
     offsetY = scrollOffsetRef.current,
     options: { allowDisable?: boolean; allowEnable?: boolean } = {},
   ) => {
-    const nextNearBottom =
-      distanceFromBottom(
-        contentHeightRef.current,
-        listHeightRef.current,
-        offsetY,
-      ) <= SCROLL_FOLLOW_THRESHOLD;
+    const nextNearBottom = distanceFromBottom(
+      contentHeightRef.current,
+      listHeightRef.current,
+      offsetY,
+    ) <= SCROLL_FOLLOW_THRESHOLD;
 
     setIsNearBottom((current) =>
-      current === nextNearBottom ? current : nextNearBottom,
+      current === nextNearBottom ? current : nextNearBottom
     );
 
     if (nextNearBottom && options.allowEnable !== false) {
@@ -577,8 +576,8 @@ function ChatTranscriptComponent({
       const offsetY = event.nativeEvent.contentOffset.y;
       scrollOffsetRef.current = offsetY;
       if (
-        isUserDraggingRef.current
-        && offsetY <= SCROLL_FOLLOW_THRESHOLD
+        isUserDraggingRef.current &&
+        offsetY <= SCROLL_FOLLOW_THRESHOLD
       ) {
         revealOlderHistory();
       } else if (offsetY > SCROLL_FOLLOW_THRESHOLD * 2) {
@@ -725,8 +724,8 @@ function ChatTranscriptComponent({
       return;
     }
 
-    const firstVisibleHistoricalIndex =
-      historicalTurns.length - visibleHistoricalTurns.length;
+    const firstVisibleHistoricalIndex = historicalTurns.length -
+      visibleHistoricalTurns.length;
     if (targetIndex < firstVisibleHistoricalIndex) {
       setHistoryWindow({
         key: transcriptCacheKey,
@@ -878,9 +877,9 @@ function ChatTranscriptComponent({
         }}
         renderItem={renderTranscriptRow}
         ListFooterComponent={liveFooter}
-        maintainVisibleContentPosition={
-          isNearBottom ? undefined : { minIndexForVisible: 0 }
-        }
+        maintainVisibleContentPosition={isNearBottom
+          ? undefined
+          : { minIndexForVisible: 0 }}
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -934,24 +933,24 @@ function ChatTranscriptComponent({
           { height: topFadeHeight, top: topFadeOffset },
         ]}
       >
-        {isDesktop ? (
-          <BlurView
-            intensity={18}
-            tint={blurTint}
-            style={StyleSheet.absoluteFill}
-          />
-        ) : null}
+        {isDesktop
+          ? (
+            <BlurView
+              intensity={18}
+              tint={blurTint}
+              style={StyleSheet.absoluteFill}
+            />
+          )
+          : null}
         <LinearGradient
-          colors={
-            isDesktop
-              ? [t.background, `${t.background}b8`, `${t.background}00`]
-              : [
-                  t.background,
-                  `${t.background}c8`,
-                  `${t.background}18`,
-                  `${t.background}00`,
-                ]
-          }
+          colors={isDesktop
+            ? [t.background, `${t.background}b8`, `${t.background}00`]
+            : [
+              t.background,
+              `${t.background}c8`,
+              `${t.background}18`,
+              `${t.background}00`,
+            ]}
           locations={isDesktop ? [0, 0.42, 1] : [0, 0.28, 0.58, 1]}
           start={{ x: 0.5, y: 0 }}
           end={{ x: 0.5, y: 1 }}
@@ -966,57 +965,59 @@ function ChatTranscriptComponent({
           { height: bottomScrimHeight, bottom: bottomScrimOffset },
         ]}
       >
-        {isDesktop ? (
-          <BlurView
-            intensity={28}
-            tint={blurTint}
-            style={StyleSheet.absoluteFill}
-          />
-        ) : null}
+        {isDesktop
+          ? (
+            <BlurView
+              intensity={28}
+              tint={blurTint}
+              style={StyleSheet.absoluteFill}
+            />
+          )
+          : null}
         <LinearGradient
-          colors={
-            isDesktop
-              ? [`${t.background}00`, `${t.background}d0`, t.background]
-              : [
-                  `${t.background}00`,
-                  `${t.background}20`,
-                  `${t.background}d8`,
-                  t.background,
-                ]
-          }
+          colors={isDesktop
+            ? [`${t.background}00`, `${t.background}d0`, t.background]
+            : [
+              `${t.background}00`,
+              `${t.background}20`,
+              `${t.background}d8`,
+              t.background,
+            ]}
           locations={isDesktop ? undefined : [0, 0.36, 0.7, 1]}
           start={{ x: 0.5, y: 0 }}
           end={{ x: 0.5, y: 1 }}
           style={StyleSheet.absoluteFill}
         />
       </View>
-      {showJumpToLatest ? (
-        <View
-          style={[
-            styles.jumpToLatestSlot,
-            styles.pointerBoxNone,
-            { bottom: bottomPadding + EDGE_GAP },
-          ]}
-        >
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Jump to latest"
-            onPress={handleJumpToLatest}
-            style={[styles.jumpToLatest, { borderColor: t.glass.border }]}
+      {showJumpToLatest
+        ? (
+          <View
+            style={[
+              styles.jumpToLatestSlot,
+              styles.pointerBoxNone,
+              { bottom: bottomPadding + EDGE_GAP },
+            ]}
           >
-            <AdaptiveMaterial
-              borderRadius={BOTTOM_CONTROL_RADIUS}
-              blurIntensity={20}
-              tone="regular"
-            />
-            <View
-              style={[styles.jumpToLatestInner, styles.ignorePointerEvents]}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Jump to latest"
+              onPress={handleJumpToLatest}
+              style={[styles.jumpToLatest, { borderColor: t.glass.border }]}
             >
-              <ArrowDown size={24} color={t.thinking} strokeWidth={2.2} />
-            </View>
-          </Pressable>
-        </View>
-      ) : null}
+              <AdaptiveMaterial
+                borderRadius={BOTTOM_CONTROL_RADIUS}
+                blurIntensity={20}
+                tone="regular"
+              />
+              <View
+                style={[styles.jumpToLatestInner, styles.ignorePointerEvents]}
+              >
+                <ArrowDown size={24} color={t.thinking} strokeWidth={2.2} />
+              </View>
+            </Pressable>
+          </View>
+        )
+        : null}
     </View>
   );
 }
@@ -1033,10 +1034,12 @@ interface TranscriptMessageRowViewProps {
   onApproveTool?: (sessionId: string, toolCallId: string) => void;
   onDenyTool?: (sessionId: string, toolCallId: string) => void;
   onSubmitToolResult?: (
+    sessionId: string,
     toolCallId: string,
     result: string,
   ) => void | Promise<void>;
   onPlanConfirm?: (
+    sessionId: string,
     toolCallId: string,
     choice: "execute" | "abandon",
   ) => void | Promise<void>;
@@ -1068,18 +1071,19 @@ const TranscriptMessageRowView = memo(function TranscriptMessageRowView({
         isStreaming={isStreaming}
         isThinking={isThinking}
         activeToolCallId={activeToolCallId}
-        onApproveTool={
-          sessionId && onApproveTool
-            ? (toolCallId) => onApproveTool(sessionId, toolCallId)
-            : undefined
-        }
-        onDenyTool={
-          sessionId && onDenyTool
-            ? (toolCallId) => onDenyTool(sessionId, toolCallId)
-            : undefined
-        }
-        onSubmitToolResult={onSubmitToolResult}
-        onPlanConfirm={onPlanConfirm}
+        onApproveTool={sessionId && onApproveTool
+          ? (toolCallId) => onApproveTool(sessionId, toolCallId)
+          : undefined}
+        onDenyTool={sessionId && onDenyTool
+          ? (toolCallId) => onDenyTool(sessionId, toolCallId)
+          : undefined}
+        onSubmitToolResult={sessionId && onSubmitToolResult
+          ? (toolCallId, result) =>
+            onSubmitToolResult(sessionId, toolCallId, result)
+          : undefined}
+        onPlanConfirm={sessionId && onPlanConfirm
+          ? (toolCallId, choice) => onPlanConfirm(sessionId, toolCallId, choice)
+          : undefined}
       />
     </View>
   );

@@ -88,7 +88,7 @@ impl HiveIpcClient {
         }
         let response = self.request(request).await?;
         match response.outcome {
-            ResponseOutcome::Success { payload } => Ok(payload),
+            ResponseOutcome::Success { payload } => Ok(*payload),
             ResponseOutcome::Failure { error } => Err(ClientError::Remote {
                 code: error.code,
                 message: error.message,
@@ -187,12 +187,18 @@ impl HiveIpcClient {
         match frame {
             ServerFrame::Response(ResponseEnvelope {
                 request_id: actual_request_id,
-                outcome:
-                    ResponseOutcome::Success {
-                        payload: ResponsePayload::SubscriptionAccepted(accepted),
-                    },
+                outcome: ResponseOutcome::Success { payload },
                 ..
-            }) if actual_request_id == request_id => Ok(EventSubscription { stream, accepted }),
+            }) if actual_request_id == request_id => match *payload {
+                ResponsePayload::SubscriptionAccepted(accepted) => {
+                    Ok(EventSubscription { stream, accepted })
+                }
+                _ => Err(ProtocolViolation::UnexpectedFrame {
+                    expected: "subscription_accepted",
+                    actual: "response",
+                }
+                .into()),
+            },
             ServerFrame::Response(ResponseEnvelope {
                 request_id: actual_request_id,
                 outcome: ResponseOutcome::Failure { error },

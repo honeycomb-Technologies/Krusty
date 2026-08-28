@@ -7,7 +7,8 @@ use crate::agent::context_ledger::ContextLedger;
 use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
-    HiveMemoryReader, MemoryStore, Report, ReportStore, TaskStatus,
+    HiveMemoryReader, MemoryAclScope, MemoryNamespace, MemoryStore, Report, ReportStore,
+    TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
@@ -34,17 +35,38 @@ const REPORT_QUERY_STOPWORDS: &[&str] = &[
     "they", "this", "through", "what", "when", "with", "work",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiveKnowledgePolicy {
+    Conversation,
+    WorkerGoal,
+}
+
+impl HiveKnowledgePolicy {
+    const fn allows_deferred_report_read(self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+
+    const fn includes_conversation_memory(self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+
+    const fn includes_autonomous_task_relevance(self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+}
+
 /// Build context for recent reports in this project.
 pub(super) fn build_report_context(
     db_path: &Path,
     project_dir: Option<&str>,
+    user_id: Option<&str>,
     conversation: &[ModelMessage],
 ) -> String {
     let Some(db) = open_context_database(db_path, "building report context") else {
         return String::new();
     };
     let store = ReportStore::new(db);
-    let reports = match store.list_reports(project_dir) {
+    let reports = match store.list_reports_for_memory_reader(project_dir, user_id, None) {
         Ok(r) => r,
         Err(error) => {
             warn!(project_dir = ?project_dir, error = %error, "Failed to load reports for context");
@@ -88,9 +110,57 @@ pub(super) fn build_hive_knowledge_context(
     project_dir: Option<&str>,
     user_id: Option<&str>,
     hive_memory_namespace: Option<&str>,
+    hive_worker_id: Option<&str>,
     session_id: &str,
     group_id: Option<&str>,
     conversation: &[ModelMessage],
+) -> String {
+    build_hive_knowledge_context_with_policy(
+        db_path,
+        project_dir,
+        user_id,
+        hive_memory_namespace,
+        hive_worker_id,
+        session_id,
+        group_id,
+        conversation,
+        HiveKnowledgePolicy::Conversation,
+    )
+}
+
+pub(super) fn build_hive_worker_goal_knowledge_context(
+    db_path: &Path,
+    project_dir: &str,
+    user_id: Option<&str>,
+    hive_memory_namespace: &str,
+    hive_worker_id: &str,
+    session_id: &str,
+    conversation: &[ModelMessage],
+) -> String {
+    build_hive_knowledge_context_with_policy(
+        db_path,
+        Some(project_dir),
+        user_id,
+        Some(hive_memory_namespace),
+        Some(hive_worker_id),
+        session_id,
+        None,
+        conversation,
+        HiveKnowledgePolicy::WorkerGoal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_hive_knowledge_context_with_policy(
+    db_path: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    hive_memory_namespace: Option<&str>,
+    hive_worker_id: Option<&str>,
+    session_id: &str,
+    group_id: Option<&str>,
+    conversation: &[ModelMessage],
+    policy: HiveKnowledgePolicy,
 ) -> String {
     // The materialized snapshot is owner/project scoped rather than crew or
     // Worker scoped. Only the primary Hive presence may consume it; named crew
@@ -114,12 +184,20 @@ pub(super) fn build_hive_knowledge_context(
                 user_id,
                 project_dir,
                 worker_namespace_id: hive_memory_namespace,
-                conversation_id: Some(session_id),
+                conversation_id: policy.includes_conversation_memory().then_some(session_id),
                 group_id,
             })
         } else {
             Vec::new()
         };
+    if policy == HiveKnowledgePolicy::WorkerGoal {
+        let exact_namespace = hive_memory_namespace;
+        memories.retain(|memory| {
+            memory.acl_scope == MemoryAclScope::Worker
+                && memory.namespace == MemoryNamespace::Crew
+                && memory.namespace_id.as_deref() == exact_namespace
+        });
+    }
     if let Some(project_dir) = project_dir {
         memories.sort_by(|left, right| {
             let left_project_match = left.project_dir.as_deref() == Some(project_dir);
@@ -131,11 +209,11 @@ pub(super) fn build_hive_knowledge_context(
         });
     }
 
-    let reports = if let Some(report_db) =
+    let mut reports = if let Some(report_db) =
         open_context_database(db_path, "building hive report context")
     {
         let report_store = ReportStore::new(report_db);
-        match report_store.list_reports_for_exact_owner(project_dir, user_id) {
+        match report_store.list_reports_for_memory_reader(project_dir, user_id, hive_worker_id) {
             Ok(reports) => reports,
             Err(error) => {
                 warn!(project_dir = ?project_dir, error = %error, "Failed to load Hive reports for context");
@@ -145,6 +223,13 @@ pub(super) fn build_hive_knowledge_context(
     } else {
         Vec::new()
     };
+    if policy == HiveKnowledgePolicy::WorkerGoal {
+        reports.retain(|report| {
+            report.scope.acl_scope() == MemoryAclScope::Worker
+                && report.scope.source_worker_id() == hive_worker_id
+                && report.scope.namespace_id() == hive_memory_namespace
+        });
+    }
 
     if memories.is_empty() && reports.is_empty() && generated_snapshot.is_none() {
         return String::new();
@@ -152,7 +237,13 @@ pub(super) fn build_hive_knowledge_context(
 
     let report_selection = select_reports_for_context(
         &reports,
-        &build_report_relevance_terms(conversation, db_path, Some(session_id)),
+        &build_report_relevance_terms(
+            conversation,
+            db_path,
+            policy
+                .includes_autonomous_task_relevance()
+                .then_some(session_id),
+        ),
         MAX_HIVE_REPORT_ITEMS,
     );
 
@@ -166,9 +257,14 @@ pub(super) fn build_hive_knowledge_context(
         .filter(|memory| !is_current_snapshot(memory))
         .filter(|memory| !is_compaction_flush_memory(memory))
         .collect::<Vec<_>>();
+    let report_instruction = if policy.allows_deferred_report_read() {
+        "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions; use deferred `report` execution through `tool_search` when full detail matters."
+    } else {
+        "Carry forward durable facts from the exact Worker memory namespace and bounded Worker-private report summaries shown here. This run has no report retrieval or tool-discovery capability; do not imply access to omitted report content."
+    };
     let mut sections = vec![
         "[HIVE KNOWLEDGE]".to_string(),
-        "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions; use deferred `report` execution through `tool_search` when full detail matters.".to_string(),
+        report_instruction.to_string(),
     ];
 
     if let Some(snapshot_content) = generated_snapshot

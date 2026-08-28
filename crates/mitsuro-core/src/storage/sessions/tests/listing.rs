@@ -1,6 +1,9 @@
 use super::{create_test_db, create_test_user};
 use crate::storage::sessions::SessionManager;
-use crate::storage::{SessionType, WorkspaceMode};
+use crate::storage::{
+    Database, HiveGroupStore, HiveGroupWorkerLaneStore, HiveWorkerStore, NewHiveGroup,
+    NewHiveGroupWorkerLane, NewHiveWorker, SessionType, WorkspaceMode,
+};
 
 #[test]
 fn test_list_sessions_for_user_filters_by_user_id() {
@@ -183,6 +186,85 @@ fn test_list_sessions_for_user_by_type_filters_surface() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, hive_session);
     assert_eq!(sessions[0].session_type, SessionType::Hive);
+}
+
+#[test]
+fn internal_group_worker_lane_is_hidden_from_every_generic_core_listing() {
+    let (db, temp) = create_test_db();
+    create_test_user(&db, "alice");
+    let db_path = temp.path().join("test.db");
+    let manager = SessionManager::new(db);
+    let dm = manager
+        .create_session_for_user_with_config(
+            "Researcher DM",
+            None,
+            Some("/work/repo"),
+            Some("/work/repo"),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .unwrap();
+    let lane = manager
+        .create_session_for_user_with_config(
+            "Researcher in Release Room",
+            None,
+            Some("/work/private-lane-only"),
+            Some("/work/private-lane-only"),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Hive,
+        )
+        .unwrap();
+    let worker = HiveWorkerStore::new(Database::new(&db_path).unwrap())
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            dm_session_id: Some(dm.clone()),
+            ..NewHiveWorker::new("researcher")
+        })
+        .unwrap();
+    let group = HiveGroupStore::new(Database::new(&db_path).unwrap())
+        .create(&NewHiveGroup {
+            user_id: Some("alice".into()),
+            title: "Release Room".into(),
+            member_worker_ids: vec![worker.id.clone()],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+    HiveGroupWorkerLaneStore::new(Database::new(&db_path).unwrap())
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.id,
+            worker.id,
+            lane.clone(),
+        ))
+        .unwrap();
+
+    for sessions in [
+        manager.list_sessions_for_user(None, Some("alice")).unwrap(),
+        manager
+            .list_sessions_for_user_including_archived(None, Some("alice"))
+            .unwrap(),
+        manager
+            .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Hive)
+            .unwrap(),
+    ] {
+        assert!(sessions.iter().any(|session| session.id == dm));
+        assert!(sessions.iter().all(|session| session.id != lane));
+    }
+    assert!(manager
+        .list_session_directories_for_user(Some("alice"))
+        .unwrap()
+        .iter()
+        .all(|directory| directory != "/work/private-lane-only"));
+    assert!(manager
+        .list_sessions_by_directory()
+        .unwrap()
+        .values()
+        .flatten()
+        .all(|session| session.id != lane));
+    assert!(manager.is_internal_hive_group_lane(&lane).unwrap());
 }
 
 #[test]

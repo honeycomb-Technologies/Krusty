@@ -31,6 +31,8 @@ pub enum WorkflowError {
     InvalidTransition(String),
     #[error("invalid workflow input: {0}")]
     Validation(String),
+    #[error("Worker Workflow requires an attached absolute workspace: {0}")]
+    WorkspaceRequired(String),
     #[error("workflow database error: {0}")]
     Database(String),
     #[error(transparent)]
@@ -41,7 +43,7 @@ pub enum WorkflowError {
 
 /// Canonical transaction boundary for Goal, plan, step, and attempt state.
 pub struct WorkflowManager {
-    db: SharedDatabase,
+    pub(crate) db: SharedDatabase,
 }
 
 impl WorkflowManager {
@@ -121,6 +123,93 @@ impl WorkflowManager {
                 1,
                 operation_id,
                 "goal_created",
+                actor,
+                None,
+            )
+        })
+    }
+
+    /// Atomically creates a Goal and its first proposed plan.
+    ///
+    /// Worker-native authoring cannot repair a draft that is stranded before
+    /// its first plan, so validation, both inserts, the event, and the
+    /// idempotency receipt intentionally share one transaction.
+    pub fn create_goal_with_plan(
+        &self,
+        session_id: &str,
+        goal_input: CreateGoalInput,
+        plan_input: PlanProposalInput,
+        operation_id: &str,
+        actor: &str,
+    ) -> Result<WorkflowMutation, WorkflowError> {
+        validate_operation(operation_id, actor)?;
+        validate_goal_input(&goal_input)?;
+        validate_plan_input(&plan_input)?;
+        self.with_transaction(|tx| {
+            if let Some(previous) = load_idempotent(tx, operation_id)? {
+                return Ok(previous);
+            }
+            ensure_session_exists(tx, session_id)?;
+            let unfinished: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM workflow_goals
+                     WHERE session_id = ?1
+                       AND status IN ('draft', 'active', 'paused', 'blocked')
+                     LIMIT 1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(goal_id) = unfinished {
+                return Err(WorkflowError::Conflict(format!(
+                    "session already has unfinished goal {goal_id}"
+                )));
+            }
+
+            let timestamp = now();
+            let goal_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO workflow_goals (
+                    id, session_id, title, objective, constraints_json, status,
+                    needs_definition, revision, token_budget, source, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'draft', 0, 1, ?6, 'user', ?7, ?7)",
+                params![
+                    goal_id,
+                    session_id,
+                    goal_input.title.trim(),
+                    goal_input.objective.trim(),
+                    serde_json::to_string(&normalize_strings(&goal_input.constraints))?,
+                    goal_input.token_budget.map(to_i64).transpose()?,
+                    timestamp
+                ],
+            )?;
+            insert_criteria(tx, &goal_id, &goal_input.criteria)?;
+
+            let plan_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO workflow_plan_revisions (
+                    id, goal_id, revision_number, status, title, rationale,
+                    source_message_id, predecessor_id, legacy_markdown, created_at
+                 ) VALUES (?1, ?2, 1, 'proposed', ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    plan_id,
+                    goal_id,
+                    plan_input.title.trim(),
+                    clean_optional(plan_input.rationale.as_deref()),
+                    plan_input.source_message_id,
+                    plan_input.predecessor_id,
+                    plan_input.legacy_markdown,
+                    timestamp
+                ],
+            )?;
+            insert_steps(tx, &plan_id, &plan_input)?;
+            finish_changed(
+                tx,
+                session_id,
+                &goal_id,
+                1,
+                operation_id,
+                "goal_created_with_plan",
                 actor,
                 None,
             )
@@ -1493,7 +1582,12 @@ impl WorkflowManager {
                     "SELECT attempt.id, goal.id, goal.session_id, goal.revision
                        FROM workflow_execution_attempts attempt
                        JOIN workflow_goals goal ON goal.id = attempt.goal_id
-                      WHERE attempt.status = 'running'",
+                      WHERE attempt.status = 'running'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM hive_runs run
+                            WHERE run.kind = 'worker_workflow'
+                              AND run.workflow_attempt_id = attempt.id
+                        )",
                 )?;
                 let rows = statement
                     .query_map([], |row| {
@@ -1690,6 +1784,111 @@ impl WorkflowManager {
         tx.commit()?;
         Ok(output)
     }
+}
+
+/// Pause every active Goal bound to a Worker's private or group execution
+/// lanes as part of the caller's Worker-archive transaction. Keeping this
+/// transaction-bearing prevents an archived Worker from retaining an active
+/// Goal if the process dies between independent commits.
+pub fn pause_worker_goals_for_archive_in_transaction(
+    tx: &Transaction<'_>,
+    worker_id: &str,
+    actor: &str,
+) -> Result<usize, WorkflowError> {
+    validate_operation("worker-archive", actor)?;
+    let mut statement = tx.prepare(
+        "SELECT goal.id, goal.session_id, goal.revision
+         FROM workflow_goals goal
+         JOIN hive_workers worker ON worker.id = ?1
+         WHERE goal.status = 'active'
+           AND (
+               goal.session_id = worker.dm_session_id
+               OR EXISTS (
+                   SELECT 1 FROM hive_group_worker_lanes lane
+                   WHERE lane.worker_id = worker.id
+                     AND lane.session_id = goal.session_id
+               )
+           )
+         ORDER BY goal.session_id ASC, goal.id ASC",
+    )?;
+    let goals = statement
+        .query_map([worker_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (goal_id, session_id, revision) in &goals {
+        let timestamp = now();
+        tx.execute(
+            "INSERT OR IGNORE INTO hive_worker_provider_call_outcomes (
+                 provider_call_id, state, outcome, remote_acceptance,
+                 unknown_reason, finished_at
+             )
+             SELECT call.provider_call_id, 'unknown', 'worker_archived',
+                    'possibly_sent',
+                    'Worker was archived while its Workflow provider call was unresolved',
+                    ?2
+             FROM hive_worker_provider_calls call
+             JOIN hive_runs run ON run.id = call.run_id
+             WHERE run.workflow_goal_id = ?1 AND run.kind = 'worker_workflow'
+               AND NOT EXISTS (
+                   SELECT 1 FROM hive_worker_provider_call_outcomes terminal
+                   WHERE terminal.provider_call_id = call.provider_call_id
+               )",
+            params![goal_id, timestamp],
+        )?;
+        tx.execute(
+            "UPDATE hive_run_attempts
+             SET finished_at = COALESCE(finished_at, ?2), outcome = 'cancelled',
+                 stop_reason = 'worker_archived', error = NULL
+             WHERE run_id IN (
+                 SELECT id FROM hive_runs
+                 WHERE workflow_goal_id = ?1 AND kind = 'worker_workflow'
+                   AND status IN (
+                       'queued', 'leased', 'running', 'sleeping', 'awaiting_input',
+                       'retry_wait', 'recovery_required'
+                   )
+             ) AND finished_at IS NULL",
+            params![goal_id, timestamp],
+        )?;
+        tx.execute(
+            "UPDATE hive_runs
+             SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
+                 lease_epoch = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+                 last_stop_reason = 'worker_archived', last_error = NULL,
+                 finished_at = COALESCE(finished_at, ?2), updated_at = ?2
+             WHERE workflow_goal_id = ?1 AND kind = 'worker_workflow'
+               AND status IN (
+                   'queued', 'leased', 'running', 'sleeping', 'awaiting_input',
+                   'retry_wait', 'recovery_required'
+               )",
+            params![goal_id, timestamp],
+        )?;
+        let next_revision = bump_goal_revision(tx, session_id, goal_id, *revision)?;
+        tx.execute(
+            "UPDATE workflow_goals
+             SET status = 'paused', status_reason = 'worker_archived', updated_at = ?1
+             WHERE id = ?2 AND session_id = ?3 AND status = 'active'",
+            params![now(), goal_id, session_id],
+        )?;
+        pause_running_attempt(tx, goal_id, "worker_archived")?;
+        let operation_id = format!("worker-archive:{worker_id}:{goal_id}:{next_revision}");
+        finish_changed(
+            tx,
+            session_id,
+            goal_id,
+            next_revision,
+            &operation_id,
+            "goal_paused",
+            actor,
+            None,
+        )?;
+    }
+    Ok(goals.len())
 }
 
 fn validate_operation(operation_id: &str, actor: &str) -> Result<(), WorkflowError> {

@@ -16,7 +16,7 @@ pub struct CommandContext {
 }
 
 pub enum HandlerReply {
-    Response(ResponsePayload),
+    Response(Box<ResponsePayload>),
     Subscription {
         accepted: SubscriptionAccepted,
         events: mpsc::Receiver<EventEnvelope>,

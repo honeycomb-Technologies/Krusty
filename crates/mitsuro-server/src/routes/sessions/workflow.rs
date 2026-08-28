@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use mitsuro_core::agent::LoopInput;
+use mitsuro_core::storage::{Database, HiveWorkerStore, SessionType};
 use mitsuro_core::workflow::{
     AttemptProgressInput, AttemptStatus, CompleteStepInput, CreateGoalInput, EditGoalInput,
     PlanProposalInput, SetCriterionInput, StartAttemptInput, WorkflowError, WorkflowManager,
@@ -146,7 +147,8 @@ pub(super) async fn execute_workflow_command(
     Json(command): Json<WorkflowCommand>,
 ) -> Result<Json<WorkflowMutation>, AppError> {
     let session_manager = open_session_manager(&state)?;
-    load_owned_session(&session_manager, &session_id, user.as_ref())?;
+    let session = load_owned_session(&session_manager, &session_id, user.as_ref())?;
+    ensure_not_worker_dm_workflow_command(&state, &session)?;
     let manager =
         WorkflowManager::new(state.db_path.as_ref().clone()).map_err(map_workflow_error)?;
     let starts_execution = matches!(
@@ -436,12 +438,43 @@ pub(super) async fn execute_workflow_command(
     Ok(Json(mutation))
 }
 
+/// Exact Worker DMs expose Goal authoring and lifecycle only through the
+/// Worker-aware HTTP surface. Keep this fence ahead of every WorkflowManager
+/// mutation, session lock, work-mode update, and live LoopInput delivery so a
+/// generic Agent route cannot bypass Worker state or revision authority.
+fn ensure_not_worker_dm_workflow_command(
+    state: &AppState,
+    session: &mitsuro_core::storage::SessionInfo,
+) -> Result<(), AppError> {
+    if session.session_type != SessionType::Hive {
+        return Ok(());
+    }
+
+    let worker_store = HiveWorkerStore::new(Database::new(&state.db_path)?);
+    let Some(worker) = worker_store.get_by_dm_session(&session.id)? else {
+        // Primary Hive remains on its existing compatibility contract.
+        return Ok(());
+    };
+    if worker.user_id != session.user_id
+        || worker.dm_session_id.as_deref() != Some(session.id.as_str())
+    {
+        return Err(AppError::NotFound(format!(
+            "Hive session {} not found",
+            session.id
+        )));
+    }
+    Err(AppError::Conflict(format!(
+        "Worker Goal commands for {} must use /hive/workers/{}/workflow",
+        session.id, worker.id
+    )))
+}
+
 fn map_workflow_error(error: WorkflowError) -> AppError {
     match error {
         WorkflowError::NotFound(message) => AppError::NotFound(message),
-        WorkflowError::Conflict(message) | WorkflowError::InvalidTransition(message) => {
-            AppError::Conflict(message)
-        }
+        WorkflowError::Conflict(message)
+        | WorkflowError::InvalidTransition(message)
+        | WorkflowError::WorkspaceRequired(message) => AppError::Conflict(message),
         WorkflowError::Validation(message) => AppError::BadRequest(message),
         WorkflowError::Database(message) => AppError::Internal(message),
         WorkflowError::Sql(error) => AppError::Internal(error.to_string()),

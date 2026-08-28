@@ -67,8 +67,59 @@ fn candidate_insert_is_idempotent_and_user_scoped() {
     let first = store.insert(&input).unwrap();
     let second = store.insert(&input).unwrap();
     assert_eq!(first.id, second.id);
+    assert_eq!(
+        first.memory_namespace,
+        crate::storage::MemoryNamespace::Shared
+    );
+    assert_eq!(
+        first.memory_acl_scope,
+        crate::storage::MemoryAclScope::Owner
+    );
+    assert!(first.memory_namespace_id.is_none());
+    assert!(first.memory_scope_resolved);
     assert!(store.get_owned(&first.id, Some("bob")).unwrap().is_none());
     assert!(store.get_owned(&first.id, Some("alice")).unwrap().is_some());
+}
+
+#[test]
+fn unresolved_group_run_learning_cannot_default_to_shared_memory() {
+    let temp = TempDir::new().unwrap();
+    let db = Database::new(&temp.path().join("learning.db")).unwrap();
+    let (session_id, message_id) = seed_evidence(&db, None);
+    db.conn()
+        .execute_batch(&format!(
+            "INSERT INTO hive_controllers (
+                 id, scope_key, session_id, status, timezone,
+                 max_concurrent_runs, created_at, updated_at
+             ) VALUES (
+                 'group-controller', 'local:unresolved-group', '{session_id}',
+                 'active', 'UTC', 1, '2026-08-24T00:00:00Z',
+                 '2026-08-24T00:00:00Z'
+             );
+             INSERT INTO hive_runs (
+                 id, controller_id, session_id, kind, objective, config_json,
+                 status, available_at, max_attempts, created_at, updated_at,
+                 group_id, group_turn_id
+             ) VALUES (
+                 'unresolved-group-run', 'group-controller', '{session_id}',
+                 'group_turn', 'test unresolved binding', '{{}}', 'queued',
+                 '2026-08-24T00:00:00Z', 3, '2026-08-24T00:00:00Z',
+                 '2026-08-24T00:00:00Z', 'missing-group', 'missing-turn'
+             );"
+        ))
+        .unwrap();
+
+    let error = LearningCandidateStore::new(&db)
+        .insert(&store_input(None, session_id, message_id))
+        .unwrap_err();
+    assert!(error.to_string().contains("no persisted lane binding"));
+    let candidate_count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hive_learning_candidates", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(candidate_count, 0);
 }
 
 #[test]

@@ -225,15 +225,6 @@ pub(super) async fn update_group(
         ));
     }
 
-    // Membership first so a same-request assignee change validates against
-    // the new roster.
-    if let Some(member_worker_ids) = req.member_worker_ids.as_ref() {
-        store
-            .set_members(&group.id, member_worker_ids)
-            .map_err(|error| AppError::BadRequest(error.to_string()))?;
-    }
-    let group = store.get(&group.id)?.ok_or_else(|| group_not_found(&id))?;
-
     let title = match req.title.as_deref() {
         Some(value) => trimmed_nonempty(Some(value))
             .ok_or_else(|| AppError::BadRequest("title must not be empty".to_string()))?
@@ -243,7 +234,11 @@ pub(super) async fn update_group(
     let default_assignee = match req.default_assignee_worker_id.as_deref() {
         // An explicitly empty value clears the assignment.
         Some(value) => trimmed_nonempty(Some(value)).map(ToOwned::to_owned),
-        None => group.default_assignee_worker_id.clone(),
+        None => group.default_assignee_worker_id.clone().filter(|assignee| {
+            req.member_worker_ids
+                .as_ref()
+                .is_none_or(|members| members.iter().any(|member| member == assignee))
+        }),
     };
     let update = HiveGroupUpdate {
         title,
@@ -259,7 +254,7 @@ pub(super) async fn update_group(
         default_assignee_worker_id: default_assignee,
     };
     let updated = store
-        .update_settings(&group.id, &update)
+        .update_settings_and_members(&group.id, &update, req.member_worker_ids.as_deref())
         .map_err(|error| AppError::BadRequest(error.to_string()))?
         .ok_or_else(|| group_not_found(&id))?;
     Ok(Json(load_group_detail(&store, updated)?))
@@ -272,12 +267,17 @@ pub(super) async fn archive_group(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<OkResponse>, AppError> {
+    let user_id = current_user_id(user.as_ref());
     let store = open_group_store(&state)?;
     let group = load_owned_group(&store, &id, user.as_ref())?;
-    if group.status != HiveGroupStatus::Archived {
-        store.set_status(&group.id, HiveGroupStatus::Archived)?;
-    }
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
+    state
+        .hive_runtime
+        .group_archive_for_user(&group.id, user_id, idempotency_key.as_deref())
+        .await
+        .map_err(super::sessions::hive_control_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -354,8 +354,15 @@ pub(super) async fn list_group_messages(
         Some(after_seq) => store.list_messages_after(&group.id, after_seq, limit)?,
         None => store.list_recent_messages(&group.id, limit)?,
     };
+    // This value is the safe continuation cursor represented by this page,
+    // not an independently sampled table high-water mark. Advancing past a
+    // limited backlog (or a concurrent append) would make the SSE tail skip
+    // durable messages that were never returned here.
+    let latest_seq = messages
+        .last()
+        .map_or_else(|| query.after_seq.unwrap_or(0), |message| message.seq);
     Ok(Json(HiveGroupMessagesResponse {
-        latest_seq: store.latest_seq(&group.id)?,
+        latest_seq,
         messages,
     }))
 }

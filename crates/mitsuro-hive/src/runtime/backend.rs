@@ -176,6 +176,12 @@ fn durable_agentic_payload(payload: &Value) -> Option<Value> {
             "pending_id": get("pending_id"),
             "message_chars": chars("message"),
         }),
+        "worker_response_pending" | "worker_response_committed" => serde_json::json!({
+            "type": event_type,
+            "worker_id": get("worker_id"),
+            "session_id": get("session_id"),
+            "run_id": get("run_id"),
+        }),
         "server_tool_error" => serde_json::json!({
             "type": event_type,
             "tool_use_id": get("tool_use_id"),
@@ -470,7 +476,26 @@ impl ExecutionBackend for UnavailableExecutionBackend {
 mod tests {
     use tokio::sync::mpsc;
 
-    use super::ExecutionEventSink;
+    use super::{durable_agentic_payload, ExecutionEventSink};
+
+    #[test]
+    fn worker_response_boundaries_replay_only_exact_non_content_identity() {
+        for event_type in ["worker_response_pending", "worker_response_committed"] {
+            let durable = durable_agentic_payload(&serde_json::json!({
+                "type": event_type,
+                "worker_id": "worker-1",
+                "session_id": "worker-dm",
+                "run_id": "run-1",
+                "response": "must-not-be-replayed",
+            }))
+            .expect("Worker response boundary should be replayable");
+            assert_eq!(durable["type"], event_type);
+            assert_eq!(durable["worker_id"], "worker-1");
+            assert_eq!(durable["session_id"], "worker-dm");
+            assert_eq!(durable["run_id"], "run-1");
+            assert!(durable.get("response").is_none());
+        }
+    }
 
     #[tokio::test]
     async fn oversized_live_payload_is_summarized_without_failing_the_run() {

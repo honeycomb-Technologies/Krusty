@@ -6008,6 +6008,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest 0.12.28",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",

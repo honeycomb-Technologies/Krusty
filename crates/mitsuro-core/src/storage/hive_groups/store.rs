@@ -130,6 +130,19 @@ impl HiveGroupStore {
 
     /// Overwrite the editable policy surface of one group.
     pub fn update_settings(&self, id: &str, update: &HiveGroupUpdate) -> Result<Option<HiveGroup>> {
+        self.update_settings_and_members(id, update, None)
+    }
+
+    /// Overwrite settings and optionally replace the ordered roster in one
+    /// transaction. This is the authority for an HTTP PATCH that carries both
+    /// surfaces: a rejected title, cap, member, or assignee must leave the
+    /// complete group unchanged.
+    pub fn update_settings_and_members(
+        &self,
+        id: &str,
+        update: &HiveGroupUpdate,
+        ordered_worker_ids: Option<&[String]>,
+    ) -> Result<Option<HiveGroup>> {
         let title = normalized_group_title(&update.title)?;
         validate_caps(
             update.max_rounds,
@@ -137,7 +150,22 @@ impl HiveGroupStore {
             update.parallelism,
             update.context_window_messages,
         )?;
+        if let Some(ordered_worker_ids) = ordered_worker_ids {
+            anyhow::ensure!(
+                !ordered_worker_ids.is_empty(),
+                "a group needs at least one member Worker"
+            );
+        }
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let Some(group) = load_group(&tx, id)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(ordered_worker_ids) = ordered_worker_ids {
+            validate_member_workers(&tx, group.user_id.as_deref(), ordered_worker_ids)?;
+            replace_members(&tx, id, ordered_worker_ids, &now)?;
+        }
         if let Some(assignee) = update.default_assignee_worker_id.as_deref() {
             anyhow::ensure!(
                 is_member(&tx, id, assignee)?,
@@ -160,13 +188,10 @@ impl HiveGroupStore {
                 update.parallelism,
                 update.context_window_messages,
                 update.default_assignee_worker_id,
-                chrono::Utc::now().to_rfc3339(),
+                now,
             ],
         )?;
-        if changed == 0 {
-            tx.commit()?;
-            return Ok(None);
-        }
+        anyhow::ensure!(changed == 1, "Hive group {id} disappeared during update");
         let group = load_group(&tx, id)?;
         tx.commit()?;
         Ok(group)

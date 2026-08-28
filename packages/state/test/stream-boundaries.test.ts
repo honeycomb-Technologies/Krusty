@@ -270,6 +270,179 @@ Deno.test('live steering stays between distinct assistant subturns', () => {
   );
 });
 
+Deno.test('staged Worker input stays queued until its exact successor is assigned', () => {
+  const { callbacks, state } = testHarness();
+  state().messages.splice(0, 0, {
+    id: 'user-current',
+    role: 'user',
+    content: 'follow up',
+    workerStagedInputId: 'input-1',
+  });
+
+  callbacks.onWorkerInputStaged?.({
+    type: 'worker_input_staged',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    active_run_id: 'run-1',
+    staged_input_id: 'input-1',
+    successor_run_id: null,
+  });
+  let message = state().messages.find((candidate: any) => candidate.id === 'user-current');
+  assert(message?.isQueued, 'staged input must not look live or completed');
+  assertEquals(message?.workerStagedInputId, 'input-1', 'durable input identity is retained');
+
+  callbacks.onWorkerInputStaged?.({
+    type: 'worker_input_staged',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    active_run_id: 'run-1',
+    staged_input_id: 'input-1',
+    successor_run_id: 'run-2',
+  });
+  message = state().messages.find((candidate: any) => candidate.id === 'user-current');
+  assert(!message?.isQueued, 'only durable successor assignment clears the queued state');
+  assertEquals(message?.successorRunId, 'run-2', 'successor identity remains exact');
+});
+
+Deno.test('a staged Worker event never binds an unrelated trailing user row', () => {
+  const { callbacks, state } = testHarness();
+  state().messages.splice(0, 0, {
+    id: 'user-newer',
+    role: 'user',
+    content: 'newer queued input',
+    isQueued: true,
+  });
+
+  callbacks.onWorkerInputStaged?.({
+    type: 'worker_input_staged',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    active_run_id: 'run-1',
+    staged_input_id: 'older-input',
+    successor_run_id: 'run-2',
+  });
+
+  const newer = state().messages.find((message: any) => message.id === 'user-newer');
+  assertEquals(newer?.workerStagedInputId, undefined, 'identity is never guessed by row order');
+  assert(newer?.isQueued, 'an unrelated queued row stays queued');
+});
+
+Deno.test('a mismatched finish cannot move the selected session or claim its queue', () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  let state: any = {
+    sessionId: 'session-a',
+    messages: [ref.current],
+    queuedMessages: [{ id: 'queued-a', content: 'A only', attachments: [] }],
+    isLoading: true,
+    isStreaming: true,
+    isThinking: false,
+    thinkingContent: '',
+    sendMessage: () => Promise.resolve(),
+  };
+  const callbacks = createStreamCallbacks(
+    ref,
+    (partial: any) => {
+      const update = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...update };
+    },
+    () => state,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+      expectedSessionId: 'session-a',
+    },
+  );
+
+  callbacks.onFinish('session-b', 'completed');
+  assertEquals(state.sessionId, 'session-a', 'selection remains on the request owner');
+  assertEquals(state.queuedMessages.length, 1, 'A queue remains unclaimed');
+});
+
+Deno.test('uncommitted Worker response prose is discarded on error', () => {
+  const { callbacks, state } = testHarness();
+  callbacks.onWorkerResponsePending?.({
+    type: 'worker_response_pending',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-1',
+  });
+  callbacks.onTextDelta('this was never committed');
+  callbacks.onError('canonical response commit was rejected');
+
+  assertEquals(
+    state().messages.filter((message: any) => message.role === 'assistant'),
+    [],
+    'provider prose must not survive without the exact commit boundary',
+  );
+});
+
+Deno.test('only an exact committed completed Worker response becomes durable-looking', () => {
+  const { callbacks, state } = testHarness();
+  callbacks.onWorkerResponsePending?.({
+    type: 'worker_response_pending',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-1',
+  });
+  callbacks.onTextDelta('canonical response');
+  callbacks.onWorkerResponseCommitted?.({
+    type: 'worker_response_committed',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-1',
+  });
+  callbacks.onFinish('worker-dm', 'completed');
+
+  const assistant = state().messages.find(
+    (message: any) => message.role === 'assistant',
+  );
+  assertEquals(assistant?.content, 'canonical response', 'committed text remains visible');
+  assertEquals(assistant?.kind, undefined, 'completed response is finalized');
+});
+
+Deno.test('mismatched Worker commit cannot authenticate the visible draft', () => {
+  const { callbacks, state } = testHarness();
+  callbacks.onWorkerResponsePending?.({
+    type: 'worker_response_pending',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-1',
+  });
+  callbacks.onTextDelta('wrong run');
+  callbacks.onWorkerResponseCommitted?.({
+    type: 'worker_response_committed',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-replacement',
+  });
+  callbacks.onFinish('worker-dm', 'completed');
+
+  assertEquals(
+    state().messages.filter((message: any) => message.role === 'assistant'),
+    [],
+    'only the exact run boundary may finalize streamed Worker prose',
+  );
+});
+
+Deno.test('a replayed Worker commit without its pending boundary discards the draft', () => {
+  const { callbacks, state } = testHarness();
+  callbacks.onTextDelta('streamed before reconnect');
+  callbacks.onWorkerResponseCommitted?.({
+    type: 'worker_response_committed',
+    worker_id: 'worker-1',
+    session_id: 'worker-dm',
+    run_id: 'run-1',
+  });
+  callbacks.onFinish('worker-dm', 'completed');
+
+  assertEquals(
+    state().messages.filter((message: any) => message.role === 'assistant'),
+    [],
+    'missing exact pending identity must fail closed and reload canonically',
+  );
+});
+
 Deno.test('steering before first assistant output leaves no empty assistant block', () => {
   const { callbacks, state } = testHarness();
 
@@ -329,4 +502,271 @@ Deno.test('delivered but uninjected steering rolls forward visibly at finish', (
     staged?.queuedUntilNextRun,
     'terminal rollover must expose durable next-run recovery status',
   );
+});
+
+Deno.test('queued follow-up starts on its exact session with its send options', async () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  const sends: unknown[][] = [];
+  let state: any = {
+    sessionId: 'worker-a-dm',
+    messages: [
+      ref.current,
+      {
+        id: 'user-queued-local-a',
+        role: 'user',
+        content: 'queued Worker follow-up',
+        isQueued: true,
+      },
+    ],
+    queuedMessages: [{
+      id: 'user-queued-local-a',
+      content: 'queued Worker follow-up',
+      attachments: [],
+      sendOptions: { sessionType: 'hive' },
+    }],
+    isLoading: true,
+    isStreaming: true,
+    isThinking: false,
+    thinkingContent: '',
+    sendMessage: (...args: unknown[]) => {
+      sends.push(args);
+      return Promise.resolve();
+    },
+  };
+  const callbacks = createStreamCallbacks(
+    ref,
+    (partial: any) => {
+      const update = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...update };
+    },
+    () => state,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+    },
+  );
+
+  callbacks.onFinish('worker-a-dm', 'completed');
+  await Promise.resolve();
+
+  const successorOptions = sends[0]?.[2] as any;
+  assertEquals(sends[0]?.[0], 'queued Worker follow-up', 'content stays exact');
+  assertEquals(sends[0]?.[1], [], 'attachments stay exact');
+  assertEquals(
+    successorOptions?.sessionType,
+    'hive',
+    'the queued turn retains the exact Worker send contract',
+  );
+  assertEquals(
+    successorOptions?.queuedSuccessor?.sessionId,
+    'worker-a-dm',
+    'the successor claim stays bound to its exact session',
+  );
+  assertEquals(
+    state.queuedMessages.length,
+    1,
+    'the callback leaves the queue intact until the store persists its claim',
+  );
+  assert(
+    state.messages.some((message: any) =>
+      message.id === 'user-queued-local-a' && message.isQueued
+    ),
+    'the claimed row remains visibly queued until the real send is accepted',
+  );
+});
+
+Deno.test('pinched queued follow-up preserves A as durable source and B as target', async () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  const sends: unknown[][] = [];
+  let state: any = {
+    sessionId: 'session-a',
+    messages: [ref.current, {
+      id: 'queued-a',
+      role: 'user',
+      content: 'follow pinch',
+      isQueued: true,
+    }],
+    queuedMessages: [{
+      id: 'queued-a',
+      content: 'follow pinch',
+      attachments: [],
+      sendOptions: { sessionType: 'hive', hiveConversationKind: 'worker_dm' },
+    }],
+    isLoading: true,
+    isStreaming: true,
+    isThinking: false,
+    thinkingContent: '',
+    sendMessage: (...args: unknown[]) => {
+      sends.push(args);
+      return Promise.resolve();
+    },
+  };
+  const callbacks = createStreamCallbacks(
+    ref,
+    (partial: any) => {
+      const update = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...update };
+    },
+    () => state,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+      expectedSessionId: 'session-a',
+      isSessionCurrent: (sessionId) => sessionId === state.sessionId,
+      onSessionOwnershipChange: (sessionId) => {
+        state.sessionId = sessionId;
+      },
+    },
+  );
+  callbacks.onSessionPinched?.({
+    type: 'session_pinched',
+    reason: 'overflow',
+    source_session_id: 'session-a',
+    new_session_id: 'session-b',
+    estimated_tokens_before: 200000,
+  });
+  callbacks.onFinish('session-b', 'completed');
+  await Promise.resolve();
+  const claim = (sends[0]?.[2] as any)?.queuedSuccessor;
+  assertEquals(claim?.sessionId, 'session-b', 'B is the validated target');
+  assertEquals(claim?.sourceSessionId, 'session-a', 'A remains durable source');
+});
+
+Deno.test('a synchronously detached queued follow-up remains visibly unsent', async () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  let active = true;
+  let sends = 0;
+  let state: any = {
+    sessionId: 'worker-a-dm',
+    messages: [
+      ref.current,
+      {
+        id: 'user-queued-local-a',
+        role: 'user',
+        content: 'do not false-commit me',
+        isQueued: true,
+      },
+    ],
+    queuedMessages: [{
+      id: 'user-queued-local-a',
+      content: 'do not false-commit me',
+      attachments: [],
+      sendOptions: { sessionType: 'hive' },
+    }],
+    isLoading: true,
+    isStreaming: true,
+    isThinking: false,
+    thinkingContent: '',
+    sendMessage: () => {
+      sends += 1;
+      return Promise.resolve();
+    },
+  };
+  const callbacks = createStreamCallbacks(
+    ref,
+    (partial: any) => {
+      const update = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...update };
+      if (update.isStreaming === false) active = false;
+    },
+    () => state,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+      isActive: () => active,
+      isSessionCurrent: () => active,
+    },
+  );
+
+  callbacks.onFinish('worker-a-dm', 'completed');
+  active = false;
+  await Promise.resolve();
+
+  assertEquals(sends, 0, 'a detached continuation cannot send into another session');
+  assertEquals(
+    state.queuedMessages.length,
+    1,
+    'the unsent payload remains recoverable instead of being discarded',
+  );
+  const queued = state.messages.find(
+    (message: any) => message.id === 'user-queued-local-a',
+  );
+  assert(queued?.isQueued, 'the unsent row must not look durably sent');
+});
+
+Deno.test('queued lag reconciliation is carried across the successor turn', async () => {
+  const deferredReloads = new Set<string>();
+  const first = testHarness();
+  first.state().sessionId = 'session-a';
+  first.state().queuedMessages = [{
+    id: 'user-queued-successor',
+    content: 'successor',
+    attachments: [],
+  }];
+  first.state().sendMessage = () => Promise.resolve();
+  const firstCallbacks = createStreamCallbacks(
+    first.ref,
+    (partial: any) => {
+      const current = first.state();
+      const update = typeof partial === 'function' ? partial(current) : partial;
+      Object.assign(current, update);
+    },
+    first.state,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+      deferCanonicalReload: (sessionId) => deferredReloads.add(sessionId),
+      consumeCanonicalReload: (sessionId) => deferredReloads.delete(sessionId),
+    },
+  );
+  firstCallbacks.onLagged?.(1);
+  firstCallbacks.onFinish('session-a', 'completed');
+  await Promise.resolve();
+  assert(
+    deferredReloads.has('session-a'),
+    'the successor must inherit the skipped canonical reconciliation',
+  );
+
+  let reloads = 0;
+  const secondRef = { current: createStreamingAssistantMessage() };
+  let secondState: any = {
+    sessionId: 'session-a',
+    messages: [secondRef.current],
+    queuedMessages: [],
+    isLoading: true,
+    isStreaming: true,
+    isThinking: false,
+    thinkingContent: '',
+    loadSession: async (sessionId: string, refresh: boolean) => {
+      assertEquals([sessionId, refresh], ['session-a', true], 'reload remains exact');
+      reloads += 1;
+    },
+  };
+  const secondCallbacks = createStreamCallbacks(
+    secondRef,
+    (partial: any) => {
+      const update = typeof partial === 'function'
+        ? partial(secondState)
+        : partial;
+      secondState = { ...secondState, ...update };
+    },
+    () => secondState,
+    {
+      planStore: { getState: () => ({ setItems() {} }) } as never,
+      sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+      persistSessionMode: async () => {},
+      deferCanonicalReload: (sessionId) => deferredReloads.add(sessionId),
+      consumeCanonicalReload: (sessionId) => deferredReloads.delete(sessionId),
+    },
+  );
+  secondCallbacks.onFinish('session-a', 'completed');
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assertEquals(reloads, 1, 'successor completion performs the deferred reload');
+  assertEquals(deferredReloads.size, 0, 'the reload obligation is consumed once');
 });

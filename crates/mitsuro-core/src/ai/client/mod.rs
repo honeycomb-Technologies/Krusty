@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod core;
+mod remote_attempt_policy;
 pub mod request_builder;
 pub mod simple;
 pub mod streaming;
@@ -22,5 +23,6 @@ pub use config::{
 };
 pub use core::MITSURO_SYSTEM_PROMPT;
 pub use core::{AiClient, PreparedRequestDiagnostics};
+pub use remote_attempt_policy::RemoteAttemptPolicy;
 pub use request_builder::{BuildOptions, RequestBuilder};
 pub use simple::SimpleCallResult;

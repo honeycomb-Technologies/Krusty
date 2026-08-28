@@ -111,6 +111,14 @@ export function finalizeTransientAssistantMessages(
   );
 }
 
+export function discardTransientAssistantMessages(
+  messages: ChatMessage[],
+): ChatMessage[] {
+  return messages.filter(
+    (message) => !(message.role === 'assistant' && isTransientAssistantKind(message.kind)),
+  );
+}
+
 export function pruneEmptyAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((message) => {
     if (message.role !== 'assistant') {

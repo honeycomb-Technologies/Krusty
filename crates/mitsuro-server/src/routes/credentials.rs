@@ -26,6 +26,15 @@ pub fn router() -> Router<AppState> {
         .route("/:provider", delete(delete_credential))
 }
 
+/// Credential discovery for isolated acceptance runs. Deliberately omits all
+/// mutation verbs so a candidate server cannot rewrite the user's shared
+/// credential store.
+pub fn read_only_router() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_providers))
+        .route("/:provider", get(get_provider))
+}
+
 #[derive(Serialize)]
 pub struct ProviderStatus {
     pub id: String,

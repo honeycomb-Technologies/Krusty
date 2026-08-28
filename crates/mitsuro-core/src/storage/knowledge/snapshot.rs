@@ -5,7 +5,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::storage::{
-    AgentMemory, Database, MemoryNamespace, MemoryStore, MemoryType, ReportStore,
+    AgentMemory, Database, HiveMemoryReader, MemoryStore, MemoryType, ReportStore,
 };
 
 use super::activity::load_snapshot_activity;
@@ -56,15 +56,17 @@ pub fn refresh_current_snapshot(
 ) -> Result<Option<KnowledgeSnapshot>> {
     let memory_store = MemoryStore::new(Database::new(db_path)?);
     let report_store = ReportStore::new(Database::new(db_path)?);
-    // Crew memories are intentionally excluded from this owner/project-wide
-    // materialization. A crew member's private carry-forward context is
-    // selected at request time, where its namespace id is available.
-    let memories = memory_store
-        .list_for_exact_owner(project_dir, user_id)
-        .into_iter()
-        .filter(|memory| memory.namespace != MemoryNamespace::Crew)
-        .collect::<Vec<_>>();
-    let reports = report_store.list_reports_for_exact_owner(project_dir, user_id)?;
+    // Generate only the primary Hive view: Shared + Hive owner memory, never
+    // Worker, group, conversation, or secret rows. Worker-specific context is
+    // selected at request time with its exact namespace.
+    let memories = memory_store.list_for_hive_reader(&HiveMemoryReader {
+        user_id,
+        project_dir,
+        worker_namespace_id: None,
+        conversation_id: None,
+        group_id: None,
+    });
+    let reports = report_store.list_reports_for_memory_reader(project_dir, user_id, None)?;
     let (recent_runs, task_outcomes) = load_snapshot_activity(db_path, project_dir, user_id)?;
 
     let content = build_current_snapshot_content(

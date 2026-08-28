@@ -4,6 +4,7 @@ use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use crate::storage::database::Database;
+use crate::storage::{resolve_worker_conversation_with_conn, MemoryAclScope, MemoryNamespace};
 
 use super::{LearningCandidate, LearningCandidateInput, LearningCandidateStatus};
 
@@ -21,12 +22,52 @@ impl<'a> LearningCandidateStore<'a> {
     pub fn insert(&self, input: &LearningCandidateInput) -> Result<LearningCandidate> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let binding =
+            resolve_worker_conversation_with_conn(self.db.conn(), &input.evidence_session_id)?;
+        if binding.is_none() {
+            let unresolved_group_claim: bool = self.db.conn().query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM hive_runs
+                     WHERE session_id = ?1
+                       AND (
+                           kind = 'group_turn'
+                           OR group_id IS NOT NULL
+                           OR group_turn_id IS NOT NULL
+                       )
+                 )",
+                [&input.evidence_session_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                !unresolved_group_claim,
+                "group Worker learning evidence has no persisted lane binding"
+            );
+        }
+        let (memory_namespace, memory_namespace_id, memory_acl_scope) =
+            if let Some(binding) = binding {
+                anyhow::ensure!(
+                    binding.worker.user_id.as_deref() == input.user_id.as_deref(),
+                    "learning evidence Worker does not match the candidate owner"
+                );
+                (
+                    MemoryNamespace::Crew,
+                    Some(binding.worker.memory_namespace_id),
+                    MemoryAclScope::Worker,
+                )
+            } else {
+                (MemoryNamespace::Shared, None, MemoryAclScope::Owner)
+            };
         self.db.conn().execute(
             "INSERT INTO hive_learning_candidates (
                 id, user_id, project_dir, canonical_key, kind, proposed_content,
                 evidence_session_id, evidence_message_id, evidence_excerpt,
-                explicit, confidence, sensitivity, status, reason, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                explicit, confidence, sensitivity, status, reason,
+                memory_namespace, memory_namespace_id, memory_acl_scope,
+                memory_scope_resolved, created_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, 1, ?18
+             )
              ON CONFLICT(evidence_session_id, evidence_message_id, canonical_key) DO NOTHING",
             params![
                 id,
@@ -43,6 +84,9 @@ impl<'a> LearningCandidateStore<'a> {
                 input.sensitivity.to_string(),
                 input.status.to_string(),
                 input.reason,
+                memory_namespace.as_str(),
+                memory_namespace_id,
+                memory_acl_scope.as_str(),
                 now,
             ],
         )?;
@@ -65,7 +109,9 @@ impl<'a> LearningCandidateStore<'a> {
         let mut statement = self.db.conn().prepare(
             "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
                     evidence_session_id, evidence_message_id, evidence_excerpt,
-                    explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
+                    explicit, confidence, sensitivity, status, reason,
+                    memory_namespace, memory_namespace_id, memory_acl_scope,
+                    memory_scope_resolved, created_at, reviewed_at
              FROM hive_learning_candidates
              WHERE ((?1 IS NULL AND user_id IS NULL) OR user_id = ?1)
                AND (?2 IS NULL OR status = ?2)
@@ -201,7 +247,9 @@ impl<'a> LearningCandidateStore<'a> {
             .query_row(
                 "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
                         evidence_session_id, evidence_message_id, evidence_excerpt,
-                        explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
+                        explicit, confidence, sensitivity, status, reason,
+                        memory_namespace, memory_namespace_id, memory_acl_scope,
+                        memory_scope_resolved, created_at, reviewed_at
                  FROM hive_learning_candidates
                  WHERE evidence_session_id = ?1
                    AND evidence_message_id = ?2
@@ -222,7 +270,9 @@ pub(crate) fn load_candidate_owned_from_connection(
     conn.query_row(
         "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
                 evidence_session_id, evidence_message_id, evidence_excerpt,
-                explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
+                explicit, confidence, sensitivity, status, reason,
+                memory_namespace, memory_namespace_id, memory_acl_scope,
+                memory_scope_resolved, created_at, reviewed_at
          FROM hive_learning_candidates
          WHERE id = ?1
            AND ((?2 IS NULL AND user_id IS NULL) OR user_id = ?2)",
@@ -237,6 +287,8 @@ fn map_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningCandidate>
     let kind: String = row.get(4)?;
     let sensitivity: String = row.get(11)?;
     let status: String = row.get(12)?;
+    let memory_namespace: String = row.get(14)?;
+    let memory_acl_scope: String = row.get(16)?;
     Ok(LearningCandidate {
         id: row.get(0)?,
         user_id: row.get(1)?,
@@ -270,7 +322,23 @@ fn map_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningCandidate>
             )
         })?,
         reason: row.get(13)?,
-        created_at: row.get(14)?,
-        reviewed_at: row.get(15)?,
+        memory_namespace: memory_namespace.parse().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Text,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error).into(),
+            )
+        })?,
+        memory_namespace_id: row.get(15)?,
+        memory_acl_scope: memory_acl_scope.parse().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Text,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error).into(),
+            )
+        })?,
+        memory_scope_resolved: row.get::<_, i64>(17)? != 0,
+        created_at: row.get(18)?,
+        reviewed_at: row.get(19)?,
     })
 }

@@ -9,8 +9,12 @@ pub enum CommandEnvironmentPolicy {
     /// Preserve the historical behavior for direct, non-delegated commands.
     #[default]
     Inherit,
-    /// Start from an empty environment and restore only explicitly safe values.
+    /// Start from an empty environment and restore allowlisted host values plus
+    /// explicitly safe runtime overrides.
     Sanitized,
+    /// Start from an empty environment and restore only explicitly safe runtime
+    /// overrides. No host environment value is inherited.
+    Explicit,
 }
 
 /// Environment contract shared by foreground and tracked background commands.
@@ -47,9 +51,26 @@ const SAFE_INHERITED_KEYS: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
 ];
 
-const SAFE_OVERRIDE_KEYS: &[&str] = &[
+const SANITIZED_OVERRIDE_KEYS: &[&str] = &[
     "HOME",
     "USERPROFILE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_CACHE_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "npm_config_cache",
+    "NPM_CONFIG_CACHE",
+    "NO_COLOR",
+];
+
+const EXPLICIT_OVERRIDE_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "USER",
+    "LOGNAME",
     "TMPDIR",
     "TMP",
     "TEMP",
@@ -109,6 +130,18 @@ impl CommandEnvironment {
         self
     }
 
+    fn override_variables(&self, allowlist: &[&str]) -> BTreeMap<String, String> {
+        self.overrides
+            .iter()
+            .filter(|(key, _)| allowlist.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn explicit_variables(&self) -> BTreeMap<String, String> {
+        self.override_variables(EXPLICIT_OVERRIDE_KEYS)
+    }
+
     fn sanitized_variables(&self) -> BTreeMap<String, String> {
         let mut variables = SAFE_INHERITED_KEYS
             .iter()
@@ -118,12 +151,7 @@ impl CommandEnvironment {
                     .map(|value| ((*key).to_string(), value))
             })
             .collect::<BTreeMap<_, _>>();
-
-        for (key, value) in &self.overrides {
-            if SAFE_OVERRIDE_KEYS.contains(&key.as_str()) {
-                variables.insert(key.clone(), value.clone());
-            }
-        }
+        variables.extend(self.override_variables(SANITIZED_OVERRIDE_KEYS));
         variables
     }
 
@@ -136,6 +164,10 @@ impl CommandEnvironment {
                 command.env_clear();
                 command.envs(self.sanitized_variables());
             }
+            CommandEnvironmentPolicy::Explicit => {
+                command.env_clear();
+                command.envs(self.explicit_variables());
+            }
         }
     }
 
@@ -146,10 +178,12 @@ impl CommandEnvironment {
         hasher.update(match self.policy {
             CommandEnvironmentPolicy::Inherit => b"inherit".as_slice(),
             CommandEnvironmentPolicy::Sanitized => b"sanitized".as_slice(),
+            CommandEnvironmentPolicy::Explicit => b"explicit".as_slice(),
         });
         let variables = match self.policy {
             CommandEnvironmentPolicy::Inherit => self.overrides.clone(),
             CommandEnvironmentPolicy::Sanitized => self.sanitized_variables(),
+            CommandEnvironmentPolicy::Explicit => self.explicit_variables(),
         };
         for (key, value) in variables {
             hasher.update([0]);
@@ -170,7 +204,12 @@ mod tests {
         let environment = CommandEnvironment::new(
             CommandEnvironmentPolicy::Sanitized,
             BTreeMap::from([
+                (
+                    "PATH".to_string(),
+                    "/must-not-override-sanitized-path".to_string(),
+                ),
                 ("HOME".to_string(), "/isolated/home".to_string()),
+                ("USER".to_string(), "must-not-override-user".to_string()),
                 ("TMPDIR".to_string(), "/isolated/tmp".to_string()),
                 (
                     "MITSURO_TEST_SECRET".to_string(),
@@ -188,6 +227,14 @@ mod tests {
             variables.get("TMPDIR").map(String::as_str),
             Some("/isolated/tmp")
         );
+        assert_ne!(
+            variables.get("PATH").map(String::as_str),
+            Some("/must-not-override-sanitized-path")
+        );
+        assert_ne!(
+            variables.get("USER").map(String::as_str),
+            Some("must-not-override-user")
+        );
         assert!(!variables.contains_key("MITSURO_TEST_SECRET"));
     }
 
@@ -200,6 +247,32 @@ mod tests {
 
         assert_ne!(inherited.fingerprint(), sanitized.fingerprint());
         assert_eq!(sanitized.policy(), CommandEnvironmentPolicy::Sanitized);
+    }
+
+    #[test]
+    fn path_override_is_available_only_to_explicit_policy() {
+        let supplied_path = "/runtime/explicit/bin";
+        let overrides = BTreeMap::from([("PATH".to_string(), supplied_path.to_string())]);
+        let sanitized =
+            CommandEnvironment::new(CommandEnvironmentPolicy::Sanitized, overrides.clone());
+        let explicit = CommandEnvironment::new(CommandEnvironmentPolicy::Explicit, overrides);
+
+        assert_ne!(
+            sanitized
+                .sanitized_variables()
+                .get("PATH")
+                .map(String::as_str),
+            Some(supplied_path),
+            "Sanitized must preserve its historical override allowlist"
+        );
+        assert_eq!(
+            explicit
+                .explicit_variables()
+                .get("PATH")
+                .map(String::as_str),
+            Some(supplied_path),
+            "Explicit is the Worker Goal-only deterministic environment policy"
+        );
     }
 
     #[test]
@@ -233,6 +306,32 @@ mod tests {
 
         environment.apply(&mut command);
         let output = command.output().await.expect("run sanitized command");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("utf8 output"),
+            "unset|/isolated/home"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_policy_does_not_inherit_allowlisted_host_values() {
+        let environment = CommandEnvironment::new(
+            CommandEnvironmentPolicy::Explicit,
+            BTreeMap::from([
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                ("HOME".to_string(), "/isolated/home".to_string()),
+            ]),
+        );
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf '%s|%s' \"${JAVA_HOME-unset}\" \"$HOME\"")
+            .env("JAVA_HOME", "/host/private/jdk");
+
+        environment.apply(&mut command);
+        let output = command.output().await.expect("run explicit command");
 
         assert!(output.status.success());
         assert_eq!(

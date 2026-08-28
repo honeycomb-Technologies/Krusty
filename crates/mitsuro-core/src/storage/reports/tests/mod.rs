@@ -2,7 +2,7 @@ use rusqlite::params;
 use tempfile::TempDir;
 
 use super::disk::slugify;
-use super::{CreateReportInput, ReportStore};
+use super::{CreateReportInput, ReportScope, ReportStore};
 use crate::storage::Database;
 
 fn create_store() -> (ReportStore, TempDir) {

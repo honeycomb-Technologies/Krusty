@@ -318,7 +318,10 @@ fn next_monthly(
     Err(RecurrenceError::SearchHorizonExceeded)
 }
 
-fn resolve_local_datetime(
+/// Resolve one wall-clock timestamp under the same explicit gap/fold policy
+/// used by recurring Hive schedules. Governor quiet hours and local budget
+/// days call this helper so DST semantics cannot drift between subsystems.
+pub(crate) fn resolve_local_datetime(
     timezone: Tz,
     local: NaiveDateTime,
     dst: DstPolicy,

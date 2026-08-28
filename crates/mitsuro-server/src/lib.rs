@@ -52,6 +52,7 @@ use self::ai_bootstrap::{
 type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
+mod acceptance;
 mod ai_bootstrap;
 mod child_wake;
 mod process_wake;
@@ -75,6 +76,8 @@ pub mod routes;
 pub mod types;
 pub mod utils;
 pub mod ws;
+
+pub use acceptance::{start_hive_acceptance_server, HiveAcceptanceServerConfig};
 
 /// Embedded web frontend assets.
 ///
@@ -348,14 +351,23 @@ fn initialize_remote_access(
         }
     }
 }
-/// Build the shared agent/tool state used by either the HTTP process or the
-/// standalone Hive executor. Only the HTTP process connects to the daemon
-/// control plane; the executor deliberately receives an embedded manager so
-/// it can run the agent core without recursively calling its own socket.
+/// Build the shared agent/tool state used by an HTTP process or the standalone
+/// Hive executor. Production HTTP discovers its daemon, isolated acceptance
+/// may inject one explicit daemon client, and the executor receives an
+/// embedded manager so it cannot recursively call its own socket.
 pub(crate) async fn build_app_state(
     config: &ServerConfig,
     hive_mode: HiveRuntimeMode,
     database_path: Option<PathBuf>,
+) -> anyhow::Result<AppState> {
+    build_app_state_with_hive_runtime(config, hive_mode, database_path, None).await
+}
+
+async fn build_app_state_with_hive_runtime(
+    config: &ServerConfig,
+    hive_mode: HiveRuntimeMode,
+    database_path: Option<PathBuf>,
+    hive_runtime_override: Option<Arc<hive_runtime::HiveRuntimeManager>>,
 ) -> anyhow::Result<AppState> {
     let isolated_evaluation = matches!(hive_mode, HiveRuntimeMode::IsolatedEvaluation);
     let db_path = database_path.unwrap_or_else(|| paths::config_dir().join("mitsuro.db"));
@@ -574,11 +586,17 @@ pub(crate) async fn build_app_state(
         });
     }
     let remote_access = Arc::new(RwLock::new(initialize_remote_access(hive_mode, &db_path)?));
-    let hive_runtime = match hive_mode {
-        HiveRuntimeMode::DaemonProxy => hive_runtime::HiveRuntimeManager::daemon_from_discovered()
-            .await
-            .context("connecting mitsuro-server to the Hive daemon")?,
-        HiveRuntimeMode::ExecutionHost | HiveRuntimeMode::IsolatedEvaluation => {
+    let hive_runtime = match (hive_runtime_override, hive_mode) {
+        (Some(runtime), HiveRuntimeMode::IsolatedEvaluation) => runtime,
+        (Some(_), _) => {
+            anyhow::bail!("a Hive runtime override is valid only for isolated evaluation")
+        }
+        (None, HiveRuntimeMode::DaemonProxy) => {
+            hive_runtime::HiveRuntimeManager::daemon_from_discovered()
+                .await
+                .context("connecting mitsuro-server to the Hive daemon")?
+        }
+        (None, HiveRuntimeMode::ExecutionHost | HiveRuntimeMode::IsolatedEvaluation) => {
             hive_runtime::HiveRuntimeManager::execution_host()
         }
     };

@@ -14,6 +14,10 @@ export const IDENTITY_STORAGE_KEYS = {
     canonical: "mitsuro_server_connection_v1",
     legacy: [],
   },
+  serverLogoutIntent: {
+    canonical: "mitsuro_server_logout_pending_v1",
+    legacy: [],
+  },
   serverUrl: {
     canonical: "mitsuro_server_url",
     legacy: ["krusty_server_url"],
@@ -144,7 +148,9 @@ async function removeLegacyAsync(
   storage: AsyncKeyValueStorage,
   key: MigratedStorageKey,
 ): Promise<void> {
-  await Promise.all(key.legacy.map((legacy) => asyncDelete(storage, legacy).catch(() => {})));
+  await Promise.all(
+    key.legacy.map((legacy) => asyncDelete(storage, legacy).catch(() => {})),
+  );
 }
 
 function encodeConnectionCredentials(
@@ -205,6 +211,8 @@ async function readConnectionPair(
 export async function readConnectionCredentials(
   storage: AsyncKeyValueStorage,
 ): Promise<ConnectionCredentials | null> {
+  if (await honorPendingConnectionLogout(storage)) return null;
+
   const committed = await asyncGet(
     storage,
     IDENTITY_STORAGE_KEYS.serverConnection.canonical,
@@ -231,6 +239,24 @@ export async function readConnectionCredentials(
   return legacyPair;
 }
 
+/**
+ * Honor explicit Disconnect before any startup-only credential source (for
+ * example Tauri-injected globals) is considered.
+ */
+export async function honorPendingConnectionLogout(
+  storage: AsyncKeyValueStorage,
+): Promise<boolean> {
+  const logoutPending = await asyncGet(
+    storage,
+    IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical,
+  );
+  if (logoutPending === null) return false;
+  // Retry cleanup, but keep the marker authoritative until an explicit Connect
+  // has durably committed replacement credentials and clears it.
+  await deleteConnectionCredentials(storage).catch(() => {});
+  return true;
+}
+
 /** Persist URL and token atomically as one versioned storage value. */
 export async function writeConnectionCredentials(
   storage: AsyncKeyValueStorage,
@@ -244,20 +270,81 @@ export async function writeConnectionCredentials(
     IDENTITY_STORAGE_KEYS.serverConnection.canonical,
     encodeConnectionCredentials(credentials),
   );
+  // Explicit Connect supersedes a prior durable Disconnect only after its new
+  // committed pair exists. Failure to clear the tombstone must surface so the
+  // caller cannot believe this connection will survive restart.
+  await asyncDelete(
+    storage,
+    IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical,
+  );
 }
 
-/** Explicit disconnect removes both the committed record and transition data. */
+/**
+ * Explicit disconnect removes both the committed record and transition data.
+ *
+ * The logout tombstone is written first and retained after any credential-key
+ * failure. Readers honor it before every credential generation, so a partial
+ * SecureStore deletion cannot reconnect after restart. Every key is attempted;
+ * canonical and compatibility failures remain observable to the caller.
+ */
 export async function deleteConnectionCredentials(
   storage: AsyncKeyValueStorage,
 ): Promise<void> {
-  const keys = [
+  const canonicalKeys = [
     IDENTITY_STORAGE_KEYS.serverConnection.canonical,
     IDENTITY_STORAGE_KEYS.serverUrl.canonical,
     IDENTITY_STORAGE_KEYS.serverToken.canonical,
+  ];
+  const compatibilityKeys = [
     ...IDENTITY_STORAGE_KEYS.serverUrl.legacy,
     ...IDENTITY_STORAGE_KEYS.serverToken.legacy,
   ];
-  await Promise.all(keys.map((key) => asyncDelete(storage, key).catch(() => {})));
+  let logoutIntentPersisted = false;
+  let logoutIntentError: unknown = null;
+  try {
+    await asyncSet(
+      storage,
+      IDENTITY_STORAGE_KEYS.serverLogoutIntent.canonical,
+      "pending",
+    );
+    logoutIntentPersisted = true;
+  } catch (error) {
+    logoutIntentError = error;
+  }
+
+  const deletionResults = await Promise.allSettled(
+    [...canonicalKeys, ...compatibilityKeys].map((key) =>
+      asyncDelete(storage, key)
+    ),
+  );
+  const canonicalFailed = deletionResults
+    .slice(0, canonicalKeys.length)
+    .some((result) => result.status === "rejected");
+  const compatibilityFailed = deletionResults
+    .slice(canonicalKeys.length)
+    .some((result) => result.status === "rejected");
+
+  if (
+    logoutIntentPersisted && !canonicalFailed && !compatibilityFailed
+  ) {
+    return;
+  }
+
+  if (!canonicalFailed && !compatibilityFailed) {
+    throw new Error(
+      "Saved Mitsuro credentials were removed, but the durable logout intent could not be recorded.",
+    );
+  }
+
+  const scope = canonicalFailed ? "canonical" : "compatibility";
+  const durableProtection = logoutIntentPersisted
+    ? " A durable logout marker will prevent automatic reconnection."
+    : logoutIntentError
+    ? " The durable logout marker also could not be saved."
+    : "";
+  throw new Error(
+    `Saved Mitsuro ${scope} connection data could not be removed.${durableProtection}`,
+  );
 }
 
 export async function readMigratedAsyncValue(

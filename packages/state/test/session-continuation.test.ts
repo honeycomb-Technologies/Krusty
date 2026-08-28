@@ -460,6 +460,326 @@ Deno.test("lagged stream reloads the canonical session after finish", async () =
 	);
 });
 
+Deno.test("Worker Stop suppresses the exact provisional response until its run settles", async () => {
+	let callbacks:
+		| {
+			onWorkerResponsePending?: (event: {
+				type: "worker_response_pending";
+				worker_id: string;
+				session_id: string;
+				run_id: string;
+			}) => void;
+		}
+		| undefined;
+	let resolveStreamStarted!: () => void;
+	const streamStarted = new Promise<void>((resolve) => {
+		resolveStreamStarted = resolve;
+	});
+	let cancelCount = 0;
+	let getSessionCount = 0;
+	let stateCount = 0;
+	let statusCount = 0;
+	const client = {
+		streamChat: async (
+			_request: unknown,
+			streamCallbacks: typeof callbacks,
+			signal: AbortSignal,
+		) => {
+			callbacks = streamCallbacks;
+			resolveStreamStarted();
+			await new Promise<void>((resolve) => {
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+		},
+		cancelSession: async () => {
+			cancelCount += 1;
+		},
+		getSession: async () => {
+			getSessionCount += 1;
+			const response = sessionResponse();
+			return {
+				...response,
+				session: { ...response.session, session_type: "hive" },
+			};
+		},
+		getSessionState: async () => {
+			stateCount += 1;
+			return stateCount === 1
+				? sessionState("streaming", {
+					live_partial_assistant: {
+						text: "chopped provider text",
+						thinking: "",
+						tool_calls: [],
+					},
+				})
+				: sessionState("idle");
+		},
+		getHiveSessionStatus: async () => {
+			statusCount += 1;
+			return {
+				session_id: "session-1",
+				session_type: "hive",
+				title: "Worker DM",
+				tasks: [],
+				agent_state: statusCount === 1 ? "streaming" : "idle",
+				runtime: {
+					session_id: "session-1",
+					status: statusCount === 1 ? "running" : "cancelled",
+					current_run_id: "run-1",
+					priority: "normal",
+					updated_at: "2026-08-25T04:00:00.000000Z",
+				},
+				cadence: {},
+			};
+		},
+		heartbeatSessionPresence: async () => ({}),
+		removeSessionPresence: async () => ({}),
+		updateSession: async () => ({}),
+		setCurrentModel: async () => ({}),
+	};
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore() as never,
+		createPlanStore() as never,
+	);
+	store.getState().initSession("session-1", "Worker DM", undefined, "hive");
+	const send = store.getState().sendMessage("Please begin");
+	await streamStarted;
+	assert(callbacks, "Worker stream callbacks should be attached");
+	callbacks.onWorkerResponsePending?.({
+		type: "worker_response_pending",
+		worker_id: "worker-1",
+		session_id: "session-1",
+		run_id: "run-1",
+	});
+	store.setState((state) => ({
+		messages: [
+			...state.messages.filter((message) => message.role === "user"),
+			{
+				id: "worker-live-partial",
+				role: "assistant",
+				content: "chopped provider text",
+				kind: "live_partial",
+			},
+		],
+	}));
+
+	store.getState().stopStreaming();
+	await send;
+	assertEquals(
+		cancelCount,
+		1,
+		"Stop should issue one exact cancellation request",
+	);
+	assert(
+		!store.getState().messages.some((message) => message.content.includes("chopped provider text")),
+		"the provisional response must disappear before Stop settles",
+	);
+
+	for (let attempt = 0; attempt < 50 && getSessionCount < 1; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assertEquals(
+		getSessionCount,
+		1,
+		"Stop receipt should trigger an immediate canonical reload",
+	);
+	assert(
+		!store.getState().messages.some((message) => message.content.includes("chopped provider text")),
+		"a still-running Stop refresh must keep live_partial suppressed",
+	);
+
+	for (let attempt = 0; attempt < 100 && getSessionCount < 2; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assertEquals(
+		statusCount,
+		2,
+		"the exact stopped run should be polled through terminal state",
+	);
+	assertEquals(
+		getSessionCount,
+		2,
+		"terminal state should trigger one final canonical reload",
+	);
+	assert(
+		!store.getState().messages.some((message) => message.content.includes("chopped provider text")),
+		"terminal rehydration must never promote the discarded provider draft",
+	);
+	store.getState().cleanup();
+});
+
+Deno.test("rejected Worker Stop restores authoritative partial state and exposes the error", async () => {
+	let callbacks:
+		| {
+			onWorkerResponsePending?: (event: {
+				type: "worker_response_pending";
+				worker_id: string;
+				session_id: string;
+				run_id: string;
+			}) => void;
+		}
+		| undefined;
+	let resolveStreamStarted!: () => void;
+	const streamStarted = new Promise<void>((resolve) => {
+		resolveStreamStarted = resolve;
+	});
+	let reloadCount = 0;
+	let statusCount = 0;
+	const client = {
+		streamChat: async (
+			_request: unknown,
+			streamCallbacks: typeof callbacks,
+			signal: AbortSignal,
+		) => {
+			callbacks = streamCallbacks;
+			resolveStreamStarted();
+			await new Promise<void>((resolve) => {
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+		},
+		cancelSession: async () => {
+			throw new Error("Hive daemon is unavailable");
+		},
+		getSession: async () => {
+			reloadCount += 1;
+			const response = sessionResponse();
+			return {
+				...response,
+				session: { ...response.session, session_type: "hive" },
+			};
+		},
+		getSessionState: async () =>
+			sessionState("streaming", {
+				live_partial_assistant: {
+					text: "authoritative running partial",
+					thinking: "",
+					tool_calls: [],
+				},
+			}),
+		getHiveSessionStatus: async () => {
+			statusCount += 1;
+			return {};
+		},
+		heartbeatSessionPresence: async () => ({}),
+		removeSessionPresence: async () => ({}),
+		updateSession: async () => ({}),
+		setCurrentModel: async () => ({}),
+	};
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore() as never,
+		createPlanStore() as never,
+	);
+	store.getState().initSession("session-1", "Worker DM", undefined, "hive");
+	const send = store.getState().sendMessage("Please begin");
+	await streamStarted;
+	assert(callbacks, "Worker stream callbacks should be attached");
+	callbacks.onWorkerResponsePending?.({
+		type: "worker_response_pending",
+		worker_id: "worker-1",
+		session_id: "session-1",
+		run_id: "run-1",
+	});
+	store.setState((state) => ({
+		messages: [
+			...state.messages.filter((message) => message.role === "user"),
+			{
+				id: "untrusted-local-partial",
+				role: "assistant",
+				content: "untrusted local partial",
+				kind: "live_partial",
+			},
+		],
+	}));
+
+	store.getState().stopStreaming();
+	await send;
+	for (
+		let attempt = 0;
+		attempt < 50 && !store.getState().error;
+		attempt += 1
+	) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assertEquals(
+		reloadCount,
+		1,
+		"a rejected Stop must reload canonical running state",
+	);
+	assertEquals(
+		statusCount,
+		0,
+		"a rejected Stop must not enter terminal settlement polling",
+	);
+	assert(
+		store.getState().messages.some((message) =>
+			message.kind === "live_partial" &&
+			message.content === "authoritative running partial"
+		),
+		"the authoritative still-running partial should be restored as provisional",
+	);
+	assert(
+		store.getState().error?.includes("Hive daemon is unavailable"),
+		"the exact Stop rejection must remain actionable",
+	);
+	store.getState().cleanup();
+});
+
+Deno.test("primary Hive Stop retains generic transient finalization", async () => {
+	let cancelCount = 0;
+	let reloadCount = 0;
+	const client = {
+		cancelSession: async () => {
+			cancelCount += 1;
+		},
+		getSession: async () => {
+			reloadCount += 1;
+			return sessionResponse();
+		},
+	};
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore() as never,
+		createPlanStore() as never,
+	);
+	store.getState().initSession("session-1", "Primary Hive", undefined, "hive");
+	store.setState({
+		isStreaming: true,
+		messages: [{
+			id: "primary-live-partial",
+			role: "assistant",
+			content: "ordinary Hive partial",
+			kind: "live_partial",
+		}],
+	});
+
+	store.getState().stopStreaming();
+	await Promise.resolve();
+	assertEquals(
+		cancelCount,
+		1,
+		"primary Hive Stop should retain generic cancellation",
+	);
+	assertEquals(
+		reloadCount,
+		0,
+		"session_type=hive alone must not use Worker reload semantics",
+	);
+	assertEquals(
+		store.getState().messages[0]?.kind,
+		undefined,
+		"ordinary Hive partials retain the existing generic finalization behavior",
+	);
+	store.getState().cleanup();
+});
+
 Deno.test("provider error snapshot stops polling and preserves the provider error", async () => {
 	const timers = installFakeIntervals();
 	try {

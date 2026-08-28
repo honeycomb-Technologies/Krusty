@@ -18,8 +18,10 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::path::Path;
 
+use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -28,6 +30,8 @@ use crate::skills::SkillsManager;
 use crate::storage::{
     Database, DelegationMode, HiveGroupRunContext, HiveProfileSnapshot, ProjectSettings, WorkMode,
 };
+
+use super::run_spec::WorkerGoalExecutionContext;
 
 pub use plan::build_plan_context;
 pub use project::build_project_context;
@@ -39,6 +43,28 @@ const MAX_PROJECT_SETTINGS_APPEND_BYTES: usize = 8 * 1024;
 /// Individual sources also have smaller limits, but the aggregate guard keeps
 /// several simultaneously-large sources from bypassing those local budgets.
 pub(super) const MAX_DYNAMIC_CONTEXT_BYTES: usize = 64 * 1024;
+
+const WORKER_CONVERSATION_CAPABILITY_CONTEXT: &str = "[WORKER CONVERSATION CAPABILITY]\n\nThis is a conversation-only Hive Worker response. You have no workspace, project, tools, web access, processes, extensions, skills, delegation, or global Hive identity in this run. Reply as the exact Worker described below using only the supplied conversation and bounded private continuity. Never claim an action or external observation you could not perform.\n\n[/WORKER CONVERSATION CAPABILITY]";
+const WORKER_GROUP_RESPONSE_CAPABILITY_CONTEXT: &str = "[WORKER GROUP RESPONSE CAPABILITY]\n\nThis neutral run has no post_to_group tool. Your one final assistant response is the group contribution and will be projected into the room atomically by the runtime. Do not request or emit a tool call.\n\n[/WORKER GROUP RESPONSE CAPABILITY]";
+const WORKER_GOAL_WORKFLOW_CONTEXT_BYTES: usize = 16 * 1024;
+const WORKER_GOAL_FIELD_CHARS: usize = 640;
+const WORKER_GOAL_LIST_ITEMS: usize = 16;
+
+#[derive(Debug, Error)]
+pub(crate) enum WorkerConversationContextError {
+    #[error("session is not durably bound to a Hive Worker")]
+    MissingBinding,
+    #[error("Hive Worker conversation binding was denied")]
+    DeniedBinding,
+    #[error("Hive Worker conversation binding resolved to '{actual}', expected '{expected}'")]
+    WorkerMismatch { expected: String, actual: String },
+    #[error("Hive Worker group-room context could not be loaded")]
+    GroupRoomUnavailable,
+    #[error("Hive Worker revision resolved to '{actual}', expected '{expected}'")]
+    WorkerRevisionMismatch { expected: u64, actual: u64 },
+    #[error("Hive Worker Goal Workflow binding is unavailable or inconsistent")]
+    WorkflowBindingMismatch,
+}
 
 /// Build a conversation clone with context system messages prepended.
 ///
@@ -72,6 +98,347 @@ pub fn inject_context(
         None,
         None,
     )
+}
+
+/// Build the least-privilege prompt for one neutral Worker conversation run.
+///
+/// This path intentionally has no `working_dir`, `project_dir`, model, skills,
+/// global Hive profile, or work-mode arguments, so it cannot accidentally
+/// fall back to repository or process context. The caller must have already
+/// validated the same Worker/lane against its claimed provider governor.
+pub(crate) fn inject_worker_conversation_context(
+    conversation: &[ModelMessage],
+    db_path: &Path,
+    session_id: &str,
+    expected_worker_id: &str,
+    user_id: Option<&str>,
+    hive_group_run: Option<&HiveGroupRunContext>,
+) -> Result<Vec<ModelMessage>, WorkerConversationContextError> {
+    let persona = match hive::resolve_worker_conversation_persona(
+        db_path,
+        session_id,
+        user_id,
+        hive_group_run,
+    ) {
+        hive::HiveWorkerConversationLookup::Primary => {
+            return Err(WorkerConversationContextError::MissingBinding)
+        }
+        hive::HiveWorkerConversationLookup::Denied => {
+            return Err(WorkerConversationContextError::DeniedBinding)
+        }
+        hive::HiveWorkerConversationLookup::Worker(persona) => persona,
+    };
+    if persona.worker_id != expected_worker_id {
+        return Err(WorkerConversationContextError::WorkerMismatch {
+            expected: expected_worker_id.to_string(),
+            actual: persona.worker_id,
+        });
+    }
+
+    let knowledge = reports::build_hive_knowledge_context(
+        db_path,
+        None,
+        user_id,
+        Some(&persona.memory_namespace_id),
+        Some(&persona.worker_id),
+        session_id,
+        hive_group_run.map(|run| run.group_id.as_str()),
+        conversation,
+    );
+    let episodes = episodes::build_episode_context(
+        db_path,
+        None,
+        user_id,
+        Some(&persona.worker_id),
+        session_id,
+        conversation,
+    );
+    let group_room = match hive_group_run {
+        Some(group_run) => Some(
+            hive::build_group_room_section(db_path, group_run)
+                .ok_or(WorkerConversationContextError::GroupRoomUnavailable)?,
+        ),
+        None => None,
+    };
+
+    let mut injected = Vec::with_capacity(conversation.len() + persona.sections.len() + 4);
+    injected.push(ModelMessage {
+        role: Role::System,
+        content: vec![Content::Text {
+            text: WORKER_CONVERSATION_CAPABILITY_CONTEXT.to_string(),
+        }],
+    });
+    for text in persona.sections {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text }],
+        });
+    }
+    if !knowledge.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: knowledge }],
+        });
+    }
+    if !episodes.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: episodes }],
+        });
+    }
+    if let Some(text) = group_room {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text }],
+        });
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: WORKER_GROUP_RESPONSE_CAPABILITY_CONTEXT.to_string(),
+            }],
+        });
+    }
+    bound_dynamic_context_messages(&mut injected);
+    injected.extend_from_slice(conversation);
+    Ok(injected)
+}
+
+/// Build the least-privilege prompt for one bounded durable Worker Goal run.
+///
+/// The initial typed trigger is supplied ephemerally by the Hive runtime. This
+/// function only prepends system context and never creates or persists a fake
+/// user message. It deliberately omits global Hive identity, ordinary chat or
+/// group transcripts, episodes, project instruction files, skills, extension
+/// context, and ambient Workflow lookup.
+pub(crate) fn inject_worker_goal_context(
+    conversation: &[ModelMessage],
+    db_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+    goal_context: &WorkerGoalExecutionContext,
+    execution_tool_allowlist: &HashSet<String>,
+) -> Result<Vec<ModelMessage>, WorkerConversationContextError> {
+    let binding = goal_context.binding();
+    let persona = match hive::resolve_worker_goal_persona(db_path, session_id, user_id) {
+        hive::HiveWorkerConversationLookup::Worker(persona) => persona,
+        hive::HiveWorkerConversationLookup::Primary => {
+            return Err(WorkerConversationContextError::MissingBinding)
+        }
+        hive::HiveWorkerConversationLookup::Denied => {
+            return Err(WorkerConversationContextError::DeniedBinding)
+        }
+    };
+    if persona.worker_id != binding.worker_id {
+        return Err(WorkerConversationContextError::WorkerMismatch {
+            expected: binding.worker_id.clone(),
+            actual: persona.worker_id,
+        });
+    }
+    if persona.worker_revision != binding.worker_revision {
+        return Err(WorkerConversationContextError::WorkerRevisionMismatch {
+            expected: binding.worker_revision,
+            actual: persona.worker_revision,
+        });
+    }
+
+    let project_dir = binding.workspace_dir.to_string_lossy();
+    let knowledge = reports::build_hive_worker_goal_knowledge_context(
+        db_path,
+        project_dir.as_ref(),
+        user_id,
+        &persona.memory_namespace_id,
+        &persona.worker_id,
+        session_id,
+        conversation,
+    );
+    let workflow = render_worker_goal_workflow_context(goal_context)?;
+    let workspace = format!(
+        "[WORKER GOAL WORKSPACE]\n\nExact workspace root: {}\n- This absolute path is the only workspace attached to this attempt.\n- Keep every file operation inside this root and use paths rooted here.\n- Do not discover, switch to, or infer another project or workspace.\n\n[/WORKER GOAL WORKSPACE]",
+        binding.workspace_dir.display()
+    );
+    let mut allowed_tools = execution_tool_allowlist.iter().cloned().collect::<Vec<_>>();
+    allowed_tools.sort();
+    let tool_summary = if allowed_tools.is_empty() {
+        "none".to_string()
+    } else {
+        allowed_tools.join(", ")
+    };
+    let capability = format!(
+        "[WORKER GOAL CAPABILITY]\n\nThis is one bounded durable Hive Worker Goal attempt, not an ordinary chat, group-room turn, heartbeat, or open-ended autonomous loop. Work only on the exact frozen Goal, plan revision, step, attempt, Worker identity, and workspace shown below. Use only these advertised tools: {tool_summary}. Every tool remains governed by the run's normal permission mode and workspace sandbox. You have no web, tool discovery, subagents, delegation, MCP, extensions, skills, cross-Worker messaging, group history, global Hive identity, or unseen conversation history. Never claim work or evidence that the tools did not establish. A final response reports this attempt's outcome; it does not by itself prove the Goal complete.\n\n[/WORKER GOAL CAPABILITY]"
+    );
+
+    let mut injected = Vec::with_capacity(conversation.len() + persona.sections.len() + 5);
+    for text in [capability, workspace, workflow] {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text }],
+        });
+    }
+    for text in persona.sections {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text }],
+        });
+    }
+    if !knowledge.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: knowledge }],
+        });
+    }
+    bound_dynamic_context_messages(&mut injected);
+    injected.extend_from_slice(conversation);
+    Ok(injected)
+}
+
+fn render_worker_goal_workflow_context(
+    goal_context: &WorkerGoalExecutionContext,
+) -> Result<String, WorkerConversationContextError> {
+    let binding = goal_context.binding();
+    let snapshot = goal_context.workflow_snapshot();
+    let plan = snapshot
+        .plan_revision
+        .as_ref()
+        .filter(|plan| plan.id == binding.plan_revision_id)
+        .ok_or(WorkerConversationContextError::WorkflowBindingMismatch)?;
+    let step = snapshot
+        .steps
+        .iter()
+        .find(|step| step.id == binding.step_id)
+        .ok_or(WorkerConversationContextError::WorkflowBindingMismatch)?;
+    let attempt = snapshot
+        .latest_attempt
+        .as_ref()
+        .filter(|attempt| attempt.id == binding.attempt_id)
+        .ok_or(WorkerConversationContextError::WorkflowBindingMismatch)?;
+
+    let mut lines = vec![
+        "[CANONICAL WORKER GOAL ATTEMPT]".to_string(),
+        format!("Goal id: {}", binding.goal_id),
+        format!("Goal revision: {}", binding.goal_revision),
+        format!(
+            "Workflow aggregate revision: {}",
+            binding.workflow_aggregate_revision
+        ),
+        format!("Title: {}", truncate_utf8(&snapshot.goal.title, WORKER_GOAL_FIELD_CHARS)),
+        format!(
+            "Objective: {}",
+            truncate_utf8(&snapshot.goal.objective, WORKER_GOAL_FIELD_CHARS)
+        ),
+        format!(
+            "Plan: {} (id {}, revision {})",
+            truncate_utf8(&plan.title, WORKER_GOAL_FIELD_CHARS),
+            binding.plan_revision_id,
+            binding.plan_revision_number
+        ),
+        format!("Attempt id: {}", binding.attempt_id),
+        format!(
+            "Attempt limits: max_turns={}, max_tool_calls={}, max_wall_time_secs={}, max_research_actions={}",
+            attempt.max_turns,
+            attempt.max_tool_calls,
+            attempt.max_wall_time_secs,
+            attempt.max_research_actions
+        ),
+        format!(
+            "Exact step: {} - {} (id {}, revision {}, status {})",
+            step.display_key,
+            truncate_utf8(&step.description, WORKER_GOAL_FIELD_CHARS),
+            binding.step_id,
+            binding.step_revision,
+            step.status
+        ),
+    ];
+    if let Some(context) = step.context.as_deref() {
+        lines.push(format!(
+            "Step context: {}",
+            truncate_utf8(context, WORKER_GOAL_FIELD_CHARS)
+        ));
+    }
+    append_bounded_list(&mut lines, "Goal constraints", &snapshot.goal.constraints);
+    append_bounded_list(
+        &mut lines,
+        "Step acceptance criteria",
+        &step.acceptance_criteria,
+    );
+
+    if !snapshot.criteria.is_empty() {
+        lines.push("Goal verification criteria:".to_string());
+        for criterion in snapshot.criteria.iter().take(WORKER_GOAL_LIST_ITEMS) {
+            lines.push(format!(
+                "- [{}] {} (id {}, required={})",
+                criterion.status,
+                truncate_utf8(&criterion.description, WORKER_GOAL_FIELD_CHARS),
+                criterion.id,
+                criterion.required
+            ));
+        }
+        let omitted = snapshot
+            .criteria
+            .len()
+            .saturating_sub(WORKER_GOAL_LIST_ITEMS);
+        if omitted > 0 {
+            lines.push(format!(
+                "- {omitted} additional criteria omitted by prompt budget"
+            ));
+        }
+    }
+
+    let dependency_ids = snapshot
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.step_id == binding.step_id)
+        .map(|dependency| dependency.depends_on_step_id.as_str())
+        .collect::<HashSet<_>>();
+    if !dependency_ids.is_empty() {
+        lines.push("Exact step dependencies:".to_string());
+        for dependency in snapshot
+            .steps
+            .iter()
+            .filter(|candidate| dependency_ids.contains(candidate.id.as_str()))
+            .take(WORKER_GOAL_LIST_ITEMS)
+        {
+            lines.push(format!(
+                "- [{}] {}: {} (id {})",
+                dependency.status,
+                dependency.display_key,
+                truncate_utf8(&dependency.description, WORKER_GOAL_FIELD_CHARS),
+                dependency.id
+            ));
+        }
+    }
+    lines.push("[/CANONICAL WORKER GOAL ATTEMPT]".to_string());
+
+    let rendered = lines.join("\n");
+    if rendered.len() <= WORKER_GOAL_WORKFLOW_CONTEXT_BYTES {
+        return Ok(rendered);
+    }
+    const END: &str =
+        "\n[WORKER GOAL SNAPSHOT TRUNCATED AT REQUEST BUDGET]\n[/CANONICAL WORKER GOAL ATTEMPT]";
+    let mut bounded = truncate_utf8_bytes(
+        &rendered,
+        WORKER_GOAL_WORKFLOW_CONTEXT_BYTES.saturating_sub(END.len()),
+    );
+    bounded.push_str(END);
+    Ok(bounded)
+}
+
+fn append_bounded_list(lines: &mut Vec<String>, title: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    lines.push(format!("{title}:"));
+    for value in values.iter().take(WORKER_GOAL_LIST_ITEMS) {
+        lines.push(format!(
+            "- {}",
+            truncate_utf8(value, WORKER_GOAL_FIELD_CHARS)
+        ));
+    }
+    let omitted = values.len().saturating_sub(WORKER_GOAL_LIST_ITEMS);
+    if omitted > 0 {
+        lines.push(format!(
+            "- {omitted} additional items omitted by prompt budget"
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,24 +484,32 @@ pub fn inject_context_with_hive_profile_and_group(
     // persona replaces the generic crew treatment and its memory namespace
     // scopes retrieval. Sessions without a Worker binding keep the primary
     // companion behavior unchanged.
-    let worker_persona = if is_hive {
-        hive::load_worker_persona(db_path, session_id, user_id)
+    let worker_conversation = if is_hive {
+        Some(hive::resolve_worker_conversation_persona(
+            db_path,
+            session_id,
+            user_id,
+            hive_group_run,
+        ))
     } else {
         None
     };
-    let group_worker_namespace = if is_hive {
-        hive_group_run
-            .and_then(|run| hive::load_worker_memory_namespace(db_path, &run.worker_id, user_id))
-    } else {
-        None
-    };
+    let worker_persona = worker_conversation
+        .as_ref()
+        .and_then(|lookup| match lookup {
+            hive::HiveWorkerConversationLookup::Worker(persona) => Some(persona),
+            hive::HiveWorkerConversationLookup::Primary
+            | hive::HiveWorkerConversationLookup::Denied => None,
+        });
+    let worker_scope_denied = matches!(
+        worker_conversation.as_ref(),
+        Some(hive::HiveWorkerConversationLookup::Denied)
+    );
     let hive_memory_namespace = worker_persona
-        .as_ref()
         .map(|persona| persona.memory_namespace_id.as_str())
-        .or(group_worker_namespace.as_deref())
-        .or(hive_crew_slug);
+        .or_else(|| (!worker_scope_denied).then_some(hive_crew_slug).flatten());
+    let hive_worker_id = worker_persona.map(|persona| persona.worker_id.as_str());
     let worker_persona_sections = worker_persona
-        .as_ref()
         .map(|persona| persona.sections.as_slice())
         .unwrap_or_default();
     let memory_ctx = if is_hive {
@@ -153,14 +528,20 @@ pub fn inject_context_with_hive_profile_and_group(
     let report_ctx = if is_hive {
         String::new()
     } else {
-        reports::build_report_context(db_path, context_project_dir.as_deref(), conversation)
+        reports::build_report_context(
+            db_path,
+            context_project_dir.as_deref(),
+            user_id,
+            conversation,
+        )
     };
-    let hive_knowledge_ctx = if is_hive {
+    let hive_knowledge_ctx = if is_hive && !worker_scope_denied {
         reports::build_hive_knowledge_context(
             db_path,
             context_project_dir.as_deref(),
             user_id,
             hive_memory_namespace,
+            hive_worker_id,
             session_id,
             hive_group_run.map(|run| run.group_id.as_str()),
             conversation,
@@ -168,11 +549,15 @@ pub fn inject_context_with_hive_profile_and_group(
     } else {
         String::new()
     };
-    let hive_episode_ctx = if is_hive {
+    // Primary Hive recall excludes every Worker lane. A validated Worker gets
+    // continuity only from that same Worker's DM/group lanes; denied group
+    // claims get no episodic fallback at all.
+    let hive_episode_ctx = if is_hive && !worker_scope_denied {
         episodes::build_episode_context(
             db_path,
             context_project_dir.as_deref(),
             user_id,
+            hive_worker_id,
             session_id,
             conversation,
         )
@@ -208,7 +593,7 @@ pub fn inject_context_with_hive_profile_and_group(
     // A group member run sees the room right after its persona: title,
     // roster, and the bounded recent timeline. Rebuilt per provider call so
     // parallel members observe each other's posts as they land.
-    if is_hive {
+    if is_hive && !worker_scope_denied {
         if let Some(group_run) = hive_group_run {
             if let Some(section) = hive::build_group_room_section(db_path, group_run) {
                 hive_ctx_sections.push(section);
@@ -419,7 +804,15 @@ fn dynamic_context_priority(text: &str) -> u8 {
     // retrieval, skills, or current-work context. The profile renderer keeps
     // this tier independently bounded, so reserving it first cannot make the
     // overall request unbounded.
-    if is_stable_hive_identity_context(text) {
+    if text.starts_with("[WORKER GOAL CAPABILITY]")
+        || text.starts_with("[WORKER GOAL WORKSPACE]")
+        || text.starts_with("[CANONICAL WORKER GOAL ATTEMPT]")
+    {
+        220
+    } else if text.starts_with("[WORKER CONVERSATION CAPABILITY]")
+        || text.starts_with("[WORKER GROUP RESPONSE CAPABILITY]")
+        || is_stable_hive_identity_context(text)
+    {
         200
     } else if text.starts_with("[PLAN MODE ACTIVE")
         || text.starts_with("[ACTIVE PLAN")

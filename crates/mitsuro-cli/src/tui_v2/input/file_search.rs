@@ -52,9 +52,7 @@ pub fn suggestions<'a>(
     };
     let query = query.query.trim_start_matches("./").to_lowercase();
     let scoped = query.contains('/');
-    let (parent, needle) = query
-        .rsplit_once('/')
-        .map_or(("", query.as_str()), |value| value);
+    let (parent, needle) = query.rsplit_once('/').unwrap_or(("", query.as_str()));
 
     let mut matches = entries
         .iter()

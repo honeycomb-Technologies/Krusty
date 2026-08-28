@@ -9,6 +9,7 @@ use url::Url;
 
 use super::super::super::config::CallOptions;
 use super::super::super::core::AiClient;
+use super::super::super::RemoteAttemptPolicy;
 use super::super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::model_profile::SystemPromptSections;
@@ -118,11 +119,33 @@ fn codex_ws_error_code(payload: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn should_retry_missing_codex_continuation(
+    attempt_policy: RemoteAttemptPolicy,
+    sent_delta: bool,
+    retried_full: bool,
+    error_code: Option<&str>,
+) -> bool {
+    attempt_policy.allows_retry()
+        && sent_delta
+        && !retried_full
+        && error_code == Some("previous_response_not_found")
+}
+
+fn should_retry_codex_api_event(
+    attempt_policy: RemoteAttemptPolicy,
+    retryable: bool,
+    saw_provider_output: bool,
+    api_retries: u32,
+) -> bool {
+    attempt_policy.allows_retry() && retryable && !saw_provider_output && api_retries < 3
+}
+
 pub(super) async fn call_streaming_chatgpt_codex_ws(
     client: &AiClient,
     messages: Vec<ModelMessage>,
     options: &CallOptions,
     call_start: Instant,
+    attempt_policy: RemoteAttemptPolicy,
 ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
     let format_handler = OpenAIFormat::new(client.config().api_format);
     let prompt_sections = client.system_prompt_sections(
@@ -199,8 +222,13 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                 );
                 warn!(
                     error = %safe_error,
-                    "ChatGPT Codex websocket connect failed; falling back to HTTP streaming"
+                    retry_allowed = attempt_policy.allows_retry(),
+                    "ChatGPT Codex websocket connect failed"
                 );
+                if !attempt_policy.allows_retry() {
+                    drop(state);
+                    return Err(anyhow::Error::msg(safe_error));
+                }
                 let full_body = prepared.full_body;
                 drop(state);
                 return call_streaming_chatgpt_codex_http(client, full_body, call_start).await;
@@ -226,9 +254,14 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
         );
         warn!(
             error = %safe_error,
-            "ChatGPT Codex websocket send failed; reconnecting with full context"
+            retry_allowed = attempt_policy.allows_retry(),
+            "ChatGPT Codex websocket send failed"
         );
         state.reset();
+        if !attempt_policy.allows_retry() {
+            drop(state);
+            return Err(anyhow::Error::msg(safe_error));
+        }
         match connect_codex_websocket(client, &ws_url, options).await {
             Ok(mut connection) => {
                 create_payload = AiClient::codex_ws_create_payload(prepared.full_body.clone());
@@ -360,11 +393,12 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                         saw_provider_output |= event_type.starts_with("response.output_")
                             || event_type.starts_with("response.function_call_");
                     }
-                    if sent_delta
-                        && !retried_full
-                        && codex_ws_error_code(&payload).as_deref()
-                            == Some("previous_response_not_found")
-                    {
+                    if should_retry_missing_codex_continuation(
+                        attempt_policy,
+                        sent_delta,
+                        retried_full,
+                        codex_ws_error_code(&payload).as_deref(),
+                    ) {
                         retried_full = true;
                         state.continuation = None;
                         let full_payload =
@@ -409,7 +443,12 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                             break;
                         }
                         CodexPayloadState::Error { error, retryable } => {
-                            if retryable && !saw_provider_output && api_retries < 3 {
+                            if should_retry_codex_api_event(
+                                attempt_policy,
+                                retryable,
+                                saw_provider_output,
+                                api_retries,
+                            ) {
                                 api_retries += 1;
                                 state.continuation = None;
                                 tokio::time::sleep(Duration::from_secs(1 << (api_retries - 1)))
@@ -465,7 +504,12 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                             break;
                         }
                         CodexPayloadState::Error { error, retryable } => {
-                            if retryable && !saw_provider_output && api_retries < 3 {
+                            if should_retry_codex_api_event(
+                                attempt_policy,
+                                retryable,
+                                saw_provider_output,
+                                api_retries,
+                            ) {
                                 api_retries += 1;
                                 state.continuation = None;
                                 tokio::time::sleep(Duration::from_secs(1 << (api_retries - 1)))
@@ -627,4 +671,40 @@ fn resolve_codex_ws_url(api_url: &str) -> Result<Url> {
         })?;
 
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        should_retry_codex_api_event, should_retry_missing_codex_continuation, RemoteAttemptPolicy,
+    };
+
+    #[test]
+    fn governed_codex_stream_never_resends_after_remote_request() {
+        assert!(!should_retry_missing_codex_continuation(
+            RemoteAttemptPolicy::GovernedSingleAttempt,
+            true,
+            false,
+            Some("previous_response_not_found"),
+        ));
+        assert!(!should_retry_codex_api_event(
+            RemoteAttemptPolicy::GovernedSingleAttempt,
+            true,
+            false,
+            0,
+        ));
+
+        assert!(should_retry_missing_codex_continuation(
+            RemoteAttemptPolicy::ConfiguredRetries,
+            true,
+            false,
+            Some("previous_response_not_found"),
+        ));
+        assert!(should_retry_codex_api_event(
+            RemoteAttemptPolicy::ConfiguredRetries,
+            true,
+            false,
+            0,
+        ));
+    }
 }

@@ -315,6 +315,7 @@ fn clone_for_tick(config: &OrchestratorConfig) -> OrchestratorConfig {
         hive_crew_slug: config.hive_crew_slug.clone(),
         hive_group_run: config.hive_group_run.clone(),
         hive_profile: config.hive_profile.clone(),
+        context_mode: config.context_mode.clone(),
         session_type: config.session_type,
         permission_mode: config.permission_mode,
         execution_tool_allowlist: config.execution_tool_allowlist.clone(),
@@ -325,6 +326,7 @@ fn clone_for_tick(config: &OrchestratorConfig) -> OrchestratorConfig {
         initial_work_mode: config.initial_work_mode,
         generate_title: false,
         delegated_progress_tx: None,
+        provider_governor: config.provider_governor.clone(),
     }
 }
 

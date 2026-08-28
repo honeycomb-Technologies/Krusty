@@ -57,8 +57,8 @@ import { MitsuroMark } from '../brand';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
 import Svg, { Path, Polygon } from 'react-native-svg';
-import type { ThinkingLevel, ModelInfo, SessionType } from '@mitsuro/api';
-import type { PermissionMode } from '@mitsuro/state';
+import type { ThinkingLevel, ModelInfo, ModelKey, SessionType } from '@mitsuro/api';
+import { modelKeysEqual, type PermissionMode } from '@mitsuro/state';
 
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from '../../platform/speech';
 
@@ -87,8 +87,9 @@ interface ChatBarProps {
   onFastModeToggle?: () => void;
   mode: 'build' | 'plan';
   onModeToggle: () => void;
-  onModelSelect: (modelId: string) => void;
+  onModelSelect: (model: ModelInfo) => void;
   model: string | null;
+  modelKey?: ModelKey | null;
   models: ModelInfo[];
   sessionType?: SessionType;
   workspaceDirectory?: string | null;
@@ -531,7 +532,7 @@ function ChatBarComponent(props: ChatBarProps) {
     thinkingLevel, onThinkingChange,
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
-    mode, onModeToggle, onModelSelect, model, models,
+    mode, onModeToggle, onModelSelect, model, modelKey, models,
     sessionType, workspaceDirectory, targetBranch, tokenCount, onOverlayOpenChange,
     contentMaxWidth, minimalControls = false,
   } = props;
@@ -810,20 +811,23 @@ function ChatBarComponent(props: ChatBarProps) {
       : sortedModels,
     [selectedProviderFilter, sortedModels],
   );
+  const selectedModelInfo = useMemo(
+    () =>
+      (modelKey
+        ? models.find(candidate => modelKeysEqual(candidate.key ?? null, modelKey))
+        : models.find(candidate => candidate.id === model)) ?? null,
+    [model, modelKey, models],
+  );
   const currentModelLabel = useMemo(() => {
     if (!model) return 'No model selected';
-    return models.find(candidate => candidate.id === model)?.display_name ?? model;
-  }, [model, models]);
+    return selectedModelInfo?.display_name ?? model;
+  }, [model, selectedModelInfo]);
   const workspaceContext = useMemo(
     () =>
       sessionType === 'code'
         ? formatWorkspaceContextMetadata(workspaceDirectory, targetBranch)
         : null,
     [sessionType, targetBranch, workspaceDirectory],
-  );
-  const selectedModelInfo = useMemo(
-    () => models.find(candidate => candidate.id === model) ?? null,
-    [model, models],
   );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
@@ -1006,6 +1010,7 @@ function ChatBarComponent(props: ChatBarProps) {
   };
 
   const openModelPicker = () => {
+    if (isHive) return;
     clearModelCloseTimer();
     if (attachPickerOpen) {
       setAttachPickerOpen(false);
@@ -1037,10 +1042,20 @@ function ChatBarComponent(props: ChatBarProps) {
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
 
-  const handleModelSelectFromPicker = useCallback((modelId: string) => {
-    onModelSelectRef.current(modelId);
+  const handleModelSelectFromPicker = useCallback((modelInfo: ModelInfo) => {
+    if (isHive) return;
+    onModelSelectRef.current(modelInfo);
     closeModelPicker();
-  }, [closeModelPicker]);
+  }, [closeModelPicker, isHive]);
+
+  useEffect(() => {
+    if (!isHive) return;
+    clearModelCloseTimer();
+    modelPopoverScale.value = 0;
+    setModelRailOpen(false);
+    setModelPickerOpen(false);
+    setSelectedProviderFilter(null);
+  }, [clearModelCloseTimer, isHive, modelPopoverScale]);
 
   const closeExpandedEditor = useCallback(() => {
     setExpandedEditorOpen(false);
@@ -1092,10 +1107,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
   // only when the catalog has not loaded or the model is unknown.
-  const selectedModel =
-    models.find((entry) => entry.id === model) ??
-    models.find((entry) => entry.key?.model_id === model) ??
-    null;
+  const selectedModel = selectedModelInfo;
   const contextWindow = Math.max(
     1,
     selectedModel?.context_window && selectedModel.context_window > 0
@@ -1464,7 +1476,8 @@ function ChatBarComponent(props: ChatBarProps) {
             onPickCamera={pickCamera}
             onPickFile={pickFile}
             onModelSelect={() =>
-              modelPickerOpen ? closeModelPicker() : openModelPicker()
+              !isHive &&
+                (modelPickerOpen ? closeModelPicker() : openModelPicker())
             }
             modelPickerOpen={modelRailOpen}
             providerFilters={providerFilterActions}
@@ -1485,7 +1498,7 @@ function ChatBarComponent(props: ChatBarProps) {
       ) : null}
 
       {/* Model popover — under the filter row, same width + right edge */}
-      {showComposerChrome && modelPickerOpen ? (
+      {showComposerChrome && !isHive && modelPickerOpen ? (
         <ChatBarModelPopover
           isDesktop={isDesktop}
           modelPopoverWidth={modelPopoverWidth}
@@ -1501,7 +1514,7 @@ function ChatBarComponent(props: ChatBarProps) {
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
           filteredModels={filteredModels}
-          model={model}
+          selectedModel={selectedModelInfo}
           onSelectModel={handleModelSelectFromPicker}
         />
       ) : null}

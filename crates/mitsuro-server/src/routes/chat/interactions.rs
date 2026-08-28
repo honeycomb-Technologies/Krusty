@@ -117,7 +117,7 @@ pub(super) async fn steer(
     let pending_id = uuid::Uuid::new_v4().to_string();
     if session.session_type == SessionType::Hive {
         let idempotency_key = super::super::hive::idempotency_key_from_headers(&headers)?;
-        let status = state
+        let result = state
             .hive_runtime
             .steer_for_user(
                 &state,
@@ -130,8 +130,11 @@ pub(super) async fn steer(
             .await
             .map_err(hive_control_error)?;
         return Ok(Json(json!({
-            "status": status.as_str(),
+            "status": result.status.as_str(),
             "pending_id": pending_id,
+            "active_run_id": result.active_run_id,
+            "staged_input_id": result.staged_input_id,
+            "successor_run_id": result.successor_run_id,
         })));
     }
 

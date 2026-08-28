@@ -1,15 +1,10 @@
-import { memo, type ComponentProps } from 'react';
-import {
-  FlatList,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import Animated from 'react-native-reanimated';
-import * as Haptics from '../../platform/haptics';
-import type { ModelInfo } from '@mitsuro/api';
-import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
+import { type ComponentProps, memo } from "react";
+import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
+import * as Haptics from "../../platform/haptics";
+import type { ModelInfo } from "@mitsuro/api";
+import { modelKeysEqual } from "@mitsuro/state";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 
 const PILL = 56;
 const RADIUS = 18;
@@ -30,7 +25,7 @@ export interface ChatBarModelPopoverProps {
   modelPopoverHeight: number;
   dockRightInset: number;
   overlayBottom: number;
-  modelPopoverStyle: ComponentProps<typeof Animated.View>['style'];
+  modelPopoverStyle: ComponentProps<typeof Animated.View>["style"];
   borderColor: string;
   foreground: string;
   mutedForeground: string;
@@ -38,8 +33,24 @@ export interface ChatBarModelPopoverProps {
   backgroundElevated: string;
   backgroundPressed: string;
   filteredModels: ModelInfo[];
-  model: string | null;
-  onSelectModel: (modelId: string) => void;
+  selectedModel: ModelInfo | null;
+  onSelectModel: (model: ModelInfo) => void;
+}
+
+function modelRowKey(model: ModelInfo, index: number): string {
+  const key = model.key;
+  return key
+    ? [key.provider, key.model_id, key.auth_scope ?? "", key.api_format ?? ""]
+      .join("\u0000")
+    : [model.provider ?? "", model.id, String(index)].join("\u0000");
+}
+
+function isSelectedModel(item: ModelInfo, selected: ModelInfo | null): boolean {
+  if (!selected) return false;
+  if (item.key || selected.key) {
+    return modelKeysEqual(item.key ?? null, selected.key ?? null);
+  }
+  return item.id === selected.id && item.provider === selected.provider;
 }
 
 function ChatBarModelPopoverComponent({
@@ -57,35 +68,33 @@ function ChatBarModelPopoverComponent({
   backgroundElevated,
   backgroundPressed,
   filteredModels,
-  model,
+  selectedModel,
   onSelectModel,
 }: ChatBarModelPopoverProps) {
   if (modelPopoverHeight <= 0) return null;
 
   return (
     <View
-      style={
-        isDesktop && modelPopoverWidth != null
-          ? {
-              position: 'absolute' as const,
-              // Stay below the bot + provider filter row so filters stay visible.
-              bottom: desktopModelListBottom,
-              height: modelPopoverHeight,
-              right: dockRightInset,
-              width: modelPopoverWidth,
-              overflow: 'hidden' as const,
-              // The list does not overlap the FAB/filter hit areas, so it
-              // can safely sit above their full-width responder shell.
-              zIndex: MODEL_POPOVER_Z_INDEX,
-            }
-          : [
-              styles.modelClip,
-              {
-                bottom: overlayBottom,
-                height: modelPopoverHeight,
-              },
-            ]
-      }
+      style={isDesktop && modelPopoverWidth != null
+        ? {
+          position: "absolute" as const,
+          // Stay below the bot + provider filter row so filters stay visible.
+          bottom: desktopModelListBottom,
+          height: modelPopoverHeight,
+          right: dockRightInset,
+          width: modelPopoverWidth,
+          overflow: "hidden" as const,
+          // The list does not overlap the FAB/filter hit areas, so it
+          // can safely sit above their full-width responder shell.
+          zIndex: MODEL_POPOVER_Z_INDEX,
+        }
+        : [
+          styles.modelClip,
+          {
+            bottom: overlayBottom,
+            height: modelPopoverHeight,
+          },
+        ]}
     >
       <Animated.View
         style={[
@@ -100,39 +109,51 @@ function ChatBarModelPopoverComponent({
         />
         <FlatList
           data={filteredModels}
-          keyExtractor={(m: ModelInfo) => m.id}
+          keyExtractor={modelRowKey}
           style={styles.modelList}
           contentContainerStyle={styles.modelListContent}
-          extraData={model}
+          extraData={selectedModel}
           nestedScrollEnabled
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="none"
           showsVerticalScrollIndicator={false}
-          renderItem={({ item }: { item: ModelInfo }) => (
-            <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                onSelectModel(item.id);
-              }}
-              style={({ pressed }) => [
-                styles.modelItem,
-                item.id === model && { backgroundColor: backgroundElevated },
-                pressed && { backgroundColor: backgroundPressed },
-              ]}
-            >
-              <View style={styles.modelRow}>
-                <View style={styles.modelInfo}>
-                  <Text style={[styles.modelName, { color: foreground }]} numberOfLines={1}>
-                    {item.display_name}
-                  </Text>
-                  <Text style={[styles.modelMeta, { color: mutedForeground }]}>{item.provider}</Text>
+          renderItem={({ item }: { item: ModelInfo }) => {
+            const selected = isSelectedModel(item, selectedModel);
+            return (
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  onSelectModel(item);
+                }}
+                style={({ pressed }) => [
+                  styles.modelItem,
+                  selected && { backgroundColor: backgroundElevated },
+                  pressed && { backgroundColor: backgroundPressed },
+                ]}
+              >
+                <View style={styles.modelRow}>
+                  <View style={styles.modelInfo}>
+                    <Text
+                      style={[styles.modelName, { color: foreground }]}
+                      numberOfLines={1}
+                    >
+                      {item.display_name}
+                    </Text>
+                    <Text
+                      style={[styles.modelMeta, { color: mutedForeground }]}
+                    >
+                      {item.provider}
+                    </Text>
+                  </View>
+                  {selected && (
+                    <Text style={[styles.modelCheck, { color: thinking }]}>
+                      ✓
+                    </Text>
+                  )}
                 </View>
-                {item.id === model && (
-                  <Text style={[styles.modelCheck, { color: thinking }]}>✓</Text>
-                )}
-              </View>
-            </Pressable>
-          )}
+              </Pressable>
+            );
+          }}
         />
       </Animated.View>
     </View>
@@ -143,27 +164,27 @@ const styles = StyleSheet.create({
   // Clip container — hides the popover as it slides from behind accordion.
   // Mobile: full width under the bar. Desktop: right-aligned dock width.
   modelClip: {
-    position: 'absolute',
+    position: "absolute",
     // Same band as the input pill: root padding on the left, Agent + gap
     // on the right. Do not use 0 / PILL+GAP — that ignores root padding
     // and pulls the list left of the composer.
     left: ROOT_HORIZONTAL_PADDING,
     right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
     height: 4 * PILL + 3 * GAP,
-    overflow: 'hidden',
+    overflow: "hidden",
     zIndex: MODEL_POPOVER_Z_INDEX,
   },
   // Model popover — slides out from behind accordion
   modelPopover: {
-    position: 'relative',
-    width: '100%',
-    height: '100%',
+    position: "relative",
+    width: "100%",
+    height: "100%",
     borderRadius: RADIUS,
-    overflow: 'hidden',
+    overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
     // CSS-form shadow: shadow* props are clipped by overflow:'hidden' on iOS,
     // RN's native boxShadow is not.
-    boxShadow: '0 10px 20px rgba(0,0,0,0.28)',
+    boxShadow: "0 10px 20px rgba(0,0,0,0.28)",
   },
   modelList: {
     flex: 1,
@@ -179,11 +200,11 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 4,
   },
-  modelRow: { flexDirection: 'row', alignItems: 'center' },
+  modelRow: { flexDirection: "row", alignItems: "center" },
   modelInfo: { flex: 1 },
-  modelName: { fontSize: 15, fontWeight: '500' },
+  modelName: { fontSize: 15, fontWeight: "500" },
   modelMeta: { fontSize: 12, marginTop: 2 },
-  modelCheck: { fontSize: 18, fontWeight: '700', marginLeft: 8 },
+  modelCheck: { fontSize: 18, fontWeight: "700", marginLeft: 8 },
 });
 
 export const ChatBarModelPopover = memo(ChatBarModelPopoverComponent);

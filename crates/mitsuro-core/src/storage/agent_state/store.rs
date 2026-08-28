@@ -68,6 +68,7 @@ impl<'a> AgentStateStore<'a> {
     }
 
     /// List sessions with active agents (not idle)
+    #[cfg(test)]
     pub fn list_active_sessions(&self) -> Result<Vec<(String, AgentState)>> {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, agent_state, agent_started_at, agent_last_event_at

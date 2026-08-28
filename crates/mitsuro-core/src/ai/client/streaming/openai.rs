@@ -9,6 +9,7 @@ use super::super::config::{
     CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
 };
 use super::super::core::AiClient;
+use super::super::RemoteAttemptPolicy;
 use super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
@@ -136,6 +137,7 @@ impl AiClient {
         messages: Vec<ModelMessage>,
         options: &CallOptions,
         call_start: Instant,
+        attempt_policy: RemoteAttemptPolicy,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         // Check if we're using ChatGPT Codex API (OAuth) vs standard OpenAI API
         let is_chatgpt_codex = self
@@ -151,7 +153,7 @@ impl AiClient {
                 self.config().model
             );
             return self
-                .call_streaming_chatgpt_codex_ws(messages, options, call_start)
+                .call_streaming_chatgpt_codex_ws(messages, options, call_start, attempt_policy)
                 .await;
         } else {
             info!(

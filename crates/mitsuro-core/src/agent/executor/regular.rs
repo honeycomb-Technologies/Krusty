@@ -12,17 +12,77 @@ use crate::agent::{DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind}
 use crate::ai::client::AiClient;
 use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::AiToolCall;
-use crate::process::ProcessRegistry;
+use crate::process::{CommandEnvironmentPolicy, ProcessRegistry};
 use crate::skills::SkillsManager;
 use crate::storage::{Database, DelegatedRunRole, DelegatedRunStore, WorkMode, WorkspaceMode};
 use crate::tools::registry::{
     agent_call_execution_profile, agent_call_may_start_run, agent_call_starts_run,
-    FileObservationTracker, PermissionMode, ToolContext, ToolRegistry, ToolResult,
+    FileObservationTracker, PermissionMode, ShellIsolationPolicy, ToolContext, ToolRegistry,
+    ToolResult,
 };
 
 use super::super::loop_events::LoopEvent;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Registry dispatch selected after the agent loop has resolved whether
+/// optional extensions belong to this run context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegistryExtensionDispatch {
+    Standard,
+    Prepared,
+    Disabled,
+}
+
+fn configure_worker_goal_shell_context(ctx: &mut ToolContext) {
+    let root = ctx
+        .filesystem_access_root()
+        .unwrap_or_else(|| ctx.working_dir.clone());
+    let root_text = root.display().to_string();
+    let runtime_root = root.join(".mitsuro/worker-goal-runtime");
+
+    // Use the shared explicit-only environment primitive with deterministic
+    // sandbox-local values. Foreground and tracked background commands consume
+    // this same map; no host environment entry is inherited.
+    ctx.command_environment.clear();
+    for (key, value) in [
+        (
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        ),
+        ("HOME", root_text.clone()),
+        ("USERPROFILE", root_text),
+        ("USER", "mitsuro-worker".to_string()),
+        ("LOGNAME", "mitsuro-worker".to_string()),
+        ("TMPDIR", "/tmp".to_string()),
+        ("TMP", "/tmp".to_string()),
+        ("TEMP", "/tmp".to_string()),
+        (
+            "XDG_CACHE_HOME",
+            runtime_root.join("cache").display().to_string(),
+        ),
+        (
+            "CARGO_HOME",
+            runtime_root.join("cargo").display().to_string(),
+        ),
+        (
+            "RUSTUP_HOME",
+            runtime_root.join("rustup").display().to_string(),
+        ),
+        (
+            "npm_config_cache",
+            runtime_root.join("npm").display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_CACHE",
+            runtime_root.join("npm").display().to_string(),
+        ),
+    ] {
+        ctx.command_environment.insert(key.to_string(), value);
+    }
+    ctx.command_environment_policy = CommandEnvironmentPolicy::Explicit;
+    ctx.shell_isolation_policy = ShellIsolationPolicy::WorkspaceOnly;
+}
 
 pub(super) async fn execute_regular_tool(
     call: &AiToolCall,
@@ -46,7 +106,8 @@ pub(super) async fn execute_regular_tool(
     execution_tool_allowlist: Option<&HashSet<String>>,
     hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
-    extension_intercept_prepared: bool,
+    worker_goal_shell_isolation: bool,
+    extension_dispatch: RegistryExtensionDispatch,
     execution_cancellation: Option<CancellationToken>,
 ) -> ToolResult {
     let (output_tx, mut output_rx) =
@@ -116,6 +177,10 @@ pub(super) async fn execute_regular_tool(
     .with_file_observation_tracker(file_observations)
     .with_output_stream(output_tx, call.id.clone());
 
+    if worker_goal_shell_isolation {
+        configure_worker_goal_shell_context(&mut ctx);
+    }
+
     if let Some(cancellation) = execution_cancellation {
         ctx = ctx.with_execution_cancellation(cancellation);
     }
@@ -166,14 +231,22 @@ pub(super) async fn execute_regular_tool(
         }
     }
 
-    let result = if extension_intercept_prepared {
-        tool_registry
-            .execute_prepared(&call.name, call.arguments.clone(), &ctx)
-            .await
-    } else {
-        tool_registry
-            .execute(&call.name, call.arguments.clone(), &ctx)
-            .await
+    let result = match extension_dispatch {
+        RegistryExtensionDispatch::Standard => {
+            tool_registry
+                .execute(&call.name, call.arguments.clone(), &ctx)
+                .await
+        }
+        RegistryExtensionDispatch::Prepared => {
+            tool_registry
+                .execute_prepared(&call.name, call.arguments.clone(), &ctx)
+                .await
+        }
+        RegistryExtensionDispatch::Disabled => {
+            tool_registry
+                .execute_without_extensions(&call.name, call.arguments.clone(), &ctx)
+                .await
+        }
     }
     .unwrap_or_else(|| {
         ToolResult::error_with_code("unknown_tool", format!("Unknown tool: {}", call.name))

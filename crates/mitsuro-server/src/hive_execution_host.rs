@@ -5,22 +5,26 @@
 //! independently supervised daemon.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use mitsuro_core::ai::models::{ModelKey, ModelLookupError};
+use mitsuro_core::ai::models::{ModelKey, ModelLookupError, ResolvedModelRuntime};
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::{
-    ClaimedHiveRun, DaemonFence, Database, HiveGroupRunContext, HiveRunStore,
+    ClaimedHiveRun, DaemonFence, Database, HiveGroupRunContext, HiveRunExecutionModeV1,
+    HiveRunKind, HiveRunStore, WorkerConversationLane, WorkerRunOrigin,
 };
 use mitsuro_core::tools::registry::PermissionMode;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::AbortHandle;
 
-use mitsuro_core::agent::LoopInput;
+use mitsuro_core::agent::{
+    freeze_worker_model_pricing, LoopInput, WorkerProviderCallGovernor,
+    WorkerProviderGovernorBinding,
+};
 
 use crate::ai_bootstrap::{initialize_models, spawn_model_catalog_refresh};
 use crate::hive_runtime::runner::{run_hive_session_inner, HiveExecutionEventSink};
@@ -81,13 +85,42 @@ pub(crate) struct HiveExecutionSpec {
     pub(crate) model_key: Option<ModelKey>,
     pub(crate) model_catalog_revision: Option<String>,
     pub(crate) crew_slug: Option<String>,
+    pub(crate) worker_id: Option<String>,
     pub(crate) permission_mode: PermissionMode,
     /// Frozen group linkage when this run is one member of a group turn.
     pub(crate) hive_group_run: Option<HiveGroupRunContext>,
+    /// Exact durable Goal/attempt/plan/step binding for Worker Workflow runs.
+    pub(crate) worker_goal: Option<HiveWorkerGoalExecutionSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HiveWorkerGoalExecutionSpec {
+    pub(crate) goal_id: String,
+    pub(crate) goal_revision: u64,
+    pub(crate) workflow_aggregate_revision: u64,
+    pub(crate) attempt_id: String,
+    pub(crate) plan_revision_id: String,
+    pub(crate) plan_revision_number: u64,
+    pub(crate) step_id: String,
+    pub(crate) step_revision: u64,
+    pub(crate) workspace_dir: PathBuf,
+    pub(crate) tool_allowlist: Vec<String>,
 }
 
 impl HiveExecutionSpec {
     fn from_claim(claim: ClaimedHiveRun, daemon_instance_id: String) -> Result<Self> {
+        if claim.run.kind == HiveRunKind::WorkerWorkflowAcceptance
+            || claim.run.execution_context.as_ref().is_some_and(|context| {
+                matches!(
+                    &context.mode,
+                    HiveRunExecutionModeV1::WorkerGoalAcceptance { .. }
+                )
+            })
+        {
+            bail!(
+                "Worker Workflow acceptance is an awaiting-input boundary and cannot be executed"
+            );
+        }
         let session_id = claim
             .run
             .session_id
@@ -110,18 +143,8 @@ impl HiveExecutionSpec {
         if claim.run.objective.trim().is_empty() {
             bail!("claimed Hive run objective is empty");
         }
-        let working_dir = optional_config_path(&claim.run.config, "working_dir")?;
-        let project_dir = optional_config_path(&claim.run.config, "project_dir")?;
-        if working_dir.is_none() && project_dir.is_none() {
-            bail!(
-                "claimed Hive run has no explicit working_dir or project_dir; refusing daemon-default workspace"
-            );
-        }
-        if working_dir.as_ref().is_some_and(|path| !path.is_absolute())
-            || project_dir.as_ref().is_some_and(|path| !path.is_absolute())
-        {
-            bail!("every claimed Hive workspace path must be absolute");
-        }
+        let configured_working_dir = optional_config_path(&claim.run.config, "working_dir")?;
+        let configured_project_dir = optional_config_path(&claim.run.config, "project_dir")?;
         let model = optional_config_string(&claim.run.config, "model")?
             .context("claimed Hive run has no explicit model")?;
         let model_key = optional_config_model_key(&claim.run.config)?;
@@ -134,11 +157,169 @@ impl HiveExecutionSpec {
             bail!("claimed Hive catalog revision has no model key");
         }
         let crew_slug = optional_config_string(&claim.run.config, "crew_slug")?;
+        let configured_worker_id = configured_worker_id(&claim.run.config)?;
         let permission_mode = optional_config_string(&claim.run.config, "permission_mode")?
             .context("claimed Hive run has no explicit permission_mode")?
             .parse::<PermissionMode>()
             .map_err(|error| anyhow::anyhow!("invalid claimed Hive permission_mode: {error}"))?;
         let hive_group_run = optional_config_group_run(&claim.run.config, &claim.run.id)?;
+        let (worker_id, working_dir, project_dir, worker_goal) = match (
+            claim.run.worker_id.as_deref(),
+            claim.run.execution_context.as_ref(),
+        ) {
+            (Some(worker_id), Some(context)) => {
+                context.validate()?;
+                if model_key.is_none() {
+                    bail!("claimed Worker run has no exact model key");
+                }
+                if context.worker_id() != worker_id
+                    || configured_worker_id.as_deref() != Some(worker_id)
+                {
+                    bail!("claimed Worker identity does not match its execution binding");
+                }
+                let governor = claim
+                    .run
+                    .governor
+                    .as_ref()
+                    .context("claimed Worker run has no governor projection")?;
+                if governor.run_id != claim.run.id
+                    || governor.origin.is_none()
+                    || governor.lane_key.as_deref()
+                        != Some(context.lane().canonical_lane_key()?.as_str())
+                {
+                    bail!("claimed Worker governor projection is inconsistent");
+                }
+                validate_worker_run_origin(claim.run.kind, governor.origin.expect("checked"))?;
+                match (context.lane(), hive_group_run.as_ref()) {
+                    (WorkerConversationLane::DirectMessage, None) => {}
+                    (WorkerConversationLane::Group { group_id }, Some(group_run))
+                        if group_run.group_id == *group_id && group_run.worker_id == worker_id => {}
+                    (WorkerConversationLane::DirectMessage, Some(_)) => {
+                        bail!("direct Worker run carries group linkage")
+                    }
+                    (WorkerConversationLane::Group { .. }, None) => {
+                        bail!("group Worker run has no exact group linkage")
+                    }
+                    _ => bail!("claimed Worker group linkage changed"),
+                }
+                let (working_dir, project_dir, worker_goal) = match &context.mode {
+                    HiveRunExecutionModeV1::WorkerConversationNeutral { .. } => {
+                        if claim.run.kind == HiveRunKind::WorkerWorkflow
+                            || claim.run.workflow_goal_id.is_some()
+                            || claim.run.workflow_attempt_id.is_some()
+                        {
+                            bail!("neutral Worker run carries Workflow authority");
+                        }
+                        if configured_working_dir.is_some() || configured_project_dir.is_some() {
+                            bail!("neutral Worker run carries a filesystem workspace");
+                        }
+                        (None, None, None)
+                    }
+                    HiveRunExecutionModeV1::WorkerWorkspaceAttached {
+                        working_dir,
+                        project_dir,
+                        ..
+                    } => {
+                        if claim.run.kind == HiveRunKind::WorkerWorkflow
+                            || claim.run.workflow_goal_id.is_some()
+                            || claim.run.workflow_attempt_id.is_some()
+                        {
+                            bail!("ordinary attached Worker run carries Workflow authority");
+                        }
+                        let frozen_working_dir = PathBuf::from(working_dir);
+                        let frozen_project_dir = project_dir.as_ref().map(PathBuf::from);
+                        if configured_working_dir.as_ref() != Some(&frozen_working_dir)
+                            || configured_project_dir != frozen_project_dir
+                        {
+                            bail!("attached Worker workspace binding changed");
+                        }
+                        (Some(frozen_working_dir), frozen_project_dir, None)
+                    }
+                    HiveRunExecutionModeV1::WorkerGoal {
+                        working_dir,
+                        project_dir,
+                        goal_id,
+                        goal_revision,
+                        workflow_aggregate_revision,
+                        attempt_id,
+                        plan_revision_id,
+                        plan_revision_number,
+                        step_id,
+                        step_revision,
+                        tool_allowlist,
+                        ..
+                    } => {
+                        if claim.run.kind != HiveRunKind::WorkerWorkflow
+                            || claim.run.workflow_goal_id.as_deref() != Some(goal_id.as_str())
+                            || claim.run.workflow_attempt_id.as_deref() != Some(attempt_id.as_str())
+                        {
+                            bail!(
+                                "Worker Workflow run columns disagree with its execution context"
+                            );
+                        }
+                        if hive_group_run.is_some()
+                            || !matches!(context.lane(), WorkerConversationLane::DirectMessage)
+                        {
+                            bail!("Worker Workflow must use its private direct-message lane");
+                        }
+                        let workspace_dir = PathBuf::from(working_dir);
+                        let frozen_project_dir = PathBuf::from(project_dir);
+                        if workspace_dir != frozen_project_dir
+                            || configured_working_dir.as_ref() != Some(&workspace_dir)
+                            || configured_project_dir.as_ref() != Some(&frozen_project_dir)
+                        {
+                            bail!("Worker Workflow workspace binding changed");
+                        }
+                        let goal = HiveWorkerGoalExecutionSpec {
+                            goal_id: goal_id.clone(),
+                            goal_revision: *goal_revision,
+                            workflow_aggregate_revision: *workflow_aggregate_revision,
+                            attempt_id: attempt_id.clone(),
+                            plan_revision_id: plan_revision_id.clone(),
+                            plan_revision_number: *plan_revision_number,
+                            step_id: step_id.clone(),
+                            step_revision: *step_revision,
+                            workspace_dir: workspace_dir.clone(),
+                            tool_allowlist: tool_allowlist.clone(),
+                        };
+                        (Some(workspace_dir), Some(frozen_project_dir), Some(goal))
+                    }
+                    HiveRunExecutionModeV1::WorkerGoalAcceptance { .. } => {
+                        bail!(
+                            "Worker Workflow acceptance is an awaiting-input boundary and cannot be executed"
+                        )
+                    }
+                };
+                (
+                    Some(worker_id.to_string()),
+                    working_dir,
+                    project_dir,
+                    worker_goal,
+                )
+            }
+            (Some(_), None) => bail!("claimed Worker run has no execution context"),
+            (None, Some(_)) => bail!("non-Worker run carries a Worker execution context"),
+            (None, None) => {
+                if claim.run.governor.is_some() || configured_worker_id.is_some() {
+                    bail!("non-Worker run carries Worker execution authority");
+                }
+                if configured_working_dir.is_none() && configured_project_dir.is_none() {
+                    bail!(
+                        "claimed Hive run has no explicit working_dir or project_dir; refusing daemon-default workspace"
+                    );
+                }
+                if configured_working_dir
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
+                    || configured_project_dir
+                        .as_ref()
+                        .is_some_and(|path| !path.is_absolute())
+                {
+                    bail!("every claimed Hive workspace path must be absolute");
+                }
+                (None, configured_working_dir, configured_project_dir, None)
+            }
+        };
         tracing::debug!(
             run_id = %claim.run.id,
             session_id,
@@ -158,8 +339,10 @@ impl HiveExecutionSpec {
             model_key,
             model_catalog_revision,
             crew_slug,
+            worker_id,
             permission_mode,
             hive_group_run,
+            worker_goal,
         })
     }
 
@@ -182,7 +365,7 @@ impl HiveExecutionSpec {
             && self.daemon_instance_id == other.daemon_instance_id
     }
 
-    fn fence(&self) -> DaemonFence {
+    pub(crate) fn fence(&self) -> DaemonFence {
         DaemonFence {
             lease_name: DAEMON_LEASE_NAME.to_string(),
             owner_id: self.daemon_instance_id.clone(),
@@ -193,6 +376,116 @@ impl HiveExecutionSpec {
                 .expect("Hive execution spec was validated with a lease epoch"),
         }
     }
+
+    /// Build the exact run-scoped provider capability from the immutable
+    /// scheduler claim. No mutable Worker/session default participates here.
+    pub(crate) fn worker_provider_governor(
+        &self,
+        database_path: &Path,
+        owner_user_id: Option<&str>,
+        resolved_model: &ResolvedModelRuntime,
+    ) -> Result<Option<Arc<WorkerProviderCallGovernor>>> {
+        let Some(worker_id) = self.worker_id.as_deref() else {
+            return Ok(None);
+        };
+        let context = self
+            .claim
+            .run
+            .execution_context
+            .as_ref()
+            .context("claimed Worker run lost its execution context")?;
+        let governor = self
+            .claim
+            .run
+            .governor
+            .as_ref()
+            .context("claimed Worker run lost its governor projection")?;
+        let origin = governor
+            .origin
+            .context("claimed Worker run has no provider origin")?;
+        let model_key = self
+            .model_key
+            .clone()
+            .context("claimed Worker run has no exact model key")?;
+        let run_lease_epoch = self
+            .claim
+            .run
+            .lease_epoch
+            .context("claimed Worker run has no lease epoch")?;
+        let pricing = freeze_worker_model_pricing(&model_key, resolved_model)?;
+        let capability = WorkerProviderCallGovernor::new(WorkerProviderGovernorBinding {
+            db_path: database_path.to_path_buf(),
+            worker_id: worker_id.to_string(),
+            worker_revision: context.worker_revision(),
+            owner_user_id: owner_user_id.map(ToOwned::to_owned),
+            session_id: self.session_id().to_string(),
+            conversation_lane: context.lane().clone(),
+            run_id: self.run_id().to_string(),
+            run_lease_token: self.claim.lease_token.clone(),
+            run_lease_epoch,
+            model_key,
+            model_catalog_revision: self.model_catalog_revision.clone(),
+            permission_mode: self.permission_mode,
+            origin,
+            workflow_goal_id: self.worker_goal.as_ref().map(|goal| goal.goal_id.clone()),
+            workflow_attempt_id: self
+                .worker_goal
+                .as_ref()
+                .map(|goal| goal.attempt_id.clone()),
+            pricing,
+            override_grant_id: governor.override_grant_id.clone(),
+        })?;
+        Ok(Some(Arc::new(capability)))
+    }
+}
+
+fn configured_worker_id(config: &serde_json::Value) -> Result<Option<String>> {
+    let top_level = optional_config_string(config, "worker_id")?;
+    let group_worker = match config.get("group") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(group)) => match group.get("worker_id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+                Some(value.clone())
+            }
+            Some(_) => bail!("claimed Hive group worker_id is invalid"),
+        },
+        Some(_) => bail!("claimed Hive group linkage must be an object or null"),
+    };
+    if top_level.is_some() && group_worker.is_some() && top_level != group_worker {
+        bail!("claimed Hive Worker mirrors disagree");
+    }
+    Ok(top_level.or(group_worker))
+}
+
+fn validate_worker_run_origin(kind: HiveRunKind, origin: WorkerRunOrigin) -> Result<()> {
+    let valid = match kind {
+        HiveRunKind::WorkerConversation => origin == WorkerRunOrigin::UserDm,
+        HiveRunKind::WorkerIntroduction | HiveRunKind::WorkerIntroductionReview => {
+            origin == WorkerRunOrigin::UserLifecycleAction
+        }
+        HiveRunKind::GroupTurn => {
+            matches!(
+                origin,
+                WorkerRunOrigin::UserGroup | WorkerRunOrigin::ScheduledGroup
+            )
+        }
+        HiveRunKind::WorkerHeartbeat => origin == WorkerRunOrigin::Heartbeat,
+        HiveRunKind::WorkerMessage => origin == WorkerRunOrigin::WorkerPeer,
+        HiveRunKind::Scheduled => origin == WorkerRunOrigin::Scheduled,
+        HiveRunKind::WorkerWorkflow => matches!(
+            origin,
+            WorkerRunOrigin::UserWorkflowActivation | WorkerRunOrigin::WorkflowRollover
+        ),
+        // Acceptance is provider-free and must never reach execution-host
+        // origin validation, even if a corrupt caller manufactures a claim.
+        HiveRunKind::WorkerWorkflowAcceptance => false,
+        _ => false,
+    };
+    if !valid {
+        bail!("claimed Worker run has an invalid governor origin for its kind");
+    }
+    Ok(())
 }
 
 fn optional_config_path(config: &serde_json::Value, key: &str) -> Result<Option<PathBuf>> {
@@ -718,14 +1011,19 @@ pub(crate) async fn validate_execution_spec(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use chrono::Utc;
     use mitsuro_core::agent::LoopInput;
-    use mitsuro_core::ai::models::{ApiFormat, ModelAuthScope};
+    use mitsuro_core::ai::models::{ApiFormat, ModelAuthScope, ModelCatalogSource, ModelMetadata};
     use mitsuro_core::ai::providers::ProviderId;
     use mitsuro_core::ai::types::Content;
     use mitsuro_core::hive::HiveRunStatus;
     use mitsuro_core::storage::credentials::CredentialStore;
-    use mitsuro_core::storage::{ClaimedHiveRun, HiveRun, HiveRunKind};
+    use mitsuro_core::storage::{
+        ClaimedHiveRun, HiveRun, HiveRunExecutionContextV1, HiveRunKind, WorkerConversationLane,
+        WorkerRunGovernorProjection, WorkerRunOrigin, WorkspaceMode,
+    };
     use mitsuro_core::tools::registry::PermissionMode;
 
     use super::{
@@ -757,6 +1055,16 @@ mod tests {
             session_id: Some("session-1".into()),
             schedule_id: None,
             occurrence_id: None,
+            worker_id: None,
+            objective_message_id: None,
+            execution_context: None,
+            conversation_through_message_id: None,
+            response_message_id: None,
+            response_provider_call_id: None,
+            response_group_message_id: None,
+            workflow_goal_id: None,
+            workflow_attempt_id: None,
+            governor: None,
             kind: HiveRunKind::Dispatch,
             objective: "ship it".into(),
             config,
@@ -805,6 +1113,16 @@ mod tests {
             session_id: Some("session-1".into()),
             schedule_id: None,
             occurrence_id: None,
+            worker_id: None,
+            objective_message_id: None,
+            execution_context: None,
+            conversation_through_message_id: None,
+            response_message_id: None,
+            response_provider_call_id: None,
+            response_group_message_id: None,
+            workflow_goal_id: None,
+            workflow_attempt_id: None,
+            governor: None,
             kind: HiveRunKind::Scheduled,
             objective: "ship it".into(),
             config: serde_json::json!({
@@ -900,6 +1218,16 @@ mod tests {
             session_id: Some("session-1".into()),
             schedule_id: None,
             occurrence_id: None,
+            worker_id: None,
+            objective_message_id: None,
+            execution_context: None,
+            conversation_through_message_id: None,
+            response_message_id: None,
+            response_provider_call_id: None,
+            response_group_message_id: None,
+            workflow_goal_id: None,
+            workflow_attempt_id: None,
+            governor: None,
             kind: HiveRunKind::Scheduled,
             objective: "ship it".into(),
             config: serde_json::json!({
@@ -952,6 +1280,258 @@ mod tests {
     }
 
     #[test]
+    fn neutral_worker_claim_allows_no_workspace_and_rejects_path_leakage() {
+        let mut claim = claimed_run_for_test(
+            "worker-neutral",
+            serde_json::json!({
+                "worker_id": "worker-1",
+                "model": "grok-4.5",
+                "model_key": {
+                    "provider": "grok",
+                    "model_id": "grok-4.5",
+                    "auth_scope": "oauth",
+                    "api_format": "open_ai_responses"
+                },
+                "model_catalog_revision": "catalog-priced",
+                "permission_mode": "supervised"
+            }),
+        );
+        claim.run.kind = HiveRunKind::WorkerConversation;
+        claim.run.worker_id = Some("worker-1".into());
+        claim.run.execution_context = Some(
+            HiveRunExecutionContextV1::worker_conversation_neutral(
+                "worker-1",
+                3,
+                WorkerConversationLane::DirectMessage,
+            )
+            .expect("neutral context"),
+        );
+        claim.run.governor = Some(WorkerRunGovernorProjection {
+            run_id: claim.run.id.clone(),
+            origin: Some(WorkerRunOrigin::UserDm),
+            lane_key: Some("dm".into()),
+            gate_reason: None,
+            next_eligible_at: None,
+            policy_revision: Some(1),
+            override_grant_id: None,
+        });
+        let spec = HiveExecutionSpec::from_claim(claim.clone(), "daemon:boot:one".into())
+            .expect("neutral Worker claim");
+        assert!(spec.working_dir.is_none());
+        assert!(spec.project_dir.is_none());
+        assert_eq!(spec.worker_id.as_deref(), Some("worker-1"));
+        let mut metadata = ModelMetadata::new("grok-4.5", "Grok 4.5", ProviderId::Grok)
+            .with_transport(ApiFormat::OpenAIResponses)
+            .with_catalog_provenance(
+                ModelCatalogSource::LiveDynamic,
+                Some("catalog-priced".into()),
+            );
+        metadata.auth_scope = Some(ModelAuthScope::OAuth);
+        metadata.input_price = Some(1.25);
+        metadata.output_price = Some(2.5);
+        let resolved_model = metadata.resolve_runtime();
+        let provider_governor = spec
+            .worker_provider_governor(
+                Path::new("/tmp/mitsuro-worker-runtime.db"),
+                Some("alice"),
+                &resolved_model,
+            )
+            .expect("exact provider governor")
+            .expect("Worker provider governor");
+        assert_eq!(provider_governor.binding().worker_id, "worker-1");
+        assert_eq!(provider_governor.binding().worker_revision, 3);
+        assert_eq!(provider_governor.binding().run_id, "worker-neutral");
+        assert_eq!(
+            provider_governor.binding().conversation_lane,
+            WorkerConversationLane::DirectMessage
+        );
+        assert_eq!(provider_governor.binding().origin, WorkerRunOrigin::UserDm);
+        let pricing = provider_governor
+            .binding()
+            .pricing
+            .as_ref()
+            .expect("known exact catalog prices must be frozen");
+        assert_eq!(pricing.currency.as_deref(), Some("USD"));
+        assert_eq!(pricing.input_microunits_per_million, Some(1_250_000));
+        assert_eq!(pricing.output_microunits_per_million, Some(2_500_000));
+        assert_eq!(pricing.catalog_source, "live_dynamic");
+        assert_eq!(pricing.catalog_revision.as_deref(), Some("catalog-priced"));
+
+        let mut unknown_runtime = resolved_model.clone();
+        unknown_runtime.input_price = None;
+        unknown_runtime.output_price = None;
+        let unknown_governor = spec
+            .worker_provider_governor(
+                Path::new("/tmp/mitsuro-worker-runtime.db"),
+                Some("alice"),
+                &unknown_runtime,
+            )
+            .expect("unknown pricing is a valid exact model runtime")
+            .expect("Worker provider governor");
+        assert!(unknown_governor.binding().pricing.is_none());
+
+        let mut refreshed_runtime = resolved_model.clone();
+        refreshed_runtime.catalog_revision = Some("catalog-refreshed".into());
+        refreshed_runtime.input_price = Some(3.0);
+        let refreshed_governor = spec
+            .worker_provider_governor(
+                Path::new("/tmp/mitsuro-worker-runtime.db"),
+                Some("alice"),
+                &refreshed_runtime,
+            )
+            .expect("an unrelated catalog refresh must not brick the exact model key")
+            .expect("Worker provider governor");
+        assert_eq!(
+            refreshed_governor
+                .binding()
+                .model_catalog_revision
+                .as_deref(),
+            Some("catalog-priced")
+        );
+        let refreshed_pricing = refreshed_governor
+            .binding()
+            .pricing
+            .as_ref()
+            .expect("refreshed exact row retains known pricing");
+        assert_eq!(
+            refreshed_pricing.catalog_revision.as_deref(),
+            Some("catalog-refreshed")
+        );
+        assert_eq!(
+            refreshed_pricing.input_microunits_per_million,
+            Some(3_000_000)
+        );
+
+        let mut wrong_model_runtime = resolved_model;
+        wrong_model_runtime.key.model_id = "other-model".into();
+        wrong_model_runtime.wire_model_id = "other-model".into();
+        let error = spec
+            .worker_provider_governor(
+                Path::new("/tmp/mitsuro-worker-runtime.db"),
+                Some("alice"),
+                &wrong_model_runtime,
+            )
+            .expect_err("cross-model pricing must fail closed");
+        assert!(error.to_string().contains("durable model key"));
+
+        let mut missing_key = claim.clone();
+        missing_key
+            .run
+            .config
+            .as_object_mut()
+            .expect("object config")
+            .remove("model_key");
+        missing_key
+            .run
+            .config
+            .as_object_mut()
+            .expect("object config")
+            .remove("model_catalog_revision");
+        let error = HiveExecutionSpec::from_claim(missing_key, "daemon:boot:one".into())
+            .expect_err("Worker execution must not resolve a legacy model key");
+        assert!(error.to_string().contains("no exact model key"));
+
+        claim.run.config["working_dir"] = serde_json::json!("/daemon/cwd");
+        let error = HiveExecutionSpec::from_claim(claim, "daemon:boot:one".into())
+            .expect_err("neutral Worker must reject workspace leakage");
+        assert!(error.to_string().contains("carries a filesystem workspace"));
+    }
+
+    #[test]
+    fn worker_goal_claim_freezes_exact_goal_workspace_and_governor_authority() {
+        let mut claim = claimed_run_for_test(
+            "worker-goal",
+            serde_json::json!({
+                "worker_id": "worker-1",
+                "working_dir": "/claimed/work",
+                "project_dir": "/claimed/work",
+                "model": "grok-4.5",
+                "model_key": {
+                    "provider": "grok",
+                    "model_id": "grok-4.5",
+                    "auth_scope": "oauth",
+                    "api_format": "open_ai_responses"
+                },
+                "permission_mode": "supervised"
+            }),
+        );
+        claim.run.kind = HiveRunKind::WorkerWorkflow;
+        claim.run.worker_id = Some("worker-1".into());
+        claim.run.workflow_goal_id = Some("goal-1".into());
+        claim.run.workflow_attempt_id = Some("workflow-attempt-1".into());
+        claim.run.execution_context = Some(
+            HiveRunExecutionContextV1::worker_goal(
+                "worker-1",
+                7,
+                WorkspaceMode::Selected,
+                "/claimed/work",
+                "/claimed/work",
+                "goal-1",
+                11,
+                11,
+                "workflow-attempt-1",
+                "plan-1",
+                3,
+                "step-1",
+                5,
+                vec!["read".into(), "apply_patch".into()],
+            )
+            .expect("Worker Goal context"),
+        );
+        claim.run.governor = Some(WorkerRunGovernorProjection {
+            run_id: claim.run.id.clone(),
+            origin: Some(WorkerRunOrigin::UserWorkflowActivation),
+            lane_key: Some("dm".into()),
+            gate_reason: None,
+            next_eligible_at: None,
+            policy_revision: Some(2),
+            override_grant_id: None,
+        });
+
+        let spec = HiveExecutionSpec::from_claim(claim.clone(), "daemon:boot:one".into())
+            .expect("exact Worker Goal claim");
+        let goal = spec.worker_goal.expect("Goal authority");
+        assert_eq!(goal.goal_id, "goal-1");
+        assert_eq!(goal.attempt_id, "workflow-attempt-1");
+        assert_eq!(goal.workspace_dir, Path::new("/claimed/work"));
+        assert_eq!(
+            goal.tool_allowlist,
+            vec!["read".to_string(), "apply_patch".to_string()]
+        );
+
+        let mut mismatched = claim.clone();
+        mismatched.run.workflow_goal_id = Some("other-goal".into());
+        let error = HiveExecutionSpec::from_claim(mismatched, "daemon:boot:one".into())
+            .expect_err("Goal column drift must fail closed");
+        assert!(error.to_string().contains("columns disagree"));
+
+        claim.run.governor.as_mut().expect("governor").origin = Some(WorkerRunOrigin::Heartbeat);
+        let error = HiveExecutionSpec::from_claim(claim, "daemon:boot:one".into())
+            .expect_err("Worker Goal must reject an unrelated origin");
+        assert!(error.to_string().contains("invalid governor origin"));
+    }
+
+    #[test]
+    fn worker_goal_acceptance_claim_is_rejected_before_host_execution() {
+        let mut claim = claimed_run_for_test(
+            "worker-goal-acceptance",
+            serde_json::json!({
+                "working_dir": "/claimed/work",
+                "project_dir": "/claimed/work",
+                "model": "grok-4.5",
+                "permission_mode": "supervised"
+            }),
+        );
+        claim.run.kind = HiveRunKind::WorkerWorkflowAcceptance;
+
+        let error = HiveExecutionSpec::from_claim(claim, "daemon:boot:one".into())
+            .expect_err("awaiting-input acceptance must never become a hosted execution");
+        assert!(error
+            .to_string()
+            .contains("awaiting-input boundary and cannot be executed"));
+    }
+
+    #[test]
     fn claimed_execution_without_model_fails_closed() {
         let run = HiveRun {
             id: "run-no-model".into(),
@@ -959,6 +1539,16 @@ mod tests {
             session_id: Some("session-1".into()),
             schedule_id: None,
             occurrence_id: None,
+            worker_id: None,
+            objective_message_id: None,
+            execution_context: None,
+            conversation_through_message_id: None,
+            response_message_id: None,
+            response_provider_call_id: None,
+            response_group_message_id: None,
+            workflow_goal_id: None,
+            workflow_attempt_id: None,
+            governor: None,
             kind: HiveRunKind::Dispatch,
             objective: "ship it".into(),
             config: serde_json::json!({
@@ -1027,6 +1617,16 @@ mod tests {
             session_id: Some("session-1".into()),
             schedule_id: None,
             occurrence_id: None,
+            worker_id: None,
+            objective_message_id: None,
+            execution_context: None,
+            conversation_through_message_id: None,
+            response_message_id: None,
+            response_provider_call_id: None,
+            response_group_message_id: None,
+            workflow_goal_id: None,
+            workflow_attempt_id: None,
+            governor: None,
             kind: HiveRunKind::Dispatch,
             objective: "ship it".into(),
             config: serde_json::json!({

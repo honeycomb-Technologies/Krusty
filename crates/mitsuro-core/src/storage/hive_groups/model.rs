@@ -110,8 +110,10 @@ pub struct NewHiveGroup {
     pub member_worker_ids: Vec<String>,
 }
 
-/// Full overwrite of the editable policy surface of a group. Membership is
-/// updated through `set_members`; status through `set_status`.
+/// Full overwrite of the editable policy surface of a group. Membership may
+/// be replaced atomically with these settings through
+/// `HiveGroupStore::update_settings_and_members`; status is updated through
+/// `set_status`.
 #[derive(Debug, Clone)]
 pub struct HiveGroupUpdate {
     pub title: String,

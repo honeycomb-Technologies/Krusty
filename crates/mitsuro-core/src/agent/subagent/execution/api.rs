@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::time::Instant;
 use tracing::info;
 
-use crate::ai::client::AiClient;
+use crate::ai::client::{AiClient, RemoteAttemptPolicy};
 use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::{AiTool, ModelMessage, Usage};
 use crate::ai::usage::{
@@ -23,6 +23,7 @@ pub(super) async fn call_subagent_api(
     reasoning_effort: Option<ReasoningEffort>,
     session_id: &str,
     prompt_cache_key: Option<&str>,
+    attempt_policy: RemoteAttemptPolicy,
 ) -> Result<Value, SubAgentApiError> {
     info!(
         model = model,
@@ -32,7 +33,7 @@ pub(super) async fn call_subagent_api(
     let start = Instant::now();
 
     let result = client
-        .call_with_tools_at_reasoning(
+        .call_with_tools_at_reasoning_and_attempt_policy(
             model,
             system,
             messages,
@@ -41,6 +42,7 @@ pub(super) async fn call_subagent_api(
             reasoning_effort,
             Some(session_id),
             prompt_cache_key,
+            attempt_policy,
         )
         .await
         .map_err(SubAgentApiError::from);

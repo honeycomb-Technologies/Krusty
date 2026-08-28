@@ -6,14 +6,15 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
-use crate::ai::client::{AiClient, SimpleCallResult};
+use crate::ai::client::{AiClient, RemoteAttemptPolicy, SimpleCallResult};
 use crate::storage::{
-    Database, LearningCandidateInput, LearningCandidateStatus, LearningCandidateStore,
-    MemoryNamespace, MemoryStore, MessageStore, SessionManager, SessionType,
+    resolve_worker_conversation_with_conn, Database, HiveWorkerIntroductionStore,
+    LearningCandidateInput, LearningCandidateStatus, LearningCandidateStore, MemoryStore,
+    MessageStore, SessionManager, SessionType,
 };
 
 use super::policy::auto_promotion_key_allowed;
-use super::promotion::canonical_input_for_candidate;
+use super::promotion::{canonical_input_for_candidate, validate_candidate_memory_scope};
 use super::transcript::LearningTranscript;
 use super::{
     LearningDecision, LearningPolicy, LearningProposal, LearningReviewerOutput, LearningScope,
@@ -52,6 +53,7 @@ pub struct PostTurnLearningReviewRequest {
     session_id: String,
     ai_client: Arc<AiClient>,
     model: String,
+    provider_governor: Option<Arc<crate::agent::WorkerProviderCallGovernor>>,
 }
 
 impl PostTurnLearningReviewRequest {
@@ -66,7 +68,16 @@ impl PostTurnLearningReviewRequest {
             session_id: session_id.into(),
             ai_client,
             model: model.into(),
+            provider_governor: None,
         }
+    }
+
+    pub fn with_provider_governor(
+        mut self,
+        provider_governor: Option<Arc<crate::agent::WorkerProviderCallGovernor>>,
+    ) -> Self {
+        self.provider_governor = provider_governor;
+        self
     }
 }
 
@@ -105,23 +116,80 @@ struct AiLearningReviewModel {
 #[async_trait]
 impl LearningReviewModel for AiLearningReviewModel {
     async fn review(&self, system_prompt: &str, user_prompt: &str) -> Result<SimpleCallResult> {
+        let permit = if let Some(governor) = self.trace.provider_governor() {
+            let slot = crate::agent::WorkerProviderCallSlot::child(
+                crate::agent::WorkerProviderCallKind::PostTurnLearningReview,
+                u32::try_from(self.trace.turn()).unwrap_or(u32::MAX),
+                0,
+                "post-turn-learning-review",
+            )?;
+            let reservation = crate::agent::conservative_text_token_reservation(
+                &[system_prompt, user_prompt],
+                REVIEW_MAX_TOKENS,
+            );
+            match governor.admit(slot, reservation)? {
+                crate::agent::WorkerProviderAdmission::Allowed(permit) => Some(permit),
+                crate::agent::WorkerProviderAdmission::Gated(decision) => bail!(
+                    "Hive Worker learning review gated: {}",
+                    serde_json::to_string(&decision)?
+                ),
+                crate::agent::WorkerProviderAdmission::AlreadyStarted(call) => bail!(
+                    "Hive Worker learning review call {} was already Started and was not replayed",
+                    call.provider_call_id
+                ),
+            }
+        } else {
+            None
+        };
+        let provider_call_id = permit
+            .as_ref()
+            .map(|permit| permit.provider_call_id().to_string());
         let started_at = Instant::now();
         // `call_simple_with_usage` has no tool schema or conversation/cache
         // handle. The restricted reviewer therefore cannot execute tools or
         // mutate the parent provider conversation.
         let result = self
             .ai_client
-            .call_simple_with_usage(&self.model, system_prompt, user_prompt, REVIEW_MAX_TOKENS)
-            .await;
-        self.trace
-            .record_simple_call(
-                "hive_post_turn_learning_review",
-                self.ai_client.provider_id(),
+            .call_simple_with_usage_and_attempt_policy(
                 &self.model,
-                started_at,
-                &result,
+                system_prompt,
+                user_prompt,
+                REVIEW_MAX_TOKENS,
+                if permit.is_some() {
+                    RemoteAttemptPolicy::GovernedSingleAttempt
+                } else {
+                    RemoteAttemptPolicy::ConfiguredRetries
+                },
             )
             .await;
+        if let Some(provider_call_id) = provider_call_id {
+            self.trace
+                .record_simple_call_with_id(
+                    provider_call_id,
+                    "hive_post_turn_learning_review",
+                    self.ai_client.provider_id(),
+                    &self.model,
+                    started_at,
+                    &result,
+                )
+                .await;
+        } else {
+            self.trace
+                .record_simple_call(
+                    "hive_post_turn_learning_review",
+                    self.ai_client.provider_id(),
+                    &self.model,
+                    started_at,
+                    &result,
+                )
+                .await;
+        }
+        if let (Some(permit), Ok(response)) = (permit.as_ref(), result.as_ref()) {
+            permit.complete(crate::agent::WorkerProviderCompletion::acknowledged(
+                crate::agent::WorkerProviderTerminalOutcome::Completed,
+                response.usage.clone(),
+            ))?;
+        }
         result
     }
 }
@@ -138,7 +206,8 @@ pub async fn review_latest_completed_hive_turn(
         request.db_path.clone(),
         request.session_id.clone(),
         0,
-    );
+    )
+    .with_provider_governor(request.provider_governor);
     let backend = AiLearningReviewModel {
         ai_client: request.ai_client,
         model: request.model.clone(),
@@ -198,6 +267,20 @@ fn prepare_review(
         .ok_or_else(|| anyhow::anyhow!("learning review session not found"))?;
     if session.session_type != SessionType::Hive {
         bail!("post-turn learning is restricted to Hive sessions");
+    }
+
+    // A new Worker's setup conversation has its own reviewed-proposal
+    // contract. Until the user confirms that proposal (or explicitly skips
+    // setup), ordinary post-turn learning must not turn the first reply into
+    // durable memory behind the review UI. Enforce this at the storage trust
+    // boundary so stale or non-UI callers cannot bypass it.
+    if let Some(binding) = resolve_worker_conversation_with_conn(db.conn(), &session_id)? {
+        if HiveWorkerIntroductionStore::new(&db)
+            .get_by_worker(&binding.worker.id)?
+            .is_some_and(|introduction| !introduction.status.allows_autonomy())
+        {
+            return Ok(None);
+        }
     }
 
     let records = MessageStore::new(&db).load_session_message_records(&session_id)?;
@@ -322,12 +405,13 @@ fn persist_proposals(
                 outcome.auto_promoted += 1;
             }
             LearningCandidateStatus::Tombstoned => {
+                validate_candidate_memory_scope(&candidate)?;
                 memory_store.tombstone_canonical_for_owner(
                     &candidate.canonical_key,
                     candidate.project_dir.as_deref(),
                     candidate.user_id.as_deref(),
-                    MemoryNamespace::Shared,
-                    None,
+                    candidate.memory_namespace,
+                    candidate.memory_namespace_id.as_deref(),
                 )?;
                 outcome.tombstoned += 1;
             }
@@ -355,9 +439,9 @@ mod tests {
 
     use super::{review_latest_with_model, LearningReviewModel, SimpleCallResult, MAX_PROPOSALS};
     use crate::storage::{
-        CanonicalMemoryInput, Database, LearningCandidateStatus, LearningCandidateStore,
-        MemorySource, MemoryStore, MemoryType, MessageStore, SessionManager, SessionType,
-        WorkspaceMode,
+        CanonicalMemoryInput, Database, HiveMemoryReader, HiveWorkerStore, LearningCandidateStatus,
+        LearningCandidateStore, MemoryAclScope, MemoryNamespace, MemorySource, MemoryStore,
+        MemoryType, MessageStore, NewHiveWorker, SessionManager, SessionType, WorkspaceMode,
     };
 
     struct FakeReviewModel {
@@ -542,6 +626,128 @@ mod tests {
             memory.source_message_id.as_deref(),
             Some(fixture.user_message_id.to_string().as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn worker_explicit_learning_auto_promotes_only_to_its_private_namespace() {
+        let fixture = fixture("Please keep Worker updates concise.", None);
+        let worker = HiveWorkerStore::new(Database::new(&fixture.db_path).unwrap())
+            .create(&NewHiveWorker {
+                user_id: Some("alice".into()),
+                dm_session_id: Some(fixture.session_id.clone()),
+                memory_namespace_id: Some("stable-worker-a".into()),
+                ..NewHiveWorker::new("worker-a")
+            })
+            .unwrap();
+        let output = proposal_json(
+            &fixture,
+            "user_preference",
+            "user",
+            "preference.worker_updates",
+            "The user prefers concise Worker updates.",
+            "Please keep Worker updates concise.",
+            true,
+            0.99,
+            "normal",
+        );
+        let outcome = run(&fixture, &FakeReviewModel::from_texts([output]))
+            .await
+            .unwrap();
+        assert_eq!(outcome.auto_promoted, 1);
+
+        let store = MemoryStore::new(Database::new(&fixture.db_path).unwrap());
+        let memory = store
+            .list(None, Some("alice"))
+            .into_iter()
+            .find(|memory| memory.canonical_key.as_deref() == Some("preference.worker_updates"))
+            .unwrap();
+        assert_eq!(memory.namespace, MemoryNamespace::Crew);
+        assert_eq!(memory.namespace_id.as_deref(), Some("stable-worker-a"));
+        assert_eq!(memory.acl_scope, MemoryAclScope::Worker);
+        assert!(store
+            .list_for_standard_reader(None, Some("alice"))
+            .iter()
+            .all(|candidate| candidate.id != memory.id));
+
+        let worker_a_reader = HiveMemoryReader {
+            user_id: Some("alice"),
+            worker_namespace_id: Some("stable-worker-a"),
+            conversation_id: Some(&fixture.session_id),
+            ..HiveMemoryReader::default()
+        };
+        let worker_b_reader = HiveMemoryReader {
+            user_id: Some("alice"),
+            worker_namespace_id: Some("stable-worker-b"),
+            conversation_id: Some("worker-b-dm"),
+            ..HiveMemoryReader::default()
+        };
+        assert!(store
+            .list_for_hive_reader(&worker_a_reader)
+            .contains(&memory));
+        assert!(!store
+            .list_for_hive_reader(&worker_b_reader)
+            .contains(&memory));
+
+        let candidate = LearningCandidateStore::new(&Database::new(&fixture.db_path).unwrap())
+            .list(Some("alice"), None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.canonical_key == "preference.worker_updates")
+            .unwrap();
+        assert_eq!(candidate.memory_namespace, MemoryNamespace::Crew);
+        assert_eq!(
+            candidate.memory_namespace_id.as_deref(),
+            Some("stable-worker-a")
+        );
+        assert_eq!(candidate.memory_acl_scope, MemoryAclScope::Worker);
+        assert!(candidate.memory_scope_resolved);
+        assert_eq!(worker.memory_namespace_id, "stable-worker-a");
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_worker_introduction_cannot_auto_promote_first_reply() {
+        let fixture = fixture("Please always use terse progress updates.", None);
+        let db = Database::new(&fixture.db_path).unwrap();
+        let worker = HiveWorkerStore::new(Database::new(&fixture.db_path).unwrap())
+            .create(&NewHiveWorker {
+                user_id: Some("alice".into()),
+                dm_session_id: Some(fixture.session_id.clone()),
+                memory_namespace_id: Some("introduction-worker".into()),
+                ..NewHiveWorker::new("introduction-worker")
+            })
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO hive_worker_introductions (
+                    worker_id, run_id, status, prompt_version, created_at, updated_at
+                 ) VALUES (?1, NULL, 'awaiting_context', 1, ?2, ?2)",
+                (&worker.id, "2026-08-24T00:00:00Z"),
+            )
+            .unwrap();
+        let output = proposal_json(
+            &fixture,
+            "user_preference",
+            "user",
+            "preference.progress_updates",
+            "The user prefers terse progress updates.",
+            "Please always use terse progress updates.",
+            true,
+            0.99,
+            "normal",
+        );
+        let backend = FakeReviewModel::from_texts([output]);
+
+        let outcome = run(&fixture, &backend).await.unwrap();
+        assert!(outcome.skipped);
+        assert!(!outcome.provider_called);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        assert!(LearningCandidateStore::new(&db)
+            .list(Some("alice"), None, 10)
+            .unwrap()
+            .is_empty());
+        assert!(MemoryStore::new(Database::new(&fixture.db_path).unwrap())
+            .list(None, Some("alice"))
+            .is_empty());
     }
 
     #[tokio::test]

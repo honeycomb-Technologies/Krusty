@@ -1,12 +1,12 @@
-import { colors } from '@mitsuro/ui';
+import { colors } from "@mitsuro/ui";
 import {
   createRef,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -15,8 +15,8 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  View,
   useWindowDimensions,
+  View,
 } from "react-native";
 import Animated, {
   Easing,
@@ -44,9 +44,9 @@ import {
   FolderPlus,
   FolderTree,
   List,
-  Plus,
   Pin,
   PinOff,
+  Plus,
   Rows3,
   Settings,
   SquarePlus,
@@ -75,19 +75,20 @@ import {
   workerInitials,
   workerMetaLine,
 } from "../hive/workerAppearance";
+import { createWorkerDmNavigationFence } from "../hive/workerDmNavigationFence";
 import { AppBottomSheet } from "../sheets/AppBottomSheet";
 import {
   applySessionListOverrides,
   archivedSessions as archivedSessionsForType,
   chronologicalSessions,
-  chronologicalThreadDayGroups,
-  type SessionListOverride,
   type ChronologicalThreadDayGroup,
-  type CodeProjectThreadGroup,
-  type CodeThreadView,
+  chronologicalThreadDayGroups,
   codeDirectoryToAutoExpand,
+  type CodeProjectThreadGroup,
   codeProjectThreadGroups,
+  type CodeThreadView,
   formatThreadMetric,
+  type SessionListOverride,
   sessionModelLabel,
   sessionProjectDirectory,
   sessionProviderKey,
@@ -95,8 +96,25 @@ import {
   sessionStateLabel,
   type ThreadDensity,
 } from "../navigation/threadSections";
+import { HIVE_PRIMARY_NAV_ITEMS, type HiveDrawerItem } from "./hiveDrawerItems";
+import type { HiveTopLevelView } from "../hive/types";
+import {
+  genericSessionDeleteDisposition,
+  type HiveSessionBindingKind,
+} from "../chat-screen/hiveSessionDeleteFence";
 
 const THREAD_DENSITY_STORAGE_KEY = "mitsuro.thread-list-density.v1";
+const EMPTY_HIVE_SESSION_BINDING_KINDS: Readonly<
+  Record<string, HiveSessionBindingKind>
+> = {};
+
+type ConnectionClient = ReturnType<typeof useConnection>["client"];
+
+interface HiveSessionBindingSnapshot {
+  client: ConnectionClient;
+  scopeKey: string;
+  kinds: Record<string, HiveSessionBindingKind>;
+}
 
 interface ProjectActivity {
   branch: string | null;
@@ -124,16 +142,17 @@ type ChatListItem =
   | ArchiveListItem;
 
 type HiveListItem =
+  | { kind: "management"; destination: HiveDrawerItem }
   | { kind: "workers-header"; count: number }
   | { kind: "worker"; worker: HiveWorker }
   | { kind: "groups-header"; count: number }
   | { kind: "group"; group: HiveGroup }
   | { kind: "threads-header" }
   | {
-      kind: "hive-session";
-      session: SessionResponse;
-      summary?: HiveSessionSummary;
-    }
+    kind: "hive-session";
+    session: SessionResponse;
+    summary?: HiveSessionSummary;
+  }
   | { kind: "active-empty"; label: string }
   | ArchiveListItem;
 
@@ -144,11 +163,14 @@ interface SessionDrawerProps {
   activeSessionId: string | null;
   onSelectSession: (session: SessionResponse) => void;
   onSelectHiveSession: (sessionId: string) => void;
+  activeHiveView?: HiveTopLevelView;
+  onSelectHiveView?: (view: HiveTopLevelView) => void;
   onNewSession: (type: "chat" | "code") => void;
   onNewHiveSession: () => void;
   onNewSessionWithDir: (path: string) => void;
   onDeleteSession: (
     id: string,
+    sessionType: SessionType,
     onDeleted?: () => void,
     onFailed?: () => void,
   ) => void;
@@ -234,6 +256,8 @@ export function SessionDrawer({
   activeSessionId,
   onSelectSession,
   onSelectHiveSession,
+  activeHiveView,
+  onSelectHiveView,
   onNewSession,
   onNewHiveSession,
   onNewSessionWithDir,
@@ -251,18 +275,25 @@ export function SessionDrawer({
   const { height: windowHeight } = useWindowDimensions();
   const t = theme.colors;
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [expandedRecentDays, setExpandedRecentDays] =
-    useState<Set<string>>(new Set());
+  const [expandedRecentDays, setExpandedRecentDays] = useState<Set<string>>(
+    new Set(),
+  );
   const [codeView, setCodeView] = useState<CodeThreadView>("projects");
-  const [threadDensity, setThreadDensity] =
-    useState<ThreadDensity>("comfortable");
-  const [archiveExpandedMode, setArchiveExpandedMode] =
-    useState<SessionType | null>(null);
-  const [archivedThreadSessions, setArchivedThreadSessions] = useState<SessionResponse[]>([]);
+  const [threadDensity, setThreadDensity] = useState<ThreadDensity>(
+    "comfortable",
+  );
+  const [archiveExpandedMode, setArchiveExpandedMode] = useState<
+    SessionType | null
+  >(null);
+  const [archivedThreadSessions, setArchivedThreadSessions] = useState<
+    SessionResponse[]
+  >([]);
   const [sessionOverrides, setSessionOverrides] = useState<
     Record<string, SessionListOverride>
   >({});
-  const [optimisticSessions, setOptimisticSessions] = useState<SessionResponse[]>([]);
+  const [optimisticSessions, setOptimisticSessions] = useState<
+    SessionResponse[]
+  >([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [projectActivity, setProjectActivity] = useState<
     Record<string, ProjectActivity | null>
@@ -280,9 +311,15 @@ export function SessionDrawer({
   const [hiveSessions, setHiveSessions] = useState<HiveSessionSummary[]>([]);
   const [hiveWorkers, setHiveWorkers] = useState<HiveWorker[]>([]);
   const [hiveGroups, setHiveGroups] = useState<HiveGroup[]>([]);
+  const [hiveSessionBindingSnapshot, setHiveSessionBindingSnapshot] = useState<
+    HiveSessionBindingSnapshot
+  >({ client: null, scopeKey: "", kinds: {} });
   // The room mounts only while open; closing tears down its event tail.
   const [openGroupRoomId, setOpenGroupRoomId] = useState<string | null>(null);
   const openingWorkerIdRef = useRef<string | null>(null);
+  const workerDmNavigationFenceRef = useRef(
+    createWorkerDmNavigationFence(),
+  );
 
   const pickerProgress = useSharedValue(0);
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -305,8 +342,28 @@ export function SessionDrawer({
   const pickerHeight = Math.max(300, Math.round(windowHeight * 0.58));
   const archiveExpanded = archiveExpandedMode === activeMode;
 
+  useEffect(() => {
+    const fence = workerDmNavigationFenceRef.current;
+    fence.mount();
+    return () => fence.unmount();
+  }, []);
+
+  const invalidateWorkerDmNavigation = useCallback(() => {
+    workerDmNavigationFenceRef.current.invalidate();
+  }, []);
+
+  useEffect(() => {
+    invalidateWorkerDmNavigation();
+  }, [activeMode, client, invalidateWorkerDmNavigation, isOpen]);
+
+  const closeDrawer = useCallback(() => {
+    invalidateWorkerDmNavigation();
+    onClose();
+  }, [invalidateWorkerDmNavigation, onClose]);
+
   const displaySessions = useMemo(
-    () => applySessionListOverrides(sessions, sessionOverrides, optimisticSessions),
+    () =>
+      applySessionListOverrides(sessions, sessionOverrides, optimisticSessions),
     [optimisticSessions, sessionOverrides, sessions],
   );
   const chatSessions = useMemo(
@@ -355,9 +412,9 @@ export function SessionDrawer({
     () => [
       ...(chatSessions.length > 0
         ? chatSessions.map((session) => ({
-            kind: "session" as const,
-            session,
-          }))
+          kind: "session" as const,
+          session,
+        }))
         : [{ kind: "active-empty" as const, label: "No Chat threads yet" }]),
       ...archiveListItems,
     ],
@@ -368,42 +425,98 @@ export function SessionDrawer({
     () => new Map(hiveSessions.map((session) => [session.session_id, session])),
     [hiveSessions],
   );
+  const hiveWorkerDmSessionIds = useMemo(
+    () =>
+      new Set(
+        hiveWorkers.flatMap((worker) =>
+          worker.dm_session_id ? [worker.dm_session_id] : []
+        ),
+      ),
+    [hiveWorkers],
+  );
+  const hiveSessionIdsToClassify = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [...displaySessions, ...archivedThreadSessions]
+            .filter((session) => session.session_type === "hive")
+            .map((session) => session.id),
+        ),
+      ),
+    [archivedThreadSessions, displaySessions],
+  );
+  const hiveSessionBindingScopeKey = useMemo(
+    () =>
+      [
+        ...hiveSessionIdsToClassify,
+        "--worker-dms--",
+        ...Array.from(hiveWorkerDmSessionIds).sort(),
+      ].join("\u0000"),
+    [hiveSessionIdsToClassify, hiveWorkerDmSessionIds],
+  );
+  const hiveSessionBindingKinds =
+    isOpen && activeMode === "hive" && status === "connected" &&
+      hiveSessionBindingSnapshot.client === client &&
+      hiveSessionBindingSnapshot.scopeKey === hiveSessionBindingScopeKey
+      ? hiveSessionBindingSnapshot.kinds
+      : EMPTY_HIVE_SESSION_BINDING_KINDS;
   const activeHiveSessions = useMemo(
-    () => chronologicalSessions(displaySessions, "hive"),
-    [displaySessions],
+    () =>
+      chronologicalSessions(displaySessions, "hive").filter((session) =>
+        genericSessionDeleteDisposition({
+          sessionId: session.id,
+          sessionType: session.session_type,
+          workerDmSessionIds: hiveWorkerDmSessionIds,
+          bindingKind: hiveSessionBindingKinds[session.id],
+        }) !== "worker_dm"
+      ),
+    [displaySessions, hiveSessionBindingKinds, hiveWorkerDmSessionIds],
+  );
+  const hiveManagementDestinations = useMemo(
+    () =>
+      HIVE_PRIMARY_NAV_ITEMS.filter((item) =>
+        item.id === "crew" || item.id === "groups"
+      ),
+    [],
   );
   const hiveListItems = useMemo<HiveListItem[]>(
     () => [
+      // Management destinations stay available even before the first Worker
+      // or Group exists, so an empty Hive can be configured from a phone.
+      ...hiveManagementDestinations.map((destination) => ({
+        kind: "management" as const,
+        destination,
+      })),
       // Workers first: opening one lands in its private DM. Threads keep the
       // existing companion/run session listing below.
       ...(hiveWorkers.length > 0
         ? [
-            { kind: "workers-header" as const, count: hiveWorkers.length },
-            ...hiveWorkers.map((worker) => ({
-              kind: "worker" as const,
-              worker,
-            })),
-          ]
+          { kind: "workers-header" as const, count: hiveWorkers.length },
+          ...hiveWorkers.map((worker) => ({
+            kind: "worker" as const,
+            worker,
+          })),
+        ]
         : []),
       // Groups next: opening one lands in its room as a lightweight surface.
       ...(hiveGroups.length > 0
         ? [
-            { kind: "groups-header" as const, count: hiveGroups.length },
-            ...hiveGroups.map((group) => ({
-              kind: "group" as const,
-              group,
-            })),
-          ]
+          { kind: "groups-header" as const, count: hiveGroups.length },
+          ...hiveGroups.map((group) => ({
+            kind: "group" as const,
+            group,
+          })),
+        ]
         : []),
       ...(hiveWorkers.length > 0 || hiveGroups.length > 0
         ? [{ kind: "threads-header" as const }]
         : []),
       ...(activeHiveSessions.length > 0
         ? activeHiveSessions.map((session) => ({
-            kind: "hive-session" as const,
-            session,
-            summary: hiveSummariesById.get(session.id),
-          }))
+          kind: "hive-session" as const,
+          session,
+          summary: hiveSummariesById.get(session.id),
+        }))
         : [{ kind: "active-empty" as const, label: "No Hive threads yet" }]),
       ...archiveListItems,
     ],
@@ -411,6 +524,7 @@ export function SessionDrawer({
       activeHiveSessions,
       archiveListItems,
       hiveGroups,
+      hiveManagementDestinations,
       hiveSummariesById,
       hiveWorkers,
     ],
@@ -570,21 +684,20 @@ export function SessionDrawer({
       return;
     }
 
-    const directories =
-      codeView === "projects"
-        ? codeGroups
-            .filter((group) =>
-              group.directory !== "Neutral" &&
-              expandedDirs.has(group.directory)
-            )
-            .map((group) => group.directory)
-        : Array.from(
-            new Set(
-              recentCodeSessions
-                .slice(0, 8)
-                .map((session) => sessionProjectDirectory(session)),
-            ),
-          );
+    const directories = codeView === "projects"
+      ? codeGroups
+        .filter((group) =>
+          group.directory !== "Neutral" &&
+          expandedDirs.has(group.directory)
+        )
+        .map((group) => group.directory)
+      : Array.from(
+        new Set(
+          recentCodeSessions
+            .slice(0, 8)
+            .map((session) => sessionProjectDirectory(session)),
+        ),
+      );
 
     for (const directory of directories) {
       if (
@@ -602,7 +715,10 @@ export function SessionDrawer({
         .then(([statusResult, changesResult]) => {
           if (!statusResult.in_repo || !changesResult.in_repo) {
             projectActivityCacheRef.current.set(directory, null);
-            setProjectActivity((current) => ({ ...current, [directory]: null }));
+            setProjectActivity((current) => ({
+              ...current,
+              [directory]: null,
+            }));
             return;
           }
           const summary = changesResult.files.reduce(
@@ -689,6 +805,70 @@ export function SessionDrawer({
   }, [activeMode, client, isOpen]);
 
   useEffect(() => {
+    // Never retain an allow decision across a client/user change or while the
+    // exact binding request is in flight.
+    setHiveSessionBindingSnapshot({ client: null, scopeKey: "", kinds: {} });
+    if (
+      !isOpen ||
+      activeMode !== "hive" ||
+      status !== "connected" ||
+      !client ||
+      hiveSessionIdsToClassify.length === 0
+    ) {
+      return;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    const resolveBinding = async (
+      sessionId: string,
+    ): Promise<readonly [string, HiveSessionBindingKind] | null> => {
+      if (hiveWorkerDmSessionIds.has(sessionId)) {
+        return [sessionId, "worker_dm"] as const;
+      }
+      try {
+        const binding = await client.getHiveWorkerBySession(sessionId, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || binding.session_id !== sessionId) {
+          return null;
+        }
+        return [sessionId, binding.kind] as const;
+      } catch {
+        return null;
+      }
+    };
+
+    void Promise.all(hiveSessionIdsToClassify.map(resolveBinding)).then(
+      (bindings) => {
+        if (!active || controller.signal.aborted) return;
+        const next: Record<string, HiveSessionBindingKind> = {};
+        for (const binding of bindings) {
+          if (binding) next[binding[0]] = binding[1];
+        }
+        setHiveSessionBindingSnapshot({
+          client,
+          scopeKey: hiveSessionBindingScopeKey,
+          kinds: next,
+        });
+      },
+    );
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [
+    activeMode,
+    client,
+    hiveSessionBindingScopeKey,
+    hiveSessionIdsToClassify,
+    hiveWorkerDmSessionIds,
+    isOpen,
+    status,
+  ]);
+
+  useEffect(() => {
     if (activeMode !== "code" || !activeSessionId) {
       return;
     }
@@ -733,8 +913,8 @@ export function SessionDrawer({
 
     const activeDay = activeSessionId
       ? recentCodeDayGroups.find((group) =>
-          group.sessions.some((session) => session.id === activeSessionId),
-        )
+        group.sessions.some((session) => session.id === activeSessionId)
+      )
       : undefined;
     const activeSessionDayToken = activeDay && activeSessionId
       ? `${activeSessionId}:${activeDay.key}`
@@ -899,7 +1079,7 @@ export function SessionDrawer({
     openSwipeableRef.current?.close();
     openSwipeableRef.current = null;
     setArchiveExpandedMode((current) =>
-      current === activeMode ? null : activeMode,
+      current === activeMode ? null : activeMode
     );
   };
 
@@ -912,10 +1092,10 @@ export function SessionDrawer({
       return next;
     });
     setOptimisticSessions((current) =>
-      current.filter((session) => !ids.includes(session.id)),
+      current.filter((session) => !ids.includes(session.id))
     );
     setArchivedThreadSessions((current) =>
-      current.filter((session) => !ids.includes(session.id)),
+      current.filter((session) => !ids.includes(session.id))
     );
   };
 
@@ -940,7 +1120,7 @@ export function SessionDrawer({
     }));
     if (archived) {
       setOptimisticSessions((current) =>
-        current.filter((candidate) => candidate.id !== session.id),
+        current.filter((candidate) => candidate.id !== session.id)
       );
       setArchivedThreadSessions((current) => [
         { ...session, archived_at: archivedAt ?? new Date().toISOString() },
@@ -953,7 +1133,7 @@ export function SessionDrawer({
       ...current.filter((candidate) => candidate.id !== session.id),
     ]);
     setArchivedThreadSessions((current) =>
-      current.filter((candidate) => candidate.id !== session.id),
+      current.filter((candidate) => candidate.id !== session.id)
     );
   };
 
@@ -1005,7 +1185,10 @@ export function SessionDrawer({
   ) => {
     swipeable?.close();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    await onSetProjectPinned(group.sessions.map((session) => session.id), pinned);
+    await onSetProjectPinned(
+      group.sessions.map((session) => session.id),
+      pinned,
+    );
   };
 
   const runProjectArchiveChange = async (
@@ -1056,12 +1239,12 @@ export function SessionDrawer({
     const color = provider === "openai"
       ? t.success
       : provider === "anthropic"
-        ? t.warning
-        : provider === "minimax" || provider === "openrouter"
-          ? t.userMessage
-          : active
-            ? t.userMessage
-            : t.foreground;
+      ? t.warning
+      : provider === "minimax" || provider === "openrouter"
+      ? t.userMessage
+      : active
+      ? t.userMessage
+      : t.foreground;
     return (
       <View
         accessibilityLabel={`${label} bot`}
@@ -1098,12 +1281,14 @@ export function SessionDrawer({
       ? hiveRuntimeLabel(options?.hiveSummary, session.agent_state)
       : sessionStateLabel(session.agent_state);
     const compact = threadDensity === "compact";
-    const projectLabel = options?.showProject ? dirDisplayName(directory) : null;
+    const projectLabel = options?.showProject
+      ? dirDisplayName(directory)
+      : null;
     const primaryMeta = isHive
       ? [
-          options?.hiveSummary?.runtime?.crew_slug || "Hive Worker",
-          modelLabel ?? sessionProviderLabel(session),
-        ].join(" · ")
+        options?.hiveSummary?.runtime?.crew_slug || "Hive Worker",
+        modelLabel ?? sessionProviderLabel(session),
+      ].join(" · ")
       : [projectLabel, branch, modelLabel].filter(Boolean).join(" · ");
     const hasActivity = !isHive && activity !== undefined && activity !== null;
     const activityLabel = isHive
@@ -1113,17 +1298,31 @@ export function SessionDrawer({
         ? "Clean workspace"
         : `${activity.files} ${activity.files === 1 ? "file" : "files"}`
       : null;
-    const statusColor =
-      stateLabel === "Working"
-        ? t.success
-        : stateLabel === "Needs input"
-          ? t.warning
-          : stateLabel === "Error"
-            ? t.error
-            : t.mutedForeground;
+    const statusColor = stateLabel === "Working"
+      ? t.success
+      : stateLabel === "Needs input"
+      ? t.warning
+      : stateLabel === "Error"
+      ? t.error
+      : t.mutedForeground;
     const archived = Boolean(session.archived_at);
     const pinned = Boolean(session.pinned_at);
+    const genericDeleteAllowed = genericSessionDeleteDisposition({
+      sessionId: session.id,
+      sessionType: session.session_type,
+      workerDmSessionIds: hiveWorkerDmSessionIds,
+      bindingKind: hiveSessionBindingKinds[session.id],
+    }) === "allowed";
     const swipeableRef = createRef<SwipeableMethods>();
+    const requestGenericDelete = () => {
+      if (!genericDeleteAllowed) return;
+      onDeleteSession(
+        session.id,
+        session.session_type,
+        () => hideSessionsLocally([session.id]),
+        () => restoreSessionsLocally([session.id]),
+      );
+    };
 
     return (
       <ReanimatedSwipeable
@@ -1160,44 +1359,44 @@ export function SessionDrawer({
           <View style={styles.swipeActionGroup}>
             {archived
               ? swipeAction(
-                  "Restore",
-                  t.success,
-                  <ArchiveRestore size={19} color={t.onAccent} strokeWidth={2} />,
-                  () => void runArchiveChange(session, false, methods),
-                )
+                "Restore",
+                t.success,
+                <ArchiveRestore size={19} color={t.onAccent} strokeWidth={2} />,
+                () =>
+                  void runArchiveChange(session, false, methods),
+              )
               : swipeAction(
-                  pinned ? "Unpin" : "Pin",
-                  t.userMessage,
-                  pinned
-                    ? <PinOff size={19} color={t.onAccent} strokeWidth={2} />
-                    : <Pin size={19} color={t.onAccent} strokeWidth={2} />,
-                  () => void runPinChange(session, !pinned, methods),
-                )}
+                pinned ? "Unpin" : "Pin",
+                t.userMessage,
+                pinned
+                  ? <PinOff size={19} color={t.onAccent} strokeWidth={2} />
+                  : <Pin size={19} color={t.onAccent} strokeWidth={2} />,
+                () => void runPinChange(session, !pinned, methods),
+              )}
           </View>
         )}
         renderRightActions={(_progress, _translation, methods) => (
           <View style={styles.swipeActionGroup}>
             {!archived
               ? swipeAction(
-                  "Archive",
-                  t.warning,
-                  <Archive size={19} color={t.onAccent} strokeWidth={2} />,
-                  () => void runArchiveChange(session, true, methods),
-                )
+                "Archive",
+                t.warning,
+                <Archive size={19} color={t.onAccent} strokeWidth={2} />,
+                () =>
+                  void runArchiveChange(session, true, methods),
+              )
               : null}
-            {swipeAction(
-              "Delete",
-              t.error,
-              <Trash2 size={19} color={t.onAccent} strokeWidth={2} />,
-              () => {
-                methods.close();
-                onDeleteSession(
-                  session.id,
-                  () => hideSessionsLocally([session.id]),
-                  () => restoreSessionsLocally([session.id]),
-                );
-              },
-            )}
+            {genericDeleteAllowed
+              ? swipeAction(
+                "Delete",
+                t.error,
+                <Trash2 size={19} color={t.onAccent} strokeWidth={2} />,
+                () => {
+                  methods.close();
+                  requestGenericDelete();
+                },
+              )
+              : null}
           </View>
         )}
       >
@@ -1209,10 +1408,10 @@ export function SessionDrawer({
               name: archived ? "restore" : "togglePin",
               label: archived ? "Restore" : pinned ? "Unpin" : "Pin",
             },
-            ...(!archived
-              ? [{ name: "archive", label: "Archive" }]
+            ...(!archived ? [{ name: "archive", label: "Archive" }] : []),
+            ...(genericDeleteAllowed
+              ? [{ name: "delete", label: "Delete" }]
               : []),
-            { name: "delete", label: "Delete" },
           ]}
           onAccessibilityAction={(event) => {
             switch (event.nativeEvent.actionName) {
@@ -1226,11 +1425,7 @@ export function SessionDrawer({
                 void runArchiveChange(session, true);
                 break;
               case "delete":
-                onDeleteSession(
-                  session.id,
-                  () => hideSessionsLocally([session.id]),
-                  () => restoreSessionsLocally([session.id]),
-                );
+                requestGenericDelete();
                 break;
             }
           }}
@@ -1246,6 +1441,7 @@ export function SessionDrawer({
               return;
             }
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            invalidateWorkerDmNavigation();
             if (isHive) {
               onSelectHiveSession(session.id);
             } else {
@@ -1261,100 +1457,160 @@ export function SessionDrawer({
           ]}
         >
           <View style={styles.sessionRow}>
-          {isHive ? renderBotAvatar(session, active) : null}
-          <View style={styles.sessionCopy}>
-          <View style={styles.sessionTitleRow}>
-          <Text
-            numberOfLines={compact ? 1 : 2}
-            style={[
-              styles.sessionTitle,
-              compact && styles.sessionTitleCompact,
-              { color: active ? t.userMessage : t.foreground },
-            ]}
-          >
-            {session.title || "Untitled"}
-          </Text>
-          {pinned ? (
-            <Pin size={13} color={t.userMessage} strokeWidth={2.2} />
-          ) : null}
-          {compact ? (
-            <Text
-              style={[styles.sessionTime, { color: t.mutedForeground }]}
-            >
-              {formatTime(session.updated_at)}
-            </Text>
-          ) : null}
-          </View>
-        {compact ? (
-          <View style={[styles.sessionMeta, styles.sessionMetaCompact]}>
-            {stateLabel ? (
-              <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-            ) : null}
-            <Text
-              numberOfLines={1}
-              style={[styles.sessionModel, { color: t.mutedForeground }]}
-            >
-              {[primaryMeta, activityLabel].filter(Boolean).join(" · ") ||
-                (isHive ? "Hive Worker" : session.session_type === "chat" ? "Agent" : "Code task")}
-            </Text>
-            {hasActivity && activity.additions > 0 ? (
-              <Text style={[styles.changeStat, { color: t.success }]}>+{formatThreadMetric(activity.additions)}</Text>
-            ) : null}
-            {hasActivity && activity.deletions > 0 ? (
-              <Text style={[styles.changeStat, { color: t.error }]}>−{formatThreadMetric(activity.deletions)}</Text>
-            ) : null}
-          </View>
-        ) : (
-          <>
-            <View style={styles.sessionMeta}>
-              <Text
-                numberOfLines={1}
-                style={[styles.sessionModel, { color: t.mutedForeground }]}
-              >
-                {primaryMeta ||
-                  (isHive ? "Hive Worker" : session.session_type === "chat" ? "Agent" : "Code task")}
-              </Text>
-              <Text
-                style={[styles.sessionTime, { color: t.mutedForeground }]}
-              >
-                {formatTime(session.updated_at)}
-              </Text>
-            </View>
-            <View style={styles.activityMeta}>
-              {activityLabel ? (
+            {isHive ? renderBotAvatar(session, active) : null}
+            <View style={styles.sessionCopy}>
+              <View style={styles.sessionTitleRow}>
                 <Text
-                  style={[styles.activityLabel, { color: t.mutedForeground }]}
+                  numberOfLines={compact ? 1 : 2}
+                  style={[
+                    styles.sessionTitle,
+                    compact && styles.sessionTitleCompact,
+                    { color: active ? t.userMessage : t.foreground },
+                  ]}
                 >
-                  {activityLabel}
+                  {session.title || "Untitled"}
                 </Text>
-              ) : (
-                <Text
-                  style={[styles.activityLabel, { color: t.mutedForeground }]}
-                >
-                  {isHive
-                    ? "No active schedule"
-                    : directory === "Neutral"
-                      ? "No workspace"
-                      : "Workspace details unavailable"}
-                </Text>
-              )}
-              {hasActivity && activity.additions > 0 ? (
-                <Text style={[styles.changeStat, { color: t.success }]}>+{activity.additions}</Text>
-              ) : null}
-              {hasActivity && activity.deletions > 0 ? (
-                <Text style={[styles.changeStat, { color: t.error }]}>−{activity.deletions}</Text>
-              ) : null}
-              <View style={styles.spacer} />
-              {stateLabel ? (
-                <View style={styles.stateLabel}>
-                  <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-                  <Text style={[styles.stateText, { color: statusColor }]}>{stateLabel}</Text>
-                </View>
-              ) : null}
+                {pinned
+                  ? <Pin size={13} color={t.userMessage} strokeWidth={2.2} />
+                  : null}
+                {compact
+                  ? (
+                    <Text
+                      style={[styles.sessionTime, { color: t.mutedForeground }]}
+                    >
+                      {formatTime(session.updated_at)}
+                    </Text>
+                  )
+                  : null}
+              </View>
+              {compact
+                ? (
+                  <View style={[styles.sessionMeta, styles.sessionMetaCompact]}>
+                    {stateLabel
+                      ? (
+                        <View
+                          style={[styles.statusDot, {
+                            backgroundColor: statusColor,
+                          }]}
+                        />
+                      )
+                      : null}
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.sessionModel, {
+                        color: t.mutedForeground,
+                      }]}
+                    >
+                      {[primaryMeta, activityLabel].filter(Boolean).join(
+                        " · ",
+                      ) ||
+                        (isHive
+                          ? "Hive Worker"
+                          : session.session_type === "chat"
+                          ? "Agent"
+                          : "Code task")}
+                    </Text>
+                    {hasActivity && activity.additions > 0
+                      ? (
+                        <Text style={[styles.changeStat, { color: t.success }]}>
+                          +{formatThreadMetric(activity.additions)}
+                        </Text>
+                      )
+                      : null}
+                    {hasActivity && activity.deletions > 0
+                      ? (
+                        <Text style={[styles.changeStat, { color: t.error }]}>
+                          −{formatThreadMetric(activity.deletions)}
+                        </Text>
+                      )
+                      : null}
+                  </View>
+                )
+                : (
+                  <>
+                    <View style={styles.sessionMeta}>
+                      <Text
+                        numberOfLines={1}
+                        style={[styles.sessionModel, {
+                          color: t.mutedForeground,
+                        }]}
+                      >
+                        {primaryMeta ||
+                          (isHive
+                            ? "Hive Worker"
+                            : session.session_type === "chat"
+                            ? "Agent"
+                            : "Code task")}
+                      </Text>
+                      <Text
+                        style={[styles.sessionTime, {
+                          color: t.mutedForeground,
+                        }]}
+                      >
+                        {formatTime(session.updated_at)}
+                      </Text>
+                    </View>
+                    <View style={styles.activityMeta}>
+                      {activityLabel
+                        ? (
+                          <Text
+                            style={[styles.activityLabel, {
+                              color: t.mutedForeground,
+                            }]}
+                          >
+                            {activityLabel}
+                          </Text>
+                        )
+                        : (
+                          <Text
+                            style={[styles.activityLabel, {
+                              color: t.mutedForeground,
+                            }]}
+                          >
+                            {isHive
+                              ? "No active schedule"
+                              : directory === "Neutral"
+                              ? "No workspace"
+                              : "Workspace details unavailable"}
+                          </Text>
+                        )}
+                      {hasActivity && activity.additions > 0
+                        ? (
+                          <Text
+                            style={[styles.changeStat, { color: t.success }]}
+                          >
+                            +{activity.additions}
+                          </Text>
+                        )
+                        : null}
+                      {hasActivity && activity.deletions > 0
+                        ? (
+                          <Text style={[styles.changeStat, { color: t.error }]}>
+                            −{activity.deletions}
+                          </Text>
+                        )
+                        : null}
+                      <View style={styles.spacer} />
+                      {stateLabel
+                        ? (
+                          <View style={styles.stateLabel}>
+                            <View
+                              style={[styles.statusDot, {
+                                backgroundColor: statusColor,
+                              }]}
+                            />
+                            <Text
+                              style={[styles.stateText, { color: statusColor }]}
+                            >
+                              {stateLabel}
+                            </Text>
+                          </View>
+                        )
+                        : null}
+                    </View>
+                  </>
+                )}
             </View>
-          </>
-        )}
-          </View>
           </View>
         </Pressable>
       </ReanimatedSwipeable>
@@ -1367,7 +1623,9 @@ export function SessionDrawer({
         return (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${archiveExpanded ? "Hide" : "Show"} archived ${activeMode} conversations`}
+            accessibilityLabel={`${
+              archiveExpanded ? "Hide" : "Show"
+            } archived ${activeMode} conversations`}
             accessibilityState={{ expanded: archiveExpanded }}
             onPress={toggleArchived}
             style={styles.archiveToggle}
@@ -1380,16 +1638,34 @@ export function SessionDrawer({
             >
               <Archive size={17} color={t.mutedForeground} strokeWidth={1.8} />
             </View>
-            <Text style={[styles.archiveLabel, { color: t.mutedForeground }]}>Archived</Text>
-            {archiveExpanded && !archiveLoading ? (
-              <Text style={[styles.archiveCount, { color: t.mutedForeground }]}>{visibleArchivedSessions.length}</Text>
-            ) : null}
+            <Text style={[styles.archiveLabel, { color: t.mutedForeground }]}>
+              Archived
+            </Text>
+            {archiveExpanded && !archiveLoading
+              ? (
+                <Text
+                  style={[styles.archiveCount, { color: t.mutedForeground }]}
+                >
+                  {visibleArchivedSessions.length}
+                </Text>
+              )
+              : null}
             <View style={styles.spacer} />
-            {archiveExpanded ? (
-              <ChevronDown size={17} color={t.mutedForeground} strokeWidth={1.8} />
-            ) : (
-              <ChevronRight size={17} color={t.mutedForeground} strokeWidth={1.8} />
-            )}
+            {archiveExpanded
+              ? (
+                <ChevronDown
+                  size={17}
+                  color={t.mutedForeground}
+                  strokeWidth={1.8}
+                />
+              )
+              : (
+                <ChevronRight
+                  size={17}
+                  color={t.mutedForeground}
+                  strokeWidth={1.8}
+                />
+              )}
           </Pressable>
         );
       case "archived-session":
@@ -1404,7 +1680,9 @@ export function SessionDrawer({
         );
       case "archive-empty":
         return (
-          <Text style={[styles.archiveEmptyText, { color: t.mutedForeground }]}>No archived conversations</Text>
+          <Text style={[styles.archiveEmptyText, { color: t.mutedForeground }]}>
+            No archived conversations
+          </Text>
         );
     }
   };
@@ -1413,7 +1691,9 @@ export function SessionDrawer({
     if (item.kind === "session") return renderSession(item.session);
     if (item.kind === "active-empty") {
       return (
-        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>{item.label}</Text>
+        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+          {item.label}
+        </Text>
       );
     }
     return renderArchiveListItem(item);
@@ -1421,6 +1701,7 @@ export function SessionDrawer({
 
   const openWorkerDm = async (worker: HiveWorker) => {
     // A bound DM opens instantly; an unbound Worker ensures its DM first.
+    const intent = workerDmNavigationFenceRef.current.beginIntent();
     if (worker.dm_session_id) {
       onSelectHiveSession(worker.dm_session_id);
       return;
@@ -1431,18 +1712,23 @@ export function SessionDrawer({
     openingWorkerIdRef.current = worker.id;
     try {
       const dm = await client.ensureHiveWorkerDm(worker.id);
+      if (!workerDmNavigationFenceRef.current.isCurrent(intent)) {
+        return;
+      }
       setHiveWorkers((current) =>
         current.map((candidate) =>
           candidate.id === worker.id
             ? { ...candidate, dm_session_id: dm.session_id }
-            : candidate,
-        ),
+            : candidate
+        )
       );
       onSelectHiveSession(dm.session_id);
     } catch {
       // The drawer stays open; the Worker row remains tappable to retry.
     } finally {
-      openingWorkerIdRef.current = null;
+      if (openingWorkerIdRef.current === worker.id) {
+        openingWorkerIdRef.current = null;
+      }
     }
   };
 
@@ -1453,8 +1739,8 @@ export function SessionDrawer({
     const statusColor = paused
       ? t.warning
       : working
-        ? t.success
-        : t.mutedForeground;
+      ? t.success
+      : t.mutedForeground;
 
     return (
       <Pressable
@@ -1487,14 +1773,74 @@ export function SessionDrawer({
               </Text>
             </View>
             <View style={styles.sessionMeta}>
-              <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+              <View
+                style={[styles.statusDot, { backgroundColor: statusColor }]}
+              />
               <Text
                 numberOfLines={1}
                 style={[styles.sessionModel, { color: t.mutedForeground }]}
               >
-                {paused ? `Paused · ${workerMetaLine(worker)}` : workerMetaLine(worker)}
+                {paused
+                  ? `Paused · ${workerMetaLine(worker)}`
+                  : workerMetaLine(worker)}
               </Text>
             </View>
+          </View>
+        </View>
+      </Pressable>
+    );
+  };
+
+  const renderHiveManagementRow = (destination: HiveDrawerItem) => {
+    const active = activeHiveView === destination.id;
+    const isWorkers = destination.id === "crew";
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={isWorkers
+          ? "Manage Hive Workers"
+          : "Manage Hive Groups"}
+        accessibilityState={{ selected: active }}
+        onPress={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          invalidateWorkerDmNavigation();
+          onSelectHiveView?.(destination.id);
+        }}
+        style={[
+          styles.sessionItem,
+          { backgroundColor: active ? `${t.userMessage}12` : t.background },
+        ]}
+      >
+        <View style={styles.sessionRow}>
+          <View
+            style={[
+              styles.workerAvatar,
+              {
+                backgroundColor: `${t.userMessage}14`,
+                borderColor: `${t.userMessage}33`,
+              },
+            ]}
+          >
+            {isWorkers
+              ? <Bot size={15} color={t.userMessage} strokeWidth={1.8} />
+              : <Users size={15} color={t.userMessage} strokeWidth={1.8} />}
+          </View>
+          <View style={styles.sessionCopy}>
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.sessionTitle,
+                { color: active ? t.userMessage : t.foreground },
+              ]}
+            >
+              {destination.label}
+            </Text>
+            <Text
+              numberOfLines={1}
+              style={[styles.sessionModel, { color: t.mutedForeground }]}
+            >
+              {destination.detail}
+            </Text>
           </View>
         </View>
       </Pressable>
@@ -1510,6 +1856,7 @@ export function SessionDrawer({
         accessibilityLabel={`Open group ${group.title}`}
         onPress={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          invalidateWorkerDmNavigation();
           setOpenGroupRoomId(group.id);
         }}
         style={[styles.sessionItem, { backgroundColor: t.background }]}
@@ -1557,6 +1904,9 @@ export function SessionDrawer({
   };
 
   const renderHiveListItem = ({ item }: { item: HiveListItem }) => {
+    if (item.kind === "management") {
+      return renderHiveManagementRow(item.destination);
+    }
     if (item.kind === "workers-header") {
       return (
         <Text style={[styles.hiveSectionHeader, { color: t.mutedForeground }]}>
@@ -1589,7 +1939,9 @@ export function SessionDrawer({
     }
     if (item.kind === "active-empty") {
       return (
-        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>{item.label}</Text>
+        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+          {item.label}
+        </Text>
       );
     }
     return renderArchiveListItem(item);
@@ -1606,7 +1958,9 @@ export function SessionDrawer({
     }
     if (item.kind === "active-empty") {
       return (
-        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>{item.label}</Text>
+        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+          {item.label}
+        </Text>
       );
     }
     if (item.kind === "session") {
@@ -1620,7 +1974,9 @@ export function SessionDrawer({
       return (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${item.group.label} Code tasks`}
+          accessibilityLabel={`${
+            expanded ? "Collapse" : "Expand"
+          } ${item.group.label} Code tasks`}
           accessibilityState={{ expanded }}
           onPress={() => {
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -1640,11 +1996,21 @@ export function SessionDrawer({
             {item.group.label}
           </Text>
           <View style={styles.spacer} />
-          {expanded ? (
-            <ChevronDown size={16} color={t.mutedForeground} strokeWidth={1.8} />
-          ) : (
-            <ChevronRight size={16} color={t.mutedForeground} strokeWidth={1.8} />
-          )}
+          {expanded
+            ? (
+              <ChevronDown
+                size={16}
+                color={t.mutedForeground}
+                strokeWidth={1.8}
+              />
+            )
+            : (
+              <ChevronRight
+                size={16}
+                color={t.mutedForeground}
+                strokeWidth={1.8}
+              />
+            )}
         </Pressable>
       );
     }
@@ -1693,7 +2059,8 @@ export function SessionDrawer({
               pinned
                 ? <PinOff size={19} color={t.onAccent} strokeWidth={2} />
                 : <Pin size={19} color={t.onAccent} strokeWidth={2} />,
-              () => void runProjectPinChange(group, !pinned, methods),
+              () =>
+                void runProjectPinChange(group, !pinned, methods),
             )}
           </View>
         )}
@@ -1703,7 +2070,8 @@ export function SessionDrawer({
               "Archive",
               t.warning,
               <Archive size={19} color={t.onAccent} strokeWidth={2} />,
-              () => void runProjectArchiveChange(group, true, methods),
+              () =>
+                void runProjectArchiveChange(group, true, methods),
             )}
             {swipeAction(
               "Delete",
@@ -1732,9 +2100,14 @@ export function SessionDrawer({
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ expanded }}
-            accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${dirDisplayName(group.directory)}`}
+            accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${
+              dirDisplayName(group.directory)
+            }`}
             accessibilityActions={[
-              { name: "togglePin", label: pinned ? "Unpin project" : "Pin project" },
+              {
+                name: "togglePin",
+                label: pinned ? "Unpin project" : "Pin project",
+              },
               { name: "archive", label: "Archive project conversations" },
               { name: "delete", label: "Delete project conversations" },
             ]}
@@ -1775,16 +2148,18 @@ export function SessionDrawer({
             }}
             style={styles.dirToggle}
           >
-            {expanded ? (
-              <ChevronDown size={16} color={t.mutedForeground} />
-            ) : (
-              <ChevronRight size={16} color={t.mutedForeground} />
-            )}
-            {expanded ? (
-              <FolderOpen size={18} color={t.thinking} strokeWidth={1.7} />
-            ) : (
-              <Folder size={18} color={t.mutedForeground} strokeWidth={1.6} />
-            )}
+            {expanded
+              ? <ChevronDown size={16} color={t.mutedForeground} />
+              : <ChevronRight size={16} color={t.mutedForeground} />}
+            {expanded
+              ? <FolderOpen size={18} color={t.thinking} strokeWidth={1.7} />
+              : (
+                <Folder
+                  size={18}
+                  color={t.mutedForeground}
+                  strokeWidth={1.6}
+                />
+              )}
             <Text
               numberOfLines={1}
               style={[
@@ -1794,13 +2169,15 @@ export function SessionDrawer({
             >
               {dirDisplayName(group.directory)}
             </Text>
-            {pinned ? (
-              <Pin size={13} color={t.userMessage} strokeWidth={2.2} />
-            ) : null}
+            {pinned
+              ? <Pin size={13} color={t.userMessage} strokeWidth={2.2} />
+              : null}
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`New Code task in ${dirDisplayName(group.directory)}`}
+            accessibilityLabel={`New Code task in ${
+              dirDisplayName(group.directory)
+            }`}
             hitSlop={8}
             onPress={() => {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -1817,27 +2194,32 @@ export function SessionDrawer({
 
   const footer = (
     <View style={[styles.bottomBar, { borderTopColor: t.border }]}>
-      {onOpenSettings ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open settings"
-          onPress={onOpenSettings}
-          style={styles.iconButton}
-        >
-          <Settings size={22} color={t.mutedForeground} strokeWidth={1.8} />
-        </Pressable>
-      ) : null}
+      {onOpenSettings
+        ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open settings"
+            onPress={() => {
+              invalidateWorkerDmNavigation();
+              onOpenSettings();
+            }}
+            style={styles.iconButton}
+          >
+            <Settings size={22} color={t.mutedForeground} strokeWidth={1.8} />
+          </Pressable>
+        )
+        : null}
 
       <View style={styles.statusIcon}>
-        {status === "connected" ? (
-          <Wifi size={16} color={t.success} strokeWidth={2} />
-        ) : (
-          <WifiOff
-            size={16}
-            color={status === "connecting" ? t.warning : t.error}
-            strokeWidth={2}
-          />
-        )}
+        {status === "connected"
+          ? <Wifi size={16} color={t.success} strokeWidth={2} />
+          : (
+            <WifiOff
+              size={16}
+              color={status === "connecting" ? t.warning : t.error}
+              strokeWidth={2}
+            />
+          )}
       </View>
 
       <View style={styles.spacer} />
@@ -1847,6 +2229,7 @@ export function SessionDrawer({
         accessibilityLabel={`New ${activeMode} thread`}
         onPress={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          invalidateWorkerDmNavigation();
           if (activeMode === "hive") {
             onNewHiveSession();
           } else {
@@ -1858,27 +2241,29 @@ export function SessionDrawer({
         <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
       </Pressable>
 
-      {activeMode === "code" ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="New Code thread in directory"
-          onPress={showPicker}
-          style={styles.iconButton}
-        >
-          <FolderPlus
-            size={22}
-            color={t.mutedForeground}
-            strokeWidth={1.8}
-          />
-        </Pressable>
-      ) : null}
+      {activeMode === "code"
+        ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="New Code thread in directory"
+            onPress={showPicker}
+            style={styles.iconButton}
+          >
+            <FolderPlus
+              size={22}
+              color={t.mutedForeground}
+              strokeWidth={1.8}
+            />
+          </Pressable>
+        )
+        : null}
     </View>
   );
 
   return (
     <AppBottomSheet
       visible={isOpen}
-      onClose={onClose}
+      onClose={closeDrawer}
       footer={footer}
       accessibilityLabel={modeTitle(activeMode)}
       testID="mobile-threads-sheet"
@@ -1886,91 +2271,76 @@ export function SessionDrawer({
       retainContent={false}
     >
       <View style={styles.content}>
-        {activeMode === "code" ? (
-          <View
-            style={[styles.threadControls, { borderBottomColor: t.border }]}
-          >
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={codeView === "projects"
-                ? "Show recent Code tasks"
-                : "Group Code tasks by project"}
-              accessibilityValue={{
-                text: codeView === "projects" ? "Projects" : "Recent",
-              }}
-              onPress={toggleCodeView}
-              style={[
-                styles.threadControlButton,
-                { backgroundColor: `${t.mutedForeground}0C` },
-              ]}
+        {activeMode === "code"
+          ? (
+            <View
+              style={[styles.threadControls, { borderBottomColor: t.border }]}
             >
-              {codeView === "projects" ? (
-                <FolderTree size={19} color={t.foreground} strokeWidth={1.8} />
-              ) : (
-                <Clock3 size={19} color={t.foreground} strokeWidth={1.8} />
-              )}
-            </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={codeView === "projects"
+                  ? "Show recent Code tasks"
+                  : "Group Code tasks by project"}
+                accessibilityValue={{
+                  text: codeView === "projects" ? "Projects" : "Recent",
+                }}
+                onPress={toggleCodeView}
+                style={[
+                  styles.threadControlButton,
+                  { backgroundColor: `${t.mutedForeground}0C` },
+                ]}
+              >
+                {codeView === "projects"
+                  ? (
+                    <FolderTree
+                      size={19}
+                      color={t.foreground}
+                      strokeWidth={1.8}
+                    />
+                  )
+                  : <Clock3 size={19} color={t.foreground} strokeWidth={1.8} />}
+              </Pressable>
 
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={threadDensity === "comfortable"
-                ? "Use compact task list"
-                : "Use detailed task list"}
-              accessibilityValue={{
-                text: threadDensity === "comfortable" ? "Detailed" : "Compact",
-              }}
-              onPress={toggleThreadDensity}
-              style={[
-                styles.threadControlButton,
-                { backgroundColor: `${t.mutedForeground}0C` },
-              ]}
-            >
-              {threadDensity === "comfortable" ? (
-                <Rows3 size={19} color={t.foreground} strokeWidth={1.8} />
-              ) : (
-                <List size={19} color={t.foreground} strokeWidth={1.8} />
-              )}
-            </Pressable>
-          </View>
-        ) : null}
-        {activeMode === "chat" ? (
-          <FlatList
-            style={styles.list}
-            contentContainerStyle={styles.listContent}
-            data={chatListItems}
-            keyExtractor={(item) => {
-              if (item.kind === "session") return `session:${item.session.id}`;
-              if (item.kind === "archived-session") return `archived:${item.session.id}`;
-              return item.kind;
-            }}
-            extraData={displaySessions}
-            renderItem={renderChatListItem}
-            windowSize={7}
-            maxToRenderPerBatch={10}
-            initialNumToRender={14}
-            removeClippedSubviews={false}
-            showsVerticalScrollIndicator={false}
-          />
-        ) : activeMode === "hive" ? (
-          openGroupRoomId ? (
-            <HiveGroupRoomView
-              groupId={openGroupRoomId}
-              onBack={() => setOpenGroupRoomId(null)}
-            />
-          ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={threadDensity === "comfortable"
+                  ? "Use compact task list"
+                  : "Use detailed task list"}
+                accessibilityValue={{
+                  text: threadDensity === "comfortable"
+                    ? "Detailed"
+                    : "Compact",
+                }}
+                onPress={toggleThreadDensity}
+                style={[
+                  styles.threadControlButton,
+                  { backgroundColor: `${t.mutedForeground}0C` },
+                ]}
+              >
+                {threadDensity === "comfortable"
+                  ? <Rows3 size={19} color={t.foreground} strokeWidth={1.8} />
+                  : <List size={19} color={t.foreground} strokeWidth={1.8} />}
+              </Pressable>
+            </View>
+          )
+          : null}
+        {activeMode === "chat"
+          ? (
             <FlatList
               style={styles.list}
               contentContainerStyle={styles.listContent}
-              data={hiveListItems}
+              data={chatListItems}
               keyExtractor={(item) => {
-                if (item.kind === "worker") return `worker:${item.worker.id}`;
-                if (item.kind === "group") return `group:${item.group.id}`;
-                if (item.kind === "hive-session") return `hive:${item.session.id}`;
-                if (item.kind === "archived-session") return `archived:${item.session.id}`;
+                if (item.kind === "session") {
+                  return `session:${item.session.id}`;
+                }
+                if (item.kind === "archived-session") {
+                  return `archived:${item.session.id}`;
+                }
                 return item.kind;
               }}
               extraData={displaySessions}
-              renderItem={renderHiveListItem}
+              renderItem={renderChatListItem}
               windowSize={7}
               maxToRenderPerBatch={10}
               initialNumToRender={14}
@@ -1978,123 +2348,178 @@ export function SessionDrawer({
               showsVerticalScrollIndicator={false}
             />
           )
-        ) : (
-          <FlatList
-            style={styles.list}
-            contentContainerStyle={styles.listContent}
-            data={codeDisplayItems}
-            keyExtractor={(item) => {
-              if (item.kind === "project") return `project:${item.group.directory}`;
-              if (item.kind === "day") return `day:${item.group.key}`;
-              if (item.kind === "session") return `session:${item.session.id}`;
-              if (item.kind === "archived-session") return `archived:${item.session.id}`;
-              return item.kind;
-            }}
-            extraData={displaySessions}
-            renderItem={renderCodeListItem}
-            windowSize={7}
-            maxToRenderPerBatch={12}
-            initialNumToRender={16}
-            removeClippedSubviews={false}
-            showsVerticalScrollIndicator={false}
-          />
-        )}
-
-        {pickerVisible ? (
-          <Animated.View
-            style={[
-              styles.picker,
-              {
-                height: pickerHeight,
-                borderTopColor: t.border,
-                backgroundColor: t.background,
-              },
-              pickerStyle,
-            ]}
-          >
-            <View style={styles.pickerHeader}>
-              <View style={styles.pickerHeadingCopy}>
-                <Text style={[styles.pickerTitle, { color: t.foreground }]}>
-                  Select directory
-                </Text>
-                <Text
-                  numberOfLines={1}
-                  style={[styles.pickerPath, { color: t.mutedForeground }]}
-                >
-                  {pickerPath}
-                </Text>
-              </View>
-              <Pressable onPress={hidePicker} style={styles.iconButton}>
-                <ChevronDown
-                  size={20}
-                  color={t.mutedForeground}
-                  strokeWidth={1.8}
+          : activeMode === "hive"
+          ? (
+            openGroupRoomId
+              ? (
+                <HiveGroupRoomView
+                  groupId={openGroupRoomId}
+                  onBack={() => {
+                    invalidateWorkerDmNavigation();
+                    setOpenGroupRoomId(null);
+                  }}
                 />
-              </Pressable>
-            </View>
-
-            <ScrollView
-              style={styles.pickerList}
+              )
+              : (
+                <FlatList
+                  style={styles.list}
+                  contentContainerStyle={styles.listContent}
+                  data={hiveListItems}
+                  keyExtractor={(item) => {
+                    if (item.kind === "management") {
+                      return `management:${item.destination.id}`;
+                    }
+                    if (item.kind === "worker") {
+                      return `worker:${item.worker.id}`;
+                    }
+                    if (item.kind === "group") return `group:${item.group.id}`;
+                    if (item.kind === "hive-session") {
+                      return `hive:${item.session.id}`;
+                    }
+                    if (item.kind === "archived-session") {
+                      return `archived:${item.session.id}`;
+                    }
+                    return item.kind;
+                  }}
+                  extraData={displaySessions}
+                  renderItem={renderHiveListItem}
+                  windowSize={7}
+                  maxToRenderPerBatch={10}
+                  initialNumToRender={14}
+                  removeClippedSubviews={false}
+                  showsVerticalScrollIndicator={false}
+                />
+              )
+          )
+          : (
+            <FlatList
+              style={styles.list}
+              contentContainerStyle={styles.listContent}
+              data={codeDisplayItems}
+              keyExtractor={(item) => {
+                if (item.kind === "project") {
+                  return `project:${item.group.directory}`;
+                }
+                if (item.kind === "day") return `day:${item.group.key}`;
+                if (item.kind === "session") {
+                  return `session:${item.session.id}`;
+                }
+                if (item.kind === "archived-session") {
+                  return `archived:${item.session.id}`;
+                }
+                return item.kind;
+              }}
+              extraData={displaySessions}
+              renderItem={renderCodeListItem}
+              windowSize={7}
+              maxToRenderPerBatch={12}
+              initialNumToRender={16}
+              removeClippedSubviews={false}
               showsVerticalScrollIndicator={false}
+            />
+          )}
+
+        {pickerVisible
+          ? (
+            <Animated.View
+              style={[
+                styles.picker,
+                {
+                  height: pickerHeight,
+                  borderTopColor: t.border,
+                  backgroundColor: t.background,
+                },
+                pickerStyle,
+              ]}
             >
-              {pickerParent ? (
-                <Pressable
-                  onPress={() => void navigatePicker(pickerParent)}
-                  style={styles.pickerItem}
-                >
-                  <ChevronLeft size={16} color={t.mutedForeground} />
-                  <Text
-                    style={[
-                      styles.pickerItemText,
-                      { color: t.mutedForeground },
-                    ]}
-                  >
-                    Up
+              <View style={styles.pickerHeader}>
+                <View style={styles.pickerHeadingCopy}>
+                  <Text style={[styles.pickerTitle, { color: t.foreground }]}>
+                    Select directory
                   </Text>
-                </Pressable>
-              ) : null}
-              {pickerDirs.map((directory) => (
-                <Pressable
-                  key={directory.path}
-                  onPress={() => void navigatePicker(directory.path)}
-                  style={styles.pickerItem}
-                >
-                  <Folder
-                    size={16}
-                    color={t.mutedForeground}
-                    strokeWidth={1.6}
-                  />
                   <Text
                     numberOfLines={1}
-                    style={[
-                      styles.pickerItemText,
-                      { color: t.foreground },
-                    ]}
+                    style={[styles.pickerPath, { color: t.mutedForeground }]}
                   >
-                    {directory.name}
+                    {pickerPath}
                   </Text>
+                </View>
+                <Pressable onPress={hidePicker} style={styles.iconButton}>
+                  <ChevronDown
+                    size={20}
+                    color={t.mutedForeground}
+                    strokeWidth={1.8}
+                  />
                 </Pressable>
-              ))}
-            </ScrollView>
+              </View>
 
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => {
-                void Haptics.notificationAsync(
-                  Haptics.NotificationFeedbackType.Success,
-                );
-                hidePicker();
-                onNewSessionWithDir(pickerPath);
-              }}
-              style={[styles.selectButton, { borderColor: t.border }]}
-            >
-              <Check size={16} color={t.foreground} strokeWidth={2.4} />
-              <Text style={[styles.selectButtonText, { color: t.foreground }]}>
-                Use this directory
-              </Text>
-            </Pressable>
-          </Animated.View>
-        ) : null}
+              <ScrollView
+                style={styles.pickerList}
+                showsVerticalScrollIndicator={false}
+              >
+                {pickerParent
+                  ? (
+                    <Pressable
+                      onPress={() => void navigatePicker(pickerParent)}
+                      style={styles.pickerItem}
+                    >
+                      <ChevronLeft size={16} color={t.mutedForeground} />
+                      <Text
+                        style={[
+                          styles.pickerItemText,
+                          { color: t.mutedForeground },
+                        ]}
+                      >
+                        Up
+                      </Text>
+                    </Pressable>
+                  )
+                  : null}
+                {pickerDirs.map((directory) => (
+                  <Pressable
+                    key={directory.path}
+                    onPress={() => void navigatePicker(directory.path)}
+                    style={styles.pickerItem}
+                  >
+                    <Folder
+                      size={16}
+                      color={t.mutedForeground}
+                      strokeWidth={1.6}
+                    />
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.pickerItemText,
+                        { color: t.foreground },
+                      ]}
+                    >
+                      {directory.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  void Haptics.notificationAsync(
+                    Haptics.NotificationFeedbackType.Success,
+                  );
+                  hidePicker();
+                  onNewSessionWithDir(pickerPath);
+                }}
+                style={[styles.selectButton, { borderColor: t.border }]}
+              >
+                <Check size={16} color={t.foreground} strokeWidth={2.4} />
+                <Text
+                  style={[styles.selectButtonText, { color: t.foreground }]}
+                >
+                  Use this directory
+                </Text>
+              </Pressable>
+            </Animated.View>
+          )
+          : null}
       </View>
     </AppBottomSheet>
   );

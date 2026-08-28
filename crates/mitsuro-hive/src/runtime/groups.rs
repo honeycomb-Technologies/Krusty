@@ -17,7 +17,11 @@ use mitsuro_core::storage::hive_groups::{
     self, GroupMentionTarget, HiveGroup, HiveGroupExecutionMode, HiveGroupStatus, HiveGroupTurn,
     HiveGroupTurnPolicy, HiveGroupTurnStatus, NewHiveGroupMessage, MAX_HIVE_GROUP_MESSAGE_BYTES,
 };
-use mitsuro_core::storage::{HiveWorker, HiveWorkerStatus};
+use mitsuro_core::storage::{
+    load_group_worker_lane_with_conn, upsert_group_worker_lane_with_conn,
+    HiveRunExecutionContextV1, HiveWorker, HiveWorkerIntroductionStore, HiveWorkerStatus,
+    NewHiveGroupWorkerLane, WorkerConversationLane, WorkerRunOrigin,
+};
 use mitsuro_hive_protocol::{Actor, GroupMessageCommand, GroupTurnResponse, ResponsePayload};
 use rusqlite::{params, Transaction};
 use serde_json::{json, Map, Value};
@@ -49,6 +53,7 @@ pub(super) fn group_message(
     now: &str,
     command: GroupMessageCommand,
     idempotency_key: &str,
+    origin: WorkerRunOrigin,
 ) -> Result<Mutation, RuntimeStoreError> {
     let message = command.message.trim();
     if message.is_empty() {
@@ -83,12 +88,49 @@ pub(super) fn group_message(
         ));
     }
 
-    let targets = resolve_targets(
+    let explicit_worker_targeting = group_message_has_explicit_worker_target(
+        &roster,
+        message,
+        command.mentions_override.as_deref(),
+    );
+    let resolved_targets = resolve_targets(
         &group,
         &roster,
         message,
         command.mentions_override.as_deref(),
     )?;
+    let mut targets = Vec::with_capacity(resolved_targets.len());
+    let mut ineligible = Vec::new();
+    for worker_id in resolved_targets {
+        let worker = roster_worker(&roster, &worker_id).ok_or_else(|| {
+            RuntimeStoreError::StateConflict(format!(
+                "resolved Group target {worker_id} disappeared from its exact roster"
+            ))
+        })?;
+        let introduction = HiveWorkerIntroductionStore::from_connection(tx)
+            .get_by_worker(&worker_id)
+            .map_err(RuntimeStoreError::Internal)?;
+        if let Some(introduction) = introduction {
+            if !introduction.status.allows_autonomy() {
+                ineligible.push((worker.slug.clone(), introduction.status));
+                continue;
+            }
+        }
+        targets.push(worker_id);
+    }
+    if let Some((slug, status)) = ineligible.first() {
+        if explicit_worker_targeting {
+            return Err(RuntimeStoreError::StateConflict(format!(
+                "@{slug} cannot join a Group turn while its Introduction is {status}; confirm or skip the Introduction first"
+            )));
+        }
+    }
+    if targets.is_empty() {
+        return Err(RuntimeStoreError::StateConflict(
+            "the group has no Worker whose Introduction is confirmed, skipped, or legacy-compatible"
+                .into(),
+        ));
+    }
 
     // Append the trigger durably with the request's idempotency key. If a
     // previous execution of this exact request already appended it (for
@@ -144,6 +186,7 @@ pub(super) fn group_message(
                     worker,
                     Some(slot as u32),
                     &excerpt,
+                    origin,
                 )? {
                     Ok((run_id, run_events)) => {
                         dispatched += 1;
@@ -165,7 +208,7 @@ pub(super) fn group_message(
                 let worker_id = &plan[index];
                 let worker = roster_worker(&roster, worker_id);
                 index += 1;
-                match dispatch_member_run(tx, now, &group, &turn, worker, None, &excerpt)? {
+                match dispatch_member_run(tx, now, &group, &turn, worker, None, &excerpt, origin)? {
                     Ok((run_id, run_events)) => {
                         dispatched += 1;
                         events.extend(run_events);
@@ -251,6 +294,26 @@ pub(super) fn group_message(
         resource_id: Some(group.id),
         events,
     })
+}
+
+fn group_message_has_explicit_worker_target(
+    roster: &[HiveWorker],
+    message: &str,
+    mentions_override: Option<&[String]>,
+) -> bool {
+    if mentions_override.is_some() {
+        return true;
+    }
+    let mention_roster = roster
+        .iter()
+        .map(|worker| GroupMentionTarget {
+            worker_id: worker.id.clone(),
+            slug: worker.slug.clone(),
+            display_name: worker.display_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let resolution = hive_groups::parse_group_mentions(message, &mention_roster);
+    resolution.saw_mention && !resolution.mentions_all && !resolution.explicit_worker_ids.is_empty()
 }
 
 pub(super) fn group_stop(
@@ -381,6 +444,36 @@ pub(super) fn group_stop(
     })
 }
 
+/// Archive and stop share one immediate handler transaction. This prevents
+/// the group from disappearing from active UI surfaces while its provider
+/// work remains live, and prevents a roundtable continuation from entering
+/// between the stop and archive mutations.
+pub(super) fn group_archive(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    group_id: &str,
+) -> Result<Mutation, RuntimeStoreError> {
+    let group = require_owned_group(tx, actor, group_id)?;
+    let mut mutation = group_stop(tx, actor, now, &group.id)?;
+    if group.status != HiveGroupStatus::Archived {
+        let changed = tx.execute(
+            "UPDATE hive_groups
+             SET status = 'archived', updated_at = ?2
+             WHERE id = ?1 AND status <> 'archived'",
+            params![group.id, now],
+        )?;
+        if changed != 1 {
+            return Err(RuntimeStoreError::StateConflict(
+                "group archive lost its exact active-group state".into(),
+            ));
+        }
+    }
+    mutation.response = ack("group archived");
+    mutation.resource_id = Some(group.id);
+    Ok(mutation)
+}
+
 /// Exact-owner group load: a group owned by someone else is indistinguishable
 /// from a missing one.
 pub(super) fn require_owned_group(
@@ -446,7 +539,12 @@ fn resolve_targets(
             let explicit = resolution.saw_mention
                 && !resolution.mentions_all
                 && !resolution.explicit_worker_ids.is_empty();
-            (resolution.resolve_targets(&mention_roster), explicit)
+            (
+                resolution
+                    .resolve_targets(&mention_roster)
+                    .map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?,
+                explicit,
+            )
         }
     };
     if resolved.is_empty() {
@@ -551,7 +649,7 @@ pub(super) fn load_member_runs(
     Ok(rows)
 }
 
-/// Queue one member run on the Worker's own controller lane. Returns
+/// Queue one member run on the Worker's private lane for this group. Returns
 /// `Ok(Err(reason))` for per-member dispatch failures so one Worker's missing
 /// prerequisites never abort the sibling fan-out.
 #[allow(clippy::type_complexity)]
@@ -563,6 +661,7 @@ pub(super) fn dispatch_member_run(
     worker: Option<&HiveWorker>,
     workbench_slot: Option<u32>,
     trigger_excerpt: &str,
+    origin: WorkerRunOrigin,
 ) -> Result<Result<(String, Vec<PersistedEvent>), String>, RuntimeStoreError> {
     let Some(worker) = worker else {
         return Ok(Err("the Worker left the group".into()));
@@ -573,6 +672,17 @@ pub(super) fn dispatch_member_run(
     if worker.status == HiveWorkerStatus::Paused {
         return Ok(Err("the Worker is paused".into()));
     }
+    if let Some(introduction) = HiveWorkerIntroductionStore::from_connection(tx)
+        .get_by_worker(&worker.id)
+        .map_err(RuntimeStoreError::Internal)?
+    {
+        if !introduction.status.allows_autonomy() {
+            return Ok(Err(format!(
+                "the Worker's Introduction is {}; confirm or skip it before Group work",
+                introduction.status
+            )));
+        }
+    }
     let Some(dm_session_id) = worker.dm_session_id.as_deref() else {
         return Ok(Err(
             "the Worker has no DM lane yet; open its DM once to create it".into(),
@@ -582,31 +692,19 @@ pub(super) fn dispatch_member_run(
         user_id: group.user_id.clone(),
         client_kind: "hive-group-turn".into(),
     };
-    let session = match require_owned_session(tx, &actor, dm_session_id) {
+    let dm_session = match require_owned_session(tx, &actor, dm_session_id) {
         Ok(session) => session,
         Err(RuntimeStoreError::Ownership) => {
             return Ok(Err("the Worker's DM lane is not reachable".into()))
         }
         Err(error) => return Err(error),
     };
-    let workspace = session
-        .working_dir
-        .as_deref()
-        .or(session.project_dir.as_deref())
-        .map(str::trim)
-        .filter(|path| !path.is_empty() && std::path::Path::new(path).is_absolute());
-    let Some(working_dir) = workspace else {
-        return Ok(Err(
-            "the Worker's DM has no workspace; set a working directory before group turns".into(),
-        ));
-    };
-
     // The Worker's frozen model identity is authoritative; the DM session is
     // the compatibility fallback for Workers created without one.
     let model = worker
         .model
         .clone()
-        .or_else(|| session.model.clone())
+        .or_else(|| dm_session.model.clone())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let Some(model) = model else {
@@ -630,14 +728,17 @@ pub(super) fn dispatch_member_run(
         )
     } else {
         (
-            session.model_key.as_ref().map(|key| key.model_id.clone()),
-            session
+            dm_session
+                .model_key
+                .as_ref()
+                .map(|key| key.model_id.clone()),
+            dm_session
                 .model_key
                 .as_ref()
                 .map(serde_json::to_value)
                 .transpose()
                 .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
-            session.model_catalog_revision.clone(),
+            dm_session.model_catalog_revision.clone(),
         )
     };
     if model_key_id.as_deref().is_some_and(|id| id != model) {
@@ -646,9 +747,38 @@ pub(super) fn dispatch_member_run(
         ));
     }
 
+    let session = ensure_group_worker_lane(
+        tx,
+        now,
+        group,
+        worker,
+        &actor,
+        &dm_session,
+        &model,
+        model_key.as_ref(),
+        model_catalog_revision.as_deref(),
+    )?;
     let controller = get_or_create_controller(tx, &session, now)?;
+    let controller_bound = tx.execute(
+        "UPDATE hive_controllers
+         SET worker_id = ?2, scope_key = ?3, updated_at = ?4
+         WHERE id = ?1 AND session_id = ?5 AND user_id IS ?6
+           AND (worker_id IS NULL OR worker_id = ?2)",
+        params![
+            controller.id,
+            worker.id,
+            format!("worker:{}:group:{}", worker.id, group.id),
+            now,
+            session.id,
+            group.user_id,
+        ],
+    )?;
+    if controller_bound != 1 {
+        return Ok(Err(
+            "the group lane controller belongs to another Worker".into()
+        ));
+    }
     let objective = member_objective(&group.title, trigger_excerpt);
-    super::handler::insert_canonical_user_message(tx, &session.id, &objective, now)?;
 
     // Workbench slots bound concurrent members of one turn to the group's
     // parallelism cap through the claim loop's concurrency-key rule; the
@@ -662,9 +792,19 @@ pub(super) fn dispatch_member_run(
         None => format!("hive-group:{}", turn.id),
     };
     let run_id = uuid::Uuid::new_v4().to_string();
+    let execution_context = HiveRunExecutionContextV1::worker_conversation_neutral(
+        worker.id.clone(),
+        worker.revision,
+        WorkerConversationLane::Group {
+            group_id: group.id.clone(),
+        },
+    )
+    .map_err(RuntimeStoreError::Internal)?;
+    let governor_lane_key = execution_context
+        .lane()
+        .canonical_lane_key()
+        .map_err(RuntimeStoreError::Internal)?;
     let config = json!({
-        "working_dir": working_dir,
-        "project_dir": session.project_dir,
         "model": model,
         "model_key": model_key,
         "model_catalog_revision": model_catalog_revision,
@@ -687,12 +827,14 @@ pub(super) fn dispatch_member_run(
             lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
             last_stop_reason, last_error, outcome_json, created_at, started_at,
             finished_at, updated_at, worker_id, group_id, group_turn_id,
-            trigger_message_id
+            trigger_message_id, governor_origin, governor_lane_key,
+            execution_context_json
          ) VALUES (
             ?1, ?2, ?3, NULL, NULL, 'group_turn',
             ?4, ?5, 'queued', 0, ?6,
             ?7, ?7, NULL, 0, ?8, NULL, NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, ?7, NULL, NULL, ?7, ?9, ?10, ?11, ?12
+            NULL, NULL, NULL, ?7, NULL, NULL, ?7, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15
          )",
         params![
             run_id,
@@ -708,6 +850,10 @@ pub(super) fn dispatch_member_run(
             group.id,
             turn.id,
             turn.trigger_message_id,
+            origin.as_str(),
+            governor_lane_key,
+            serde_json::to_string(&execution_context)
+                .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
         ],
     )?;
     let event = append_event(
@@ -728,6 +874,133 @@ pub(super) fn dispatch_member_run(
     Ok(Ok((run_id, vec![event])))
 }
 
+/// Materialize or adopt the hidden conversation lane for one `(group,
+/// Worker)` pair. The outer group mutation already holds an immediate SQLite
+/// transaction, so session creation, lane binding, objective insertion, and
+/// run enqueue either commit together or disappear together.
+///
+/// The deterministic candidate id prevents retries from accumulating orphan
+/// sessions. Existing lanes are retained when a Worker leaves and later
+/// rejoins the room; only operational configuration is refreshed from the
+/// direct DM. No direct messages are copied.
+#[allow(clippy::too_many_arguments)]
+fn ensure_group_worker_lane(
+    tx: &Transaction<'_>,
+    now: &str,
+    group: &HiveGroup,
+    worker: &HiveWorker,
+    actor: &Actor,
+    dm_session: &super::persistence::OwnedSession,
+    model: &str,
+    model_key: Option<&Value>,
+    model_catalog_revision: Option<&str>,
+) -> Result<super::persistence::OwnedSession, RuntimeStoreError> {
+    let candidate_session_id = group_worker_lane_session_id(&group.id, &worker.id);
+    let existing = load_group_worker_lane_with_conn(tx, &group.id, &worker.id)
+        .map_err(RuntimeStoreError::Internal)?;
+    let session_id = if let Some(lane) = existing {
+        if lane.session_id != candidate_session_id {
+            return Err(RuntimeStoreError::StateConflict(
+                "the group Worker lane points at a non-canonical session".into(),
+            ));
+        }
+        lane.session_id
+    } else {
+        let model_key_json = model_key
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        let inserted = tx.execute(
+            "INSERT INTO sessions (
+                 id, title, created_at, updated_at, work_mode, model,
+                 model_key_json, model_catalog_revision, working_dir,
+                 project_dir, workspace_mode, session_type, user_id,
+                 target_branch, permission_mode
+             )
+             SELECT ?1, ?2, ?3, ?3, source.work_mode, ?4,
+                    ?5, ?6, source.working_dir, source.project_dir,
+                    source.workspace_mode, 'hive', source.user_id,
+                    source.target_branch, ?7
+             FROM sessions source
+             WHERE source.id = ?8
+               AND ((?9 IS NULL AND source.user_id IS NULL) OR source.user_id = ?9)",
+            params![
+                candidate_session_id,
+                group_worker_lane_title(group, worker),
+                now,
+                model,
+                model_key_json,
+                model_catalog_revision,
+                worker.permission_mode.as_str(),
+                dm_session.id,
+                actor.user_id,
+            ],
+        )?;
+        if inserted != 1 {
+            return Err(RuntimeStoreError::Ownership);
+        }
+        let lane = upsert_group_worker_lane_with_conn(
+            tx,
+            &NewHiveGroupWorkerLane::new(group.id.clone(), worker.id.clone(), candidate_session_id),
+            now,
+        )
+        .map_err(RuntimeStoreError::Internal)?;
+        lane.session_id
+    };
+
+    // A Worker's model, permissions, or workspace can change after its group
+    // lane was first created. Refresh those execution inputs without touching
+    // the lane's isolated transcript or its stable identity.
+    let model_key_json = model_key
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let updated = tx.execute(
+        "UPDATE sessions
+         SET title = ?2,
+             updated_at = ?3,
+             work_mode = (SELECT work_mode FROM sessions WHERE id = ?4),
+             model = ?5,
+             model_key_json = ?6,
+             model_catalog_revision = ?7,
+             working_dir = (SELECT working_dir FROM sessions WHERE id = ?4),
+             project_dir = (SELECT project_dir FROM sessions WHERE id = ?4),
+             workspace_mode = (SELECT workspace_mode FROM sessions WHERE id = ?4),
+             target_branch = (SELECT target_branch FROM sessions WHERE id = ?4),
+             permission_mode = ?8
+         WHERE id = ?1
+           AND session_type = 'hive'
+           AND ((?9 IS NULL AND user_id IS NULL) OR user_id = ?9)",
+        params![
+            session_id,
+            group_worker_lane_title(group, worker),
+            now,
+            dm_session.id,
+            model,
+            model_key_json,
+            model_catalog_revision,
+            worker.permission_mode.as_str(),
+            actor.user_id,
+        ],
+    )?;
+    if updated != 1 {
+        return Err(RuntimeStoreError::Ownership);
+    }
+    require_owned_session(tx, actor, &session_id)
+}
+
+pub(super) fn group_worker_lane_session_id(group_id: &str, worker_id: &str) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("mitsuro:hive-group-worker-lane:{group_id}:{worker_id}").as_bytes(),
+    )
+    .to_string()
+}
+
+fn group_worker_lane_title(group: &HiveGroup, worker: &HiveWorker) -> String {
+    format!("{} in {}", worker.display_name, group.title)
+}
+
 fn roster_worker<'roster>(
     roster: &'roster [HiveWorker],
     worker_id: &str,
@@ -737,7 +1010,7 @@ fn roster_worker<'roster>(
 
 fn member_objective(group_title: &str, trigger_excerpt: &str) -> String {
     format!(
-        "[GROUP TURN] You were addressed in the group room \"{group_title}\". Triggering message:\n{trigger_excerpt}\n\nReview the [GROUP ROOM] context for the roster and recent timeline. If you have something useful to contribute, post it to the room with the post_to_group tool; everything else you produce stays private to this run."
+        "[GROUP TURN] You were addressed in the group room \"{group_title}\". Triggering message:\n{trigger_excerpt}\n\nReview the [GROUP ROOM] context for the roster and recent timeline. Respond once with the contribution you want shown in the room. The server will post that final response to the group after its exact run fence commits; do not invoke tools or claim that you posted it yourself."
     )
 }
 
@@ -873,10 +1146,10 @@ mod tests {
     };
     use mitsuro_core::storage::{
         Database, HiveGroupStatus, HiveWorkerStore, NewHiveWorker, SessionManager, SessionType,
-        WorkspaceMode,
+        WorkerRunOrigin, WorkspaceMode,
     };
     use mitsuro_hive_protocol::{Actor, GroupMessageCommand, ResponsePayload};
-    use rusqlite::{Transaction, TransactionBehavior};
+    use rusqlite::{params, Transaction, TransactionBehavior};
     use tempfile::TempDir;
 
     use super::super::persistence::RuntimeStoreError;
@@ -900,7 +1173,7 @@ mod tests {
                 .create_session_for_user_with_config(
                     &format!("{slug} DM"),
                     Some("test:model"),
-                    Some("/work/repo"),
+                    None,
                     None,
                     WorkspaceMode::Neutral,
                     None,
@@ -963,6 +1236,16 @@ mod tests {
         message: &str,
         idempotency_key: &str,
     ) -> Result<ResponsePayload, RuntimeStoreError> {
+        send_to_group(world, &world.group_id, actor, message, idempotency_key)
+    }
+
+    fn send_to_group(
+        world: &GroupWorld,
+        group_id: &str,
+        actor: Actor,
+        message: &str,
+        idempotency_key: &str,
+    ) -> Result<ResponsePayload, RuntimeStoreError> {
         let db = Database::new(&world.db_path).unwrap();
         let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -971,11 +1254,12 @@ mod tests {
             &actor,
             &now,
             GroupMessageCommand {
-                group_id: world.group_id.clone(),
+                group_id: group_id.to_string(),
                 message: message.to_string(),
                 mentions_override: None,
             },
             idempotency_key,
+            WorkerRunOrigin::UserGroup,
         );
         tx.commit().unwrap();
         result.map(|mutation| mutation.response)
@@ -989,10 +1273,13 @@ mod tests {
     }
 
     struct RunRow {
+        session_id: String,
         worker_id: Option<String>,
         status: String,
         concurrency_key: Option<String>,
         kind: String,
+        objective: String,
+        trigger_message_id: Option<String>,
     }
 
     fn member_runs(world: &GroupWorld, turn_id: &str) -> Vec<RunRow> {
@@ -1000,23 +1287,42 @@ mod tests {
         let mut statement = db
             .conn()
             .prepare(
-                "SELECT worker_id, status, concurrency_key, kind
+                "SELECT session_id, worker_id, status, concurrency_key, kind,
+                        objective, trigger_message_id
                  FROM hive_runs WHERE group_turn_id = ?1 ORDER BY created_at ASC, id ASC",
             )
             .unwrap();
         let rows = statement
             .query_map([turn_id], |row| {
                 Ok(RunRow {
-                    worker_id: row.get(0)?,
-                    status: row.get(1)?,
-                    concurrency_key: row.get(2)?,
-                    kind: row.get(3)?,
+                    session_id: row.get(0)?,
+                    worker_id: row.get(1)?,
+                    status: row.get(2)?,
+                    concurrency_key: row.get(3)?,
+                    kind: row.get(4)?,
+                    objective: row.get(5)?,
+                    trigger_message_id: row.get(6)?,
                 })
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         rows
+    }
+
+    fn set_introduction_status(world: &GroupWorld, worker_index: usize, status: &str) {
+        let db = Database::new(&world.db_path).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO hive_worker_introductions (
+                     worker_id, run_id, status, prompt_version, created_at, updated_at,
+                     completed_at
+                 ) VALUES (?1, NULL, ?2, 1, ?3, ?3,
+                           CASE WHEN ?2 IN ('confirmed', 'skipped') THEN ?3 ELSE NULL END)",
+                params![world.workers[worker_index].0, status, now],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1053,10 +1359,11 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(slots.len(), 2, "3 members share 2 parallelism slots");
 
-        // Each member's DM lane received the durable group-turn instruction.
+        // Each member gets a private group lane. The direct DM remains clean,
+        // and each run is queued on the lane recorded for its exact pair.
         let db = Database::new(&world.db_path).unwrap();
-        for (_, _, dm_session_id) in &world.workers {
-            let count: i64 = db
+        for (worker_id, _, dm_session_id) in &world.workers {
+            let dm_count: i64 = db
                 .conn()
                 .query_row(
                     "SELECT COUNT(*) FROM messages
@@ -1065,7 +1372,46 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(count, 1);
+            assert_eq!(dm_count, 0, "group turns must never enter the direct DM");
+            let lane_session_id: String = db
+                .conn()
+                .query_row(
+                    "SELECT session_id FROM hive_group_worker_lanes
+                     WHERE group_id = ?1 AND worker_id = ?2",
+                    params![world.group_id, worker_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                lane_session_id,
+                super::group_worker_lane_session_id(&world.group_id, worker_id),
+                "the same group and Worker must always resolve to the same lane"
+            );
+            assert_ne!(lane_session_id, *dm_session_id);
+            let run = runs
+                .iter()
+                .find(|run| run.worker_id.as_deref() == Some(worker_id.as_str()))
+                .expect("every target must have an exact member run");
+            assert_eq!(run.session_id, lane_session_id);
+            assert!(run.objective.contains("[GROUP TURN]"));
+            assert!(run.objective.contains("kick off the review"));
+            assert_eq!(
+                run.trigger_message_id.as_deref(),
+                Some(turn.message_id.as_str())
+            );
+            let lane_count: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM messages
+                     WHERE session_id = ?1 AND role = 'user' AND content LIKE '%GROUP TURN%'",
+                    [&lane_session_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                lane_count, 0,
+                "the room trigger is structural context, not a shadow user message"
+            );
         }
 
         // Replaying the exact request reuses the appended trigger and turn.
@@ -1081,6 +1427,254 @@ mod tests {
         assert_eq!(replay.turn_id, turn.turn_id);
         assert_eq!(replay.message_seq, turn.message_seq);
         assert_eq!(member_runs(&world, &turn.turn_id).len(), 3);
+    }
+
+    #[test]
+    fn explicit_group_mention_rejects_every_unfinished_introduction_state() {
+        for status in [
+            "queued",
+            "running",
+            "awaiting_context",
+            "review_ready",
+            "failed",
+            "needs_recovery",
+        ] {
+            let world = seed_world(
+                HiveGroupExecutionMode::Workbench,
+                &["setup-worker"],
+                GroupCaps::default(),
+            );
+            set_introduction_status(&world, 0, status);
+            let result = send(
+                &world,
+                Actor::local("test"),
+                "@setup-worker inspect the release",
+                &format!("introduction-{status}"),
+            );
+            assert!(matches!(
+                result,
+                Err(RuntimeStoreError::StateConflict(message))
+                    if message.contains("@setup-worker")
+                        && message.contains("confirm or skip")
+                        && message.contains(status)
+            ));
+            let db = Database::new(&world.db_path).unwrap();
+            let (messages, turns, runs): (i64, i64, i64) = db
+                .conn()
+                .query_row(
+                    "SELECT
+                         (SELECT COUNT(*) FROM hive_group_messages),
+                         (SELECT COUNT(*) FROM hive_group_turns),
+                         (SELECT COUNT(*) FROM hive_runs)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((messages, turns, runs), (0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn untargeted_group_turn_skips_unintroduced_members_without_spending_on_them() {
+        let world = seed_world(
+            HiveGroupExecutionMode::Workbench,
+            &["still-setting-up", "legacy-ready"],
+            GroupCaps::default(),
+        );
+        set_introduction_status(&world, 0, "awaiting_context");
+        let turn = turn_response(
+            send(
+                &world,
+                Actor::local("test"),
+                "inspect the release",
+                "skip-unintroduced-member",
+            )
+            .unwrap(),
+        );
+        assert_eq!(turn.target_worker_ids, vec![world.workers[1].0.clone()]);
+        let runs = member_runs(&world, &turn.turn_id);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].worker_id.as_deref(),
+            Some(world.workers[1].0.as_str())
+        );
+    }
+
+    #[test]
+    fn confirmed_skipped_and_legacy_workers_remain_group_eligible() {
+        let world = seed_world(
+            HiveGroupExecutionMode::Workbench,
+            &["confirmed-worker", "skipped-worker", "legacy-worker"],
+            GroupCaps::default(),
+        );
+        set_introduction_status(&world, 0, "confirmed");
+        set_introduction_status(&world, 1, "skipped");
+        let turn = turn_response(
+            send(
+                &world,
+                Actor::local("test"),
+                "inspect the release",
+                "eligible-introductions",
+            )
+            .unwrap(),
+        );
+        assert_eq!(turn.target_worker_ids.len(), 3);
+        assert_eq!(member_runs(&world, &turn.turn_id).len(), 3);
+    }
+
+    #[test]
+    fn direct_and_group_a_and_b_transcripts_are_isolated_and_readded_members_reuse_lane() {
+        let world = seed_world(
+            HiveGroupExecutionMode::Workbench,
+            &["researcher", "reviewer"],
+            GroupCaps::default(),
+        );
+        let worker_id = world.workers[0].0.clone();
+        let dm_session_id = world.workers[0].2.clone();
+        SessionManager::new(Database::new(&world.db_path).unwrap())
+            .save_message(
+                &dm_session_id,
+                "user",
+                r#"[{"type":"text","text":"DM-CANARY-ONLY"}]"#,
+            )
+            .unwrap();
+
+        let group_store = HiveGroupStore::new(Database::new(&world.db_path).unwrap());
+        let group_b = group_store
+            .create(&NewHiveGroup {
+                title: "Second Room".into(),
+                execution_mode: HiveGroupExecutionMode::Workbench,
+                member_worker_ids: vec![worker_id.clone()],
+                ..NewHiveGroup::default()
+            })
+            .unwrap();
+
+        let group_a_turn = turn_response(
+            send(
+                &world,
+                Actor::local("test"),
+                "GROUP-A-CANARY",
+                "isolation-a-1",
+            )
+            .unwrap(),
+        );
+        let group_b_turn = turn_response(
+            send_to_group(
+                &world,
+                &group_b.id,
+                Actor::local("test"),
+                "GROUP-B-CANARY",
+                "isolation-b-1",
+            )
+            .unwrap(),
+        );
+
+        let db = Database::new(&world.db_path).unwrap();
+        let lane_for = |group_id: &str| -> String {
+            db.conn()
+                .query_row(
+                    "SELECT session_id FROM hive_group_worker_lanes
+                     WHERE group_id = ?1 AND worker_id = ?2",
+                    params![group_id, worker_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let lane_a = lane_for(&world.group_id);
+        let lane_b = lane_for(&group_b.id);
+        assert_ne!(lane_a, lane_b);
+        assert_ne!(lane_a, dm_session_id);
+        assert_ne!(lane_b, dm_session_id);
+        let group_a_run = member_runs(&world, &group_a_turn.turn_id)
+            .into_iter()
+            .find(|run| run.worker_id.as_deref() == Some(worker_id.as_str()))
+            .unwrap();
+        assert_eq!(group_a_run.session_id, lane_a);
+        assert_eq!(
+            group_a_run.trigger_message_id.as_deref(),
+            Some(group_a_turn.message_id.as_str())
+        );
+        assert!(group_a_run.objective.contains("GROUP-A-CANARY"));
+        let group_b_run = member_runs(&world, &group_b_turn.turn_id)
+            .into_iter()
+            .find(|run| run.worker_id.as_deref() == Some(worker_id.as_str()))
+            .unwrap();
+        assert_eq!(group_b_run.session_id, lane_b);
+        assert_eq!(
+            group_b_run.trigger_message_id.as_deref(),
+            Some(group_b_turn.message_id.as_str())
+        );
+        assert!(group_b_run.objective.contains("GROUP-B-CANARY"));
+
+        let session_transcript = |session_id: &str| -> String {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT content FROM messages WHERE session_id = ?1 ORDER BY id")
+                .unwrap();
+            let rows = statement
+                .query_map([session_id], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n")
+        };
+        let room_transcript = |group_id: &str| -> String {
+            let mut statement = db
+                .conn()
+                .prepare(
+                    "SELECT content FROM hive_group_messages
+                     WHERE group_id = ?1 ORDER BY seq ASC",
+                )
+                .unwrap();
+            let rows = statement
+                .query_map([group_id], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n")
+        };
+        let dm = session_transcript(&dm_session_id);
+        let lane_a_transcript = session_transcript(&lane_a);
+        let lane_b_transcript = session_transcript(&lane_b);
+        let group_a = room_transcript(&world.group_id);
+        let group_b_transcript = room_transcript(&group_b.id);
+        assert!(dm.contains("DM-CANARY-ONLY"));
+        assert!(!dm.contains("GROUP-A-CANARY"));
+        assert!(!dm.contains("GROUP-B-CANARY"));
+        assert!(lane_a_transcript.is_empty());
+        assert!(lane_b_transcript.is_empty());
+        assert!(group_a.contains("GROUP-A-CANARY"));
+        assert!(!group_a.contains("DM-CANARY-ONLY"));
+        assert!(!group_a.contains("GROUP-B-CANARY"));
+        assert!(group_b_transcript.contains("GROUP-B-CANARY"));
+        assert!(!group_b_transcript.contains("DM-CANARY-ONLY"));
+        assert!(!group_b_transcript.contains("GROUP-A-CANARY"));
+
+        // Removing and re-adding a member does not erase or replace its lane.
+        group_store
+            .set_members(&world.group_id, &[world.workers[1].0.clone()])
+            .unwrap();
+        group_store
+            .set_members(
+                &world.group_id,
+                &[worker_id.clone(), world.workers[1].0.clone()],
+            )
+            .unwrap();
+        let second_a = turn_response(
+            send(
+                &world,
+                Actor::local("test"),
+                "GROUP-A-AFTER-READD",
+                "isolation-a-2",
+            )
+            .unwrap(),
+        );
+        let second_a_run = member_runs(&world, &second_a.turn_id)
+            .into_iter()
+            .find(|run| run.worker_id.as_deref() == Some(worker_id.as_str()))
+            .unwrap();
+        assert_eq!(second_a_run.session_id, lane_a);
+        assert_eq!(lane_for(&world.group_id), lane_a);
     }
 
     #[test]
@@ -1163,6 +1757,62 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, RuntimeStoreError::Invalid(_)), "{error:?}");
+    }
+
+    #[test]
+    fn invalid_mentions_fail_before_persisting_or_fanning_out() {
+        let world = seed_world(
+            HiveGroupExecutionMode::Workbench,
+            &["researcher", "reviewer"],
+            GroupCaps::default(),
+        );
+
+        let ambiguous = send(
+            &world,
+            Actor::local("test"),
+            "@re compare the evidence",
+            "ambiguous-mention",
+        )
+        .unwrap_err();
+        let ambiguous = match ambiguous {
+            RuntimeStoreError::Invalid(message) => message,
+            other => panic!("expected invalid mention error, got {other:?}"),
+        };
+        assert!(ambiguous.contains("@researcher"), "{ambiguous}");
+        assert!(ambiguous.contains("@reviewer"), "{ambiguous}");
+
+        let unresolved = send(
+            &world,
+            Actor::local("test"),
+            "@nobody compare the evidence",
+            "unknown-mention",
+        )
+        .unwrap_err();
+        let unresolved = match unresolved {
+            RuntimeStoreError::Invalid(message) => message,
+            other => panic!("expected invalid mention error, got {other:?}"),
+        };
+        assert!(unresolved.contains("@nobody"), "{unresolved}");
+
+        let db = Database::new(&world.db_path).unwrap();
+        let persisted: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM hive_group_messages WHERE group_id = ?1",
+                [&world.group_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, 0, "invalid routing must be side-effect free");
+        let runs: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM hive_runs WHERE kind = 'group_turn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(runs, 0, "invalid routing must not enqueue Worker runs");
     }
 
     #[test]

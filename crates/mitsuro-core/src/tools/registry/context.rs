@@ -35,6 +35,18 @@ pub enum FilesystemAccess {
     Scoped { root: PathBuf },
 }
 
+/// Operating-system isolation required for shell execution.
+///
+/// The compatible profile preserves the existing local/session behavior. A
+/// Worker Goal is a narrower execution surface and requires a workspace-only
+/// mount namespace with no host network or process visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShellIsolationPolicy {
+    #[default]
+    Compatible,
+    WorkspaceOnly,
+}
+
 impl FilesystemAccess {
     pub fn scoped(root: impl Into<PathBuf>) -> Self {
         Self::Scoped { root: root.into() }
@@ -133,6 +145,9 @@ pub struct ToolContext {
     /// Whether shell commands inherit the host environment or execute inside
     /// the delegated sanitized environment boundary.
     pub command_environment_policy: CommandEnvironmentPolicy,
+    /// Stronger shell isolation selected by a trusted execution boundary.
+    /// Tool arguments cannot change this policy.
+    pub shell_isolation_policy: ShellIsolationPolicy,
     /// Cancellation scoped to this exact dispatched tool call. Delegated
     /// runtimes use this instead of the process-global compatibility token so
     /// cancelling one parent session cannot affect another session's child.
@@ -204,6 +219,7 @@ impl Default for ToolContext {
             timeout: None,
             command_environment: BTreeMap::new(),
             command_environment_policy: CommandEnvironmentPolicy::default(),
+            shell_isolation_policy: ShellIsolationPolicy::default(),
             execution_cancellation: None,
             output_tx: None,
             tool_use_id: None,
@@ -273,6 +289,11 @@ impl ToolContext {
     pub fn with_unrestricted_filesystem_access(mut self) -> Self {
         self.sandbox_root = None;
         self.filesystem_access = FilesystemAccess::Unrestricted;
+        self
+    }
+
+    pub fn with_shell_isolation(mut self, policy: ShellIsolationPolicy) -> Self {
+        self.shell_isolation_policy = policy;
         self
     }
 

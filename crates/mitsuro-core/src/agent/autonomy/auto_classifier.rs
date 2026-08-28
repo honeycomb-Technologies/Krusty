@@ -9,7 +9,7 @@ use crate::agent::hooks::{
     HookResult, PreToolHook,
 };
 use crate::agent::loop_events::LoopEvent;
-use crate::ai::client::AiClient;
+use crate::ai::client::{AiClient, RemoteAttemptPolicy};
 use crate::tools::registry::{PermissionMode, ToolContext};
 
 const SAFE_TOOLS: &[&str] = &[
@@ -508,21 +508,116 @@ impl AutoClassifierHook {
         let model = &client.config().model;
 
         // Stage 1: fast classification
+        let stage_one_permit = if let Some(governor) = ctx
+            .provider_call_trace
+            .as_ref()
+            .and_then(|trace| trace.provider_governor())
+        {
+            let trace = ctx.provider_call_trace.as_ref().expect("trace was present");
+            let slot = match crate::agent::WorkerProviderCallSlot::child(
+                crate::agent::WorkerProviderCallKind::AutonomyClassifierFast,
+                u32::try_from(trace.turn()).unwrap_or(u32::MAX),
+                0,
+                ctx.tool_use_id.as_deref().unwrap_or(name),
+            ) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    let reason = format!("Auto-classifier governor slot failed closed: {error:#}");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+                    return HookResult::Block { reason };
+                }
+            };
+            let reservation = crate::agent::conservative_text_token_reservation(
+                &[CLASSIFIER_PROMPT, &user_prompt],
+                FAST_MAX_TOKENS,
+            );
+            match governor.admit(slot, reservation) {
+                Ok(crate::agent::WorkerProviderAdmission::Allowed(permit)) => Some(permit),
+                Ok(crate::agent::WorkerProviderAdmission::Gated(decision)) => {
+                    let reason = format!(
+                        "Auto-classifier provider call gated: {}",
+                        serde_json::to_string(&decision)
+                            .unwrap_or_else(|_| "durable policy".into())
+                    );
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+                    return HookResult::Block { reason };
+                }
+                Ok(crate::agent::WorkerProviderAdmission::AlreadyStarted(call)) => {
+                    let reason = format!(
+                        "Auto-classifier provider call {} was already Started and was not replayed",
+                        call.provider_call_id
+                    );
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+                    return HookResult::Block { reason };
+                }
+                Err(error) => {
+                    let reason = format!("Auto-classifier admission failed closed: {error:#}");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+                    return HookResult::Block { reason };
+                }
+            }
+        } else {
+            None
+        };
+        let stage_one_provider_call_id = stage_one_permit
+            .as_ref()
+            .map(|permit| permit.provider_call_id().to_string());
         let stage_one_started = std::time::Instant::now();
         let stage_one = client
             .as_ref()
-            .call_simple_with_usage(model, CLASSIFIER_PROMPT, &user_prompt, FAST_MAX_TOKENS)
+            .call_simple_with_usage_and_attempt_policy(
+                model,
+                CLASSIFIER_PROMPT,
+                &user_prompt,
+                FAST_MAX_TOKENS,
+                if stage_one_permit.is_some() {
+                    RemoteAttemptPolicy::GovernedSingleAttempt
+                } else {
+                    RemoteAttemptPolicy::ConfiguredRetries
+                },
+            )
             .await;
         if let Some(trace) = ctx.provider_call_trace.as_ref() {
-            trace
-                .record_simple_call(
-                    "autonomy_classifier_fast",
-                    client.provider_id(),
-                    model,
-                    stage_one_started,
-                    &stage_one,
-                )
-                .await;
+            if let Some(provider_call_id) = stage_one_provider_call_id.clone() {
+                trace
+                    .record_simple_call_with_id(
+                        provider_call_id,
+                        "autonomy_classifier_fast",
+                        client.provider_id(),
+                        model,
+                        stage_one_started,
+                        &stage_one,
+                    )
+                    .await;
+            } else {
+                trace
+                    .record_simple_call(
+                        "autonomy_classifier_fast",
+                        client.provider_id(),
+                        model,
+                        stage_one_started,
+                        &stage_one,
+                    )
+                    .await;
+            }
+        }
+        if let (Some(permit), Ok(response)) = (stage_one_permit.as_ref(), stage_one.as_ref()) {
+            if let Err(error) =
+                permit.complete(crate::agent::WorkerProviderCompletion::acknowledged(
+                    crate::agent::WorkerProviderTerminalOutcome::Completed,
+                    response.usage.clone(),
+                ))
+            {
+                let reason = format!("Auto-classifier accounting failed closed: {error:#}");
+                Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+                return HookResult::Block { reason };
+            }
+        } else if stage_one_permit.is_some() && stage_one.is_err() {
+            let reason =
+                "Auto-classifier provider acceptance is uncertain; escalation was not attempted"
+                    .to_string();
+            Self::emit_decision(ctx, name, "block", reason.clone(), 1);
+            return HookResult::Block { reason };
         }
         match stage_one {
             Ok(response) => match Self::parse_verdict(&response.text) {
@@ -556,21 +651,110 @@ impl AutoClassifierHook {
         }
 
         // Stage 2: thinking classification (more tokens to reason about edge cases)
+        let stage_two_permit = if let Some(governor) = ctx
+            .provider_call_trace
+            .as_ref()
+            .and_then(|trace| trace.provider_governor())
+        {
+            let trace = ctx.provider_call_trace.as_ref().expect("trace was present");
+            let slot = match crate::agent::WorkerProviderCallSlot::child(
+                crate::agent::WorkerProviderCallKind::AutonomyClassifierEscalation,
+                u32::try_from(trace.turn()).unwrap_or(u32::MAX),
+                1,
+                ctx.tool_use_id.as_deref().unwrap_or(name),
+            ) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    let reason = format!("Auto-classifier governor slot failed closed: {error:#}");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                    return HookResult::Block { reason };
+                }
+            };
+            let reservation = crate::agent::conservative_text_token_reservation(
+                &[CLASSIFIER_PROMPT, &user_prompt],
+                THINKING_MAX_TOKENS,
+            );
+            match governor.admit(slot, reservation) {
+                Ok(crate::agent::WorkerProviderAdmission::Allowed(permit)) => Some(permit),
+                Ok(crate::agent::WorkerProviderAdmission::Gated(decision)) => {
+                    let reason = format!(
+                        "Auto-classifier escalation gated: {}",
+                        serde_json::to_string(&decision)
+                            .unwrap_or_else(|_| "durable policy".into())
+                    );
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                    return HookResult::Block { reason };
+                }
+                Ok(crate::agent::WorkerProviderAdmission::AlreadyStarted(call)) => {
+                    let reason = format!(
+                        "Auto-classifier escalation {} was already Started and was not replayed",
+                        call.provider_call_id
+                    );
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                    return HookResult::Block { reason };
+                }
+                Err(error) => {
+                    let reason = format!("Auto-classifier escalation failed closed: {error:#}");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                    return HookResult::Block { reason };
+                }
+            }
+        } else {
+            None
+        };
+        let stage_two_provider_call_id = stage_two_permit
+            .as_ref()
+            .map(|permit| permit.provider_call_id().to_string());
         let stage_two_started = std::time::Instant::now();
         let stage_two = client
             .as_ref()
-            .call_simple_with_usage(model, CLASSIFIER_PROMPT, &user_prompt, THINKING_MAX_TOKENS)
+            .call_simple_with_usage_and_attempt_policy(
+                model,
+                CLASSIFIER_PROMPT,
+                &user_prompt,
+                THINKING_MAX_TOKENS,
+                if stage_two_permit.is_some() {
+                    RemoteAttemptPolicy::GovernedSingleAttempt
+                } else {
+                    RemoteAttemptPolicy::ConfiguredRetries
+                },
+            )
             .await;
         if let Some(trace) = ctx.provider_call_trace.as_ref() {
-            trace
-                .record_simple_call(
-                    "autonomy_classifier_escalation",
-                    client.provider_id(),
-                    model,
-                    stage_two_started,
-                    &stage_two,
-                )
-                .await;
+            if let Some(provider_call_id) = stage_two_provider_call_id {
+                trace
+                    .record_simple_call_with_id(
+                        provider_call_id,
+                        "autonomy_classifier_escalation",
+                        client.provider_id(),
+                        model,
+                        stage_two_started,
+                        &stage_two,
+                    )
+                    .await;
+            } else {
+                trace
+                    .record_simple_call(
+                        "autonomy_classifier_escalation",
+                        client.provider_id(),
+                        model,
+                        stage_two_started,
+                        &stage_two,
+                    )
+                    .await;
+            }
+        }
+        if let (Some(permit), Ok(response)) = (stage_two_permit.as_ref(), stage_two.as_ref()) {
+            if let Err(error) =
+                permit.complete(crate::agent::WorkerProviderCompletion::acknowledged(
+                    crate::agent::WorkerProviderTerminalOutcome::Completed,
+                    response.usage.clone(),
+                ))
+            {
+                let reason = format!("Auto-classifier accounting failed closed: {error:#}");
+                Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                return HookResult::Block { reason };
+            }
         }
         match stage_two {
             Ok(response) => match Self::parse_verdict(&response.text) {

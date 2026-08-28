@@ -673,6 +673,7 @@ export function AccordionControls({
   const providerDragX = useSharedValue(0);
   const providerDragScrollDelta = useSharedValue(0);
   const hasWorkMode = sessionType === 'code';
+  const modelManagedByHive = sessionType === 'hive';
   const maxPillIndex = hasWorkMode ? 5 : 4;
   const modelPillIndex = maxPillIndex;
   const attachPillIndex = hasWorkMode ? 4 : 3;
@@ -825,6 +826,7 @@ export function AccordionControls({
   };
 
   const handleModel = () => {
+    if (modelManagedByHive) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onModelSelect();
   };
@@ -834,7 +836,7 @@ export function AccordionControls({
   const thinkingColor = thinkingLevel === 'off'
     ? `${fabAccent}${THINKING_ICON_ALPHA.off}`
     : `${fabAccent}${THINKING_ICON_ALPHA[thinkingLevel]}`;
-  const providerDockOpen = modelPickerOpen && isOpen;
+  const providerDockOpen = !modelManagedByHive && modelPickerOpen && isOpen;
 
   useEffect(() => {
     if (!providerDockOpen) {
@@ -944,7 +946,8 @@ export function AccordionControls({
     });
 
   const g = theme.colors.glass;
-  const showDesktopFilters = isDesktop && modelPickerOpen && isOpen;
+  const showDesktopFilters = isDesktop && !modelManagedByHive &&
+    modelPickerOpen && isOpen;
   const desktopFilterCount = providerFilters.length;
 
   return (
@@ -978,10 +981,16 @@ export function AccordionControls({
                 index={modelPillIndex}
                 isOpen={isOpen}
                 onPress={handleModel}
-                active={modelPickerOpen}
+                active={!modelManagedByHive && modelPickerOpen}
+                disabled={modelManagedByHive}
                 compact
                 maxIndex={maxPillIndex}
-                accessibilityLabel="Choose model"
+                accessibilityLabel={modelManagedByHive
+                  ? "Hive-managed model"
+                  : "Choose model"}
+                accessibilityHint={modelManagedByHive
+                  ? "This conversation uses its configured Hive model"
+                  : undefined}
               >
                 <Bot
                   size={24}
@@ -995,9 +1004,15 @@ export function AccordionControls({
             index={modelPillIndex}
             isOpen={isOpen}
             onPress={handleModel}
-            active={modelPickerOpen}
+            active={!modelManagedByHive && modelPickerOpen}
+            disabled={modelManagedByHive}
             maxIndex={maxPillIndex}
-            accessibilityLabel="Choose model"
+            accessibilityLabel={modelManagedByHive
+              ? "Hive-managed model"
+              : "Choose model"}
+            accessibilityHint={modelManagedByHive
+              ? "This conversation uses its configured Hive model"
+              : undefined}
             sideContent={
               <Animated.View
                 style={[

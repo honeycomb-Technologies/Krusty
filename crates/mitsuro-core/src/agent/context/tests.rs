@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -13,21 +15,151 @@ use super::workspace::{build_environment_context, summarize_git_status};
 use super::{
     bound_dynamic_context_messages, build_plan_context, build_project_context,
     build_skills_context, inject_context, inject_context_with_hive_profile_and_group,
-    MAX_DYNAMIC_CONTEXT_BYTES,
+    inject_worker_conversation_context, inject_worker_goal_context, MAX_DYNAMIC_CONTEXT_BYTES,
 };
 
-use crate::agent::DelegatedRunStage;
+use crate::agent::{DelegatedRunStage, WorkerGoalExecutionBinding, WorkerGoalExecutionContext};
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::paths;
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
-use crate::storage::reports::CreateReportInput;
+use crate::storage::reports::{CreateReportInput, ReportScope};
 use crate::storage::{
     AutonomousTaskStore, CanonicalMemoryInput, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, HiveGroupRunContext, HiveGroupStore,
-    HiveWorkerDocumentKind, HiveWorkerStore, MemoryNamespace, MemoryStore, MemoryType,
-    NewHiveGroup, NewHiveGroupMessage, NewHiveWorker, ReportStore, SessionManager, WorkMode,
+    DelegatedRunStartInput, DelegatedRunStore, EpisodeStore, HiveGroupRunContext, HiveGroupStore,
+    HiveGroupWorkerLaneStore, HiveWorkerDocumentKind, HiveWorkerStore, MemoryAclScope,
+    MemoryNamespace, MemoryStore, MemoryType, NewHiveGroup, NewHiveGroupMessage,
+    NewHiveGroupWorkerLane, NewHiveWorker, ReportStore, SessionManager, WorkMode,
 };
+use crate::workflow::{
+    AttemptStatus, CollaborationMode, ExecutionAttempt, Goal, GoalCriterion, GoalStatus,
+    PlanRevision, PlanRevisionStatus, WorkflowSnapshot, WorkflowStep, WorkflowStepStatus,
+};
+
+fn test_worker_goal_context(
+    workspace: &std::path::Path,
+    worker_id: &str,
+    worker_revision: u64,
+) -> WorkerGoalExecutionContext {
+    let timestamp = "2026-08-25T00:00:00.000000Z".to_string();
+    let snapshot = WorkflowSnapshot {
+        schema_version: 1,
+        aggregate_revision: 2,
+        collaboration_mode: CollaborationMode::Default,
+        permission_mode: "supervised".into(),
+        goal: Goal {
+            id: "goal-context-1".into(),
+            session_id: "worker-goal-session".into(),
+            title: "Context isolation goal".into(),
+            objective: "Verify the boundary-context marker without ambient data".into(),
+            constraints: vec!["Keep the exact Worker scope".into()],
+            status: GoalStatus::Active,
+            status_reason: None,
+            needs_definition: false,
+            revision: 2,
+            token_budget: None,
+            tokens_used: 0,
+            source: "hive_worker".into(),
+            legacy_plan_id: None,
+            created_at: timestamp.clone(),
+            updated_at: timestamp.clone(),
+            activated_at: Some(timestamp.clone()),
+            completed_at: None,
+            cancelled_at: None,
+        },
+        criteria: vec![GoalCriterion {
+            id: "criterion-context-1".into(),
+            goal_id: "goal-context-1".into(),
+            position: 0,
+            description: "boundary-context marker is isolated".into(),
+            required: true,
+            status: crate::workflow::CriterionStatus::Pending,
+            evidence: Vec::new(),
+            verifier: None,
+            verified_at: None,
+        }],
+        plan_revision: Some(PlanRevision {
+            id: "plan-context-1".into(),
+            goal_id: "goal-context-1".into(),
+            revision_number: 1,
+            status: PlanRevisionStatus::Active,
+            title: "Exact context plan".into(),
+            rationale: None,
+            source_message_id: None,
+            predecessor_id: None,
+            legacy_markdown: None,
+            created_at: timestamp.clone(),
+            approved_at: Some(timestamp.clone()),
+            completed_at: None,
+        }),
+        steps: vec![WorkflowStep {
+            id: "step-context-1".into(),
+            plan_revision_id: "plan-context-1".into(),
+            parent_step_id: None,
+            display_key: "1".into(),
+            position: 0,
+            description: "Inspect the exact boundary-context marker".into(),
+            context: None,
+            acceptance_criteria: vec!["No unrelated context appears".into()],
+            required: true,
+            status: WorkflowStepStatus::InProgress,
+            outcome: None,
+            evidence: Vec::new(),
+            claimed_attempt_id: Some("attempt-context-1".into()),
+            revision: 3,
+            created_at: timestamp.clone(),
+            started_at: Some(timestamp.clone()),
+            completed_at: None,
+        }],
+        dependencies: Vec::new(),
+        latest_attempt: Some(ExecutionAttempt {
+            id: "attempt-context-1".into(),
+            goal_id: "goal-context-1".into(),
+            plan_revision_id: Some("plan-context-1".into()),
+            step_id: Some("step-context-1".into()),
+            status: AttemptStatus::Running,
+            stop_reason: None,
+            permission_mode: "supervised".into(),
+            goal_revision_at_start: 2,
+            max_turns: 3,
+            max_tool_calls: 8,
+            max_wall_time_secs: 300,
+            max_research_actions: 4,
+            turn_count: 0,
+            tool_call_count: 0,
+            research_action_count: 0,
+            progress_revision: 0,
+            blocker_fingerprint: None,
+            blocker_streak: 0,
+            started_at: timestamp.clone(),
+            updated_at: timestamp,
+            ended_at: None,
+        }),
+        allowed_actions: vec!["pause_goal".into()],
+    };
+    WorkerGoalExecutionContext::new(
+        WorkerGoalExecutionBinding {
+            worker_id: worker_id.into(),
+            worker_revision,
+            owner_user_id: None,
+            session_id: "worker-goal-session".into(),
+            run_id: "worker-goal-run-context-1".into(),
+            run_lease_token: "worker-goal-lease-context-1".into(),
+            run_lease_epoch: 1,
+            run_origin: crate::storage::WorkerRunOrigin::UserWorkflowActivation,
+            goal_id: "goal-context-1".into(),
+            goal_revision: 2,
+            workflow_aggregate_revision: 2,
+            attempt_id: "attempt-context-1".into(),
+            plan_revision_id: "plan-context-1".into(),
+            plan_revision_number: 1,
+            step_id: "step-context-1".into(),
+            step_revision: 3,
+            workspace_dir: workspace.to_path_buf(),
+        },
+        Arc::new(snapshot),
+    )
+}
 
 #[test]
 fn project_context_loads_hierarchical_instruction_files() {
@@ -908,6 +1040,7 @@ fn inject_context_includes_hive_knowledge_from_memory_and_reports() {
             summary: "Validated the wake pipeline end to end.",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -1012,6 +1145,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
                 summary,
                 tags: &["queue".to_string(), "ownership".to_string()],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .unwrap();
     }
@@ -1038,6 +1172,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         Some(project),
         Some("alice"),
         None,
+        None,
         "hive-alice",
         None,
         &conversation,
@@ -1047,6 +1182,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         Some(project),
         Some("bob"),
         None,
+        None,
         "hive-bob",
         None,
         &conversation,
@@ -1054,6 +1190,7 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
     let local = build_hive_knowledge_context(
         &db_path,
         Some(project),
+        None,
         None,
         None,
         "hive-local",
@@ -1161,6 +1298,7 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
         Some(project),
         None,
         None,
+        None,
         "hive-primary",
         None,
         &conversation,
@@ -1170,6 +1308,7 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
         Some(project),
         None,
         Some("reviewer"),
+        None,
         "hive-reviewer",
         None,
         &conversation,
@@ -1239,6 +1378,39 @@ fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
              INSERT INTO sessions (id, title, created_at, updated_at, session_type)
              VALUES ('companion', 'Hive', '2026-08-01T00:00:00.000000Z',
                      '2026-08-01T00:00:00.000000Z', 'hive');",
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (
+                 id, title, created_at, updated_at, working_dir, project_dir,
+                 workspace_mode, session_type
+             ) VALUES ('other-chat', 'Other chat',
+                 '2026-08-01T00:00:00.000000Z', '2026-08-01T00:00:00.000000Z',
+                 ?1, ?1, 'selected', 'hive')",
+            [&project],
+        )
+        .unwrap();
+    let episode_content = serde_json::json!([{
+        "type": "text",
+        "text": "Recall the correct working style OWNER-WIDE-EPISODE-CANARY"
+    }])
+    .to_string();
+    db.conn()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES ('other-chat', 'user', ?1, '2026-08-01T00:00:00.000000Z')",
+            [&episode_content],
+        )
+        .unwrap();
+    let episode_message_id = db.conn().last_insert_rowid();
+    EpisodeStore::new(&db)
+        .record_message(
+            "other-chat",
+            episode_message_id,
+            "user",
+            &episode_content,
+            "2026-08-01T00:00:00.000000Z",
         )
         .unwrap();
 
@@ -1340,6 +1512,10 @@ fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
     assert!(dm.contains("analyst-namespace-marker"));
     assert!(!dm.contains("primary-hive-marker"));
     assert!(!dm.contains("other-namespace-marker"));
+    assert!(
+        !dm.contains("OWNER-WIDE-EPISODE-CANARY"),
+        "Worker DMs must not search raw episodes from other owned conversations"
+    );
 
     // A hive session without a Worker binding keeps the primary companion
     // treatment: no Worker persona, primary namespace memories intact.
@@ -1348,6 +1524,10 @@ fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
     assert!(companion.contains("shared-memory-marker"));
     assert!(companion.contains("primary-hive-marker"));
     assert!(!companion.contains("analyst-namespace-marker"));
+    assert!(
+        companion.contains("OWNER-WIDE-EPISODE-CANARY"),
+        "the primary companion keeps bounded owner-wide episodic continuity"
+    );
 }
 
 #[test]
@@ -1389,6 +1569,364 @@ fn worker_persona_requires_matching_session_owner() {
 }
 
 #[test]
+fn neutral_worker_context_has_no_workspace_or_global_hive_fallback() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("mitsuro.db");
+    fs::write(temp.path().join("AGENTS.md"), "WORKSPACE-CONTEXT-CANARY").unwrap();
+    fs::write(temp.path().join("HIVE.md"), "GLOBAL-HIVE-CANARY").unwrap();
+    let db = Database::new(&db_path).unwrap();
+    db.conn()
+        .execute_batch(
+            "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+             VALUES ('worker-dm', 'Analyst', '2026-08-01T00:00:00.000000Z',
+                     '2026-08-01T00:00:00.000000Z', 'hive');",
+        )
+        .unwrap();
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let worker = worker_store.create(&NewHiveWorker::new("analyst")).unwrap();
+    worker_store
+        .upsert_document(
+            &worker.id,
+            HiveWorkerDocumentKind::Identity,
+            "EXACT-WORKER-PERSONA",
+        )
+        .unwrap();
+    worker_store
+        .bind_dm_session(&worker.id, Some("worker-dm"))
+        .unwrap();
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Who are you?".into(),
+        }],
+    }];
+
+    let injected = inject_worker_conversation_context(
+        &conversation,
+        &db_path,
+        "worker-dm",
+        &worker.id,
+        None,
+        None,
+    )
+    .unwrap();
+    let rendered = injected
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("[WORKER CONVERSATION CAPABILITY]"));
+    assert!(rendered.contains("EXACT-WORKER-PERSONA"));
+    for denied in [
+        "WORKSPACE-CONTEXT-CANARY",
+        "GLOBAL-HIVE-CANARY",
+        "[HIVE COORDINATOR]",
+        "[DELEGATION MODE:",
+        "[AVAILABLE SKILLS]",
+        "[ACTIVE PLAN",
+    ] {
+        assert!(!rendered.contains(denied), "leaked {denied}");
+    }
+    assert!(inject_worker_conversation_context(
+        &conversation,
+        &db_path,
+        "worker-dm",
+        "different-worker",
+        None,
+        None,
+    )
+    .is_err());
+}
+
+#[test]
+fn worker_goal_context_isolates_workflow_worker_knowledge_and_ephemeral_trigger() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let project = workspace.to_string_lossy().to_string();
+    let db_path = workspace.join("mitsuro.db");
+    fs::write(
+        workspace.join("AGENTS.md"),
+        "PROJECT-INSTRUCTION-LEAK-CANARY",
+    )
+    .unwrap();
+    fs::write(workspace.join("HIVE.md"), "GLOBAL-HIVE-LEAK-CANARY").unwrap();
+    let db = Database::new(&db_path).unwrap();
+    for (id, title, session_type) in [
+        ("worker-goal-session", "Worker Goal", "hive"),
+        ("worker-goal-group-lane", "Hidden group lane", "hive"),
+        ("other-worker-dm", "Other Worker", "hive"),
+        ("ordinary-chat", "Ordinary Chat", "chat"),
+    ] {
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (
+                     id, title, created_at, updated_at, working_dir, project_dir,
+                     workspace_mode, session_type
+                 ) VALUES (?1, ?2,
+                     '2026-08-25T00:00:00.000000Z', '2026-08-25T00:00:00.000000Z',
+                     ?3, ?3, 'selected', ?4)",
+                rusqlite::params![id, title, project, session_type],
+            )
+            .unwrap();
+    }
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let worker = worker_store
+        .create(&NewHiveWorker {
+            dm_session_id: Some("worker-goal-session".into()),
+            memory_namespace_id: Some("goal-worker-private".into()),
+            ..NewHiveWorker::new("goal-worker")
+        })
+        .unwrap();
+    let other = worker_store
+        .create(&NewHiveWorker {
+            dm_session_id: Some("other-worker-dm".into()),
+            memory_namespace_id: Some("other-worker-private".into()),
+            ..NewHiveWorker::new("other-worker")
+        })
+        .unwrap();
+    worker_store
+        .upsert_document(
+            &worker.id,
+            HiveWorkerDocumentKind::Identity,
+            "EXACT-WORKER-GOAL-PERSONA",
+        )
+        .unwrap();
+    let group = HiveGroupStore::new(Database::new(&db_path).unwrap())
+        .create(&NewHiveGroup {
+            title: "Hidden room".into(),
+            member_worker_ids: vec![worker.id.clone(), other.id.clone()],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+    HiveGroupWorkerLaneStore::new(Database::new(&db_path).unwrap())
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.id,
+            worker.id.clone(),
+            "worker-goal-group-lane",
+        ))
+        .unwrap();
+    worker_store
+        .upsert_document(
+            &other.id,
+            HiveWorkerDocumentKind::Identity,
+            "OTHER-WORKER-PERSONA-LEAK-CANARY",
+        )
+        .unwrap();
+
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    for (key, marker, namespace, namespace_id, acl_scope, conversation_id) in [
+        (
+            "goal-shared",
+            "SHARED-GOAL-MEMORY-LEAK-CANARY",
+            MemoryNamespace::Shared,
+            None,
+            MemoryAclScope::Owner,
+            None,
+        ),
+        (
+            "goal-private",
+            "EXACT-WORKER-PRIVATE-MEMORY",
+            MemoryNamespace::Crew,
+            Some("goal-worker-private"),
+            MemoryAclScope::Worker,
+            None,
+        ),
+        (
+            "other-private",
+            "OTHER-WORKER-MEMORY-LEAK-CANARY",
+            MemoryNamespace::Crew,
+            Some("other-worker-private"),
+            MemoryAclScope::Worker,
+            None,
+        ),
+        (
+            "primary-hive",
+            "PRIMARY-HIVE-MEMORY-LEAK-CANARY",
+            MemoryNamespace::Hive,
+            None,
+            MemoryAclScope::Owner,
+            None,
+        ),
+        (
+            "goal-conversation",
+            "WORKER-DM-CONVERSATION-MEMORY-LEAK-CANARY",
+            MemoryNamespace::Shared,
+            None,
+            MemoryAclScope::Conversation,
+            Some("worker-goal-session"),
+        ),
+    ] {
+        let mut input =
+            CanonicalMemoryInput::new(MemoryType::Project, key, "Boundary context memory", marker);
+        input.project_dir = Some(project.clone());
+        input.namespace = namespace;
+        input.namespace_id = namespace_id.map(str::to_string);
+        input.acl_scope = acl_scope;
+        input.conversation_id = conversation_id.map(str::to_string);
+        memory_store.save_canonical(&input).unwrap();
+    }
+
+    let report_store = ReportStore::new(Database::new(&db_path).unwrap());
+    for (session_id, marker, scope) in [
+        (
+            "worker-goal-session",
+            "EXACT-WORKER-PRIVATE-REPORT",
+            ReportScope::worker_private(worker.id.clone(), worker.memory_namespace_id.clone())
+                .unwrap(),
+        ),
+        (
+            "other-worker-dm",
+            "OTHER-WORKER-REPORT-LEAK-CANARY",
+            ReportScope::worker_private(other.id, other.memory_namespace_id).unwrap(),
+        ),
+        (
+            "ordinary-chat",
+            "ORDINARY-CHAT-REPORT-LEAK-CANARY",
+            ReportScope::owner_shared(),
+        ),
+    ] {
+        report_store
+            .create_report(CreateReportInput {
+                title: "Boundary context evidence",
+                session_id,
+                project_dir: Some(&project),
+                report_root: None,
+                content: marker,
+                summary: marker,
+                tags: &["boundary".into(), "context".into()],
+                sources: &[],
+                scope,
+            })
+            .unwrap();
+    }
+
+    let ordinary_content = serde_json::json!([{
+        "type": "text",
+        "text": "ORDINARY-CHAT-EPISODE-LEAK-CANARY boundary context"
+    }])
+    .to_string();
+    db.conn()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES ('ordinary-chat', 'user', ?1, '2026-08-25T00:00:00.000000Z')",
+            [&ordinary_content],
+        )
+        .unwrap();
+    EpisodeStore::new(&db)
+        .record_message(
+            "ordinary-chat",
+            db.conn().last_insert_rowid(),
+            "user",
+            &ordinary_content,
+            "2026-08-25T00:00:00.000000Z",
+        )
+        .unwrap();
+
+    let context = test_worker_goal_context(&workspace, &worker.id, worker.revision);
+    let ephemeral_trigger = context.ephemeral_trigger_message();
+    let conversation = vec![ephemeral_trigger];
+    let injected = inject_worker_goal_context(
+        &conversation,
+        &db_path,
+        "worker-goal-session",
+        None,
+        &context,
+        &HashSet::from(["read".to_string(), "apply_patch".to_string()]),
+    )
+    .unwrap();
+    let rendered = injected
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let workspace_text = workspace.to_string_lossy().to_string();
+
+    for required in [
+        "[WORKER GOAL CAPABILITY]",
+        "[CANONICAL WORKER GOAL ATTEMPT]",
+        "goal-context-1",
+        "attempt-context-1",
+        "step-context-1",
+        "EXACT-WORKER-GOAL-PERSONA",
+        "EXACT-WORKER-PRIVATE-MEMORY",
+        "EXACT-WORKER-PRIVATE-REPORT",
+        workspace_text.as_str(),
+    ] {
+        assert!(rendered.contains(required), "missing {required}");
+    }
+    for denied in [
+        "PROJECT-INSTRUCTION-LEAK-CANARY",
+        "GLOBAL-HIVE-LEAK-CANARY",
+        "OTHER-WORKER-PERSONA-LEAK-CANARY",
+        "OTHER-WORKER-MEMORY-LEAK-CANARY",
+        "OTHER-WORKER-REPORT-LEAK-CANARY",
+        "SHARED-GOAL-MEMORY-LEAK-CANARY",
+        "PRIMARY-HIVE-MEMORY-LEAK-CANARY",
+        "WORKER-DM-CONVERSATION-MEMORY-LEAK-CANARY",
+        "ORDINARY-CHAT-REPORT-LEAK-CANARY",
+        "ORDINARY-CHAT-EPISODE-LEAK-CANARY",
+        "[GROUP ROOM]",
+        "[AVAILABLE SKILLS]",
+        "tool_search",
+    ] {
+        assert!(!rendered.contains(denied), "leaked {denied}");
+    }
+    assert_eq!(
+        injected
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1,
+        "context injection must not invent a persisted-looking user turn"
+    );
+    assert!(matches!(
+        injected.last(),
+        Some(ModelMessage {
+            role: Role::User,
+            content,
+        }) if matches!(
+            content.as_slice(),
+            [Content::Text { text }]
+                if text.contains("[WORKER GOAL TRIGGER v1]")
+                    && text.contains("goal-context-1")
+                    && text.contains("attempt-context-1")
+        )
+    ));
+
+    let stale_context = test_worker_goal_context(&workspace, &worker.id, worker.revision + 1);
+    assert!(matches!(
+        inject_worker_goal_context(
+            &conversation,
+            &db_path,
+            "worker-goal-session",
+            None,
+            &stale_context,
+            &HashSet::from(["read".to_string()]),
+        ),
+        Err(super::WorkerConversationContextError::WorkerRevisionMismatch { .. })
+    ));
+    assert!(matches!(
+        inject_worker_goal_context(
+            &conversation,
+            &db_path,
+            "worker-goal-group-lane",
+            None,
+            &context,
+            &HashSet::from(["read".to_string()]),
+        ),
+        Err(super::WorkerConversationContextError::DeniedBinding)
+    ));
+}
+
+#[test]
 fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
@@ -1411,6 +1949,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
             summary: "Queue scheduling and overdue run analysis.",
             tags: &["queue".into(), "scheduling".into()],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     for index in 0..5 {
@@ -1424,6 +1963,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
                 summary: "General project notes.",
                 tags: &["misc".into()],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .unwrap();
     }
@@ -1491,6 +2031,7 @@ fn inject_context_omits_reports_when_none_are_relevant() {
             summary: "Schema rollout findings.",
             tags: &["database".into()],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -1546,6 +2087,7 @@ fn inject_context_uses_active_hive_tasks_for_report_relevance() {
             summary: "How to investigate scheduler drift safely.",
             tags: &["scheduler".into(), "drift".into()],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     for index in 0..5 {
@@ -1559,6 +2101,7 @@ fn inject_context_uses_active_hive_tasks_for_report_relevance() {
                 summary: "General notes.",
                 tags: &["misc".into()],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .unwrap();
     }
@@ -1636,6 +2179,7 @@ fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_hive()
             summary: "Queue ordering remains stable.",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -1924,55 +2468,121 @@ fn group_member_run_isolates_worker_private_memories() {
     let db_path = repo.join("mitsuro.db");
     let project = repo.to_string_lossy().to_string();
     let db = Database::new(&db_path).unwrap();
+    for (id, title, session_type) in [
+        ("group-run-a", "Researcher group lane", "hive"),
+        ("researcher-dm", "Researcher DM", "hive"),
+        ("builder-dm", "Builder DM", "hive"),
+        ("primary-hive", "Primary Hive", "hive"),
+        ("ordinary-hive-history", "Ordinary Hive history", "hive"),
+        ("ordinary-chat", "Ordinary Chat", "chat"),
+        ("ordinary-code", "Ordinary Code", "code"),
+    ] {
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (
+                     id, title, created_at, updated_at, working_dir, project_dir,
+                     workspace_mode, session_type
+                 ) VALUES (?1, ?2,
+                     '2026-08-16T00:00:00.000000Z', '2026-08-16T00:00:00.000000Z',
+                     ?3, ?3, 'selected', ?4)",
+                rusqlite::params![id, title, project, session_type],
+            )
+            .unwrap();
+    }
+    let episode_content = serde_json::json!([{
+        "type": "text",
+        "text": "Recall the correct working style GROUP-EPISODE-LEAK-CANARY"
+    }])
+    .to_string();
     db.conn()
-        .execute_batch(
-            "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
-             VALUES ('group-run-a', 'Group run A', '2026-08-16T00:00:00.000000Z',
-                     '2026-08-16T00:00:00.000000Z', 'hive');",
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES ('ordinary-hive-history', 'user', ?1,
+                     '2026-08-16T00:00:00.000000Z')",
+            [&episode_content],
+        )
+        .unwrap();
+    EpisodeStore::new(&db)
+        .record_message(
+            "ordinary-hive-history",
+            db.conn().last_insert_rowid(),
+            "user",
+            &episode_content,
+            "2026-08-16T00:00:00.000000Z",
         )
         .unwrap();
 
     let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
     let researcher = worker_store
-        .create(&NewHiveWorker::new("researcher"))
+        .create(&NewHiveWorker {
+            dm_session_id: Some("researcher-dm".into()),
+            memory_namespace_id: Some("stable-researcher".into()),
+            ..NewHiveWorker::new("researcher")
+        })
         .unwrap();
-    let builder = worker_store.create(&NewHiveWorker::new("builder")).unwrap();
+    let builder = worker_store
+        .create(&NewHiveWorker {
+            dm_session_id: Some("builder-dm".into()),
+            memory_namespace_id: Some("stable-builder".into()),
+            ..NewHiveWorker::new("builder")
+        })
+        .unwrap();
+    worker_store
+        .upsert_document(
+            &researcher.id,
+            HiveWorkerDocumentKind::Identity,
+            "GROUP-WORKER-PERSONA-MARKER",
+        )
+        .unwrap();
     let group_store = HiveGroupStore::new(Database::new(&db_path).unwrap());
     let group = group_store
         .create(&NewHiveGroup {
             title: "Release Room".into(),
-            member_worker_ids: vec![researcher.id.clone(), builder.id],
+            member_worker_ids: vec![researcher.id.clone(), builder.id.clone()],
             ..NewHiveGroup::default()
         })
+        .unwrap();
+    HiveGroupWorkerLaneStore::new(Database::new(&db_path).unwrap())
+        .upsert(&NewHiveGroupWorkerLane::new(
+            group.id.clone(),
+            researcher.id.clone(),
+            "group-run-a",
+        ))
         .unwrap();
 
     let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
     for (canonical_key, title, content, namespace, namespace_id) in [
         (
             "shared-style",
-            "Shared style",
-            "shared-memory-marker",
+            "Shared working style",
+            "shared-memory-marker working style",
             MemoryNamespace::Shared,
             None,
         ),
         (
+            "primary-style",
+            "Primary Hive working style",
+            "primary-hive-marker working style",
+            MemoryNamespace::Hive,
+            None,
+        ),
+        (
             "researcher-private",
-            "Researcher private",
-            "researcher-private-marker",
+            "Researcher working style",
+            "researcher-private-marker working style",
             MemoryNamespace::Crew,
-            Some("researcher"),
+            Some("stable-researcher"),
         ),
         (
             "builder-private",
-            "Builder private",
-            "builder-private-marker",
+            "Builder working style",
+            "builder-private-marker working style",
             MemoryNamespace::Crew,
-            Some("builder"),
+            Some("stable-builder"),
         ),
     ] {
         let mut input =
             CanonicalMemoryInput::new(MemoryType::Project, canonical_key, title, content);
-        input.project_dir = Some(project.clone());
         input.namespace = namespace;
         input.namespace_id = namespace_id.map(str::to_string);
         memory_store.save_canonical(&input).unwrap();
@@ -1984,10 +2594,80 @@ fn group_member_run_isolates_worker_private_memories() {
         "Group shared",
         "group-shared-marker",
     );
-    group_shared.project_dir = Some(project);
+    group_shared.project_dir = Some(project.clone());
     group_shared.acl_scope = crate::storage::MemoryAclScope::Group;
     group_shared.conversation_id = Some(group.id.clone());
     memory_store.save_canonical(&group_shared).unwrap();
+
+    for (session_id, marker) in [
+        ("researcher-dm", "WORKER-A-DM-EPISODE-CANARY"),
+        ("group-run-a", "WORKER-A-GROUP-EPISODE-CANARY"),
+        ("builder-dm", "WORKER-B-DM-EPISODE-CANARY"),
+    ] {
+        let content = serde_json::json!([{
+            "type": "text",
+            "text": format!("Recall the correct working style {marker}")
+        }])
+        .to_string();
+        db.conn()
+            .execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES (?1, 'user', ?2, '2026-08-16T00:00:00.000000Z')",
+                rusqlite::params![session_id, content],
+            )
+            .unwrap();
+        EpisodeStore::new(&db)
+            .record_message(
+                session_id,
+                db.conn().last_insert_rowid(),
+                "user",
+                &content,
+                "2026-08-16T00:00:00.000000Z",
+            )
+            .unwrap();
+    }
+
+    let report_store = ReportStore::new(Database::new(&db_path).unwrap());
+    for (session_id, title, marker) in [
+        (
+            "researcher-dm",
+            "Researcher DM working style",
+            "REPORT-A-DM",
+        ),
+        (
+            "group-run-a",
+            "Researcher group working style",
+            "REPORT-A-GROUP",
+        ),
+        ("builder-dm", "Builder working style", "REPORT-B-DM"),
+        ("primary-hive", "Primary working style", "REPORT-PRIMARY"),
+    ] {
+        let scope = match session_id {
+            "researcher-dm" | "group-run-a" => ReportScope::worker_private(
+                researcher.id.clone(),
+                researcher.memory_namespace_id.clone(),
+            )
+            .unwrap(),
+            "builder-dm" => {
+                ReportScope::worker_private(builder.id.clone(), builder.memory_namespace_id.clone())
+                    .unwrap()
+            }
+            _ => ReportScope::owner_shared(),
+        };
+        report_store
+            .create_report(CreateReportInput {
+                title,
+                session_id,
+                project_dir: Some(&project),
+                report_root: None,
+                content: marker,
+                summary: marker,
+                tags: &["working-style".into()],
+                sources: &[],
+                scope,
+            })
+            .unwrap();
+    }
 
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
@@ -2029,11 +2709,156 @@ fn group_member_run_isolates_worker_private_memories() {
         .join("\n\n");
 
     assert!(context.contains("[GROUP ROOM - Release Room]"));
+    assert!(context.contains("[HIVE WORKER - researcher]"));
+    assert!(context.contains("GROUP-WORKER-PERSONA-MARKER"));
+    assert!(context.contains("private working lane for a group room"));
+    assert!(
+        !context.contains("GROUP-EPISODE-LEAK-CANARY"),
+        "group Worker runs must not search owner-wide conversation episodes"
+    );
     assert!(context.contains("shared-memory-marker"));
     assert!(context.contains("researcher-private-marker"));
     assert!(context.contains("group-shared-marker"));
+    assert!(context.contains("REPORT-A-DM"));
+    assert!(context.contains("REPORT-A-GROUP"));
+    assert!(context.contains("REPORT-PRIMARY"));
+    assert!(context.contains("WORKER-A-DM-EPISODE-CANARY"));
+    assert!(!context.contains("WORKER-A-GROUP-EPISODE-CANARY"));
+    assert!(!context.contains("WORKER-B-DM-EPISODE-CANARY"));
     assert!(
         !context.contains("builder-private-marker"),
         "a group member run must not inherit another Worker's private memories"
     );
+    assert!(!context.contains("REPORT-B-DM"));
+
+    let render_direct = |session_id: &str, session_type: &str| {
+        inject_context(
+            &conversation,
+            &db_path,
+            session_id,
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some(session_type),
+            None,
+            None,
+        )
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    };
+
+    let researcher_dm = render_direct("researcher-dm", "hive");
+    assert!(researcher_dm.contains("[HIVE WORKER - researcher]"));
+    assert!(researcher_dm.contains("shared-memory-marker"));
+    assert!(researcher_dm.contains("researcher-private-marker"));
+    assert!(researcher_dm.contains("REPORT-A-DM"));
+    assert!(researcher_dm.contains("REPORT-A-GROUP"));
+    assert!(researcher_dm.contains("WORKER-A-GROUP-EPISODE-CANARY"));
+    assert!(!researcher_dm.contains("WORKER-A-DM-EPISODE-CANARY"));
+    assert!(!researcher_dm.contains("WORKER-B-DM-EPISODE-CANARY"));
+    assert!(!researcher_dm.contains("builder-private-marker"));
+    assert!(!researcher_dm.contains("group-shared-marker"));
+    assert!(!researcher_dm.contains("REPORT-B-DM"));
+
+    let builder_dm = render_direct("builder-dm", "hive");
+    assert!(builder_dm.contains("[HIVE WORKER - builder]"));
+    assert!(builder_dm.contains("shared-memory-marker"));
+    assert!(builder_dm.contains("builder-private-marker"));
+    assert!(builder_dm.contains("REPORT-B-DM"));
+    assert!(!builder_dm.contains("WORKER-A-DM-EPISODE-CANARY"));
+    assert!(!builder_dm.contains("WORKER-A-GROUP-EPISODE-CANARY"));
+    assert!(!builder_dm.contains("researcher-private-marker"));
+    assert!(!builder_dm.contains("REPORT-A-DM"));
+    assert!(!builder_dm.contains("REPORT-A-GROUP"));
+
+    let primary = render_direct("primary-hive", "hive");
+    assert!(primary.contains("shared-memory-marker"));
+    assert!(primary.contains("primary-hive-marker"));
+    assert!(primary.contains("REPORT-PRIMARY"));
+    assert!(primary.contains("GROUP-EPISODE-LEAK-CANARY"));
+    for private_canary in [
+        "researcher-private-marker",
+        "builder-private-marker",
+        "group-shared-marker",
+        "REPORT-A-DM",
+        "REPORT-A-GROUP",
+        "REPORT-B-DM",
+        "WORKER-A-DM-EPISODE-CANARY",
+        "WORKER-A-GROUP-EPISODE-CANARY",
+        "WORKER-B-DM-EPISODE-CANARY",
+    ] {
+        assert!(
+            !primary.contains(private_canary),
+            "primary Hive leaked Worker-private canary {private_canary}"
+        );
+    }
+
+    for ordinary in [
+        render_direct("ordinary-chat", "chat"),
+        render_direct("ordinary-code", "code"),
+    ] {
+        assert!(ordinary.contains("shared-memory-marker"));
+        for private_canary in [
+            "primary-hive-marker",
+            "researcher-private-marker",
+            "builder-private-marker",
+            "group-shared-marker",
+            "REPORT-A-DM",
+            "REPORT-A-GROUP",
+            "REPORT-B-DM",
+            "WORKER-A-DM-EPISODE-CANARY",
+            "WORKER-A-GROUP-EPISODE-CANARY",
+            "WORKER-B-DM-EPISODE-CANARY",
+        ] {
+            assert!(
+                !ordinary.contains(private_canary),
+                "ordinary session leaked private canary {private_canary}"
+            );
+        }
+    }
+
+    let unresolved_group = inject_context_with_hive_profile_and_group(
+        &conversation,
+        &db_path,
+        "ordinary-hive-history",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("hive"),
+        None,
+        None,
+        None,
+        Some(&group_run),
+    )
+    .iter()
+    .filter_map(|message| match &message.content[0] {
+        Content::Text { text } => Some(text.as_str()),
+        _ => None,
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    for denied_canary in [
+        "[HIVE WORKER - researcher]",
+        "[GROUP ROOM - Release Room]",
+        "shared-memory-marker",
+        "primary-hive-marker",
+        "researcher-private-marker",
+        "group-shared-marker",
+        "REPORT-A-DM",
+        "REPORT-PRIMARY",
+    ] {
+        assert!(
+            !unresolved_group.contains(denied_canary),
+            "unresolved group binding failed open on {denied_canary}"
+        );
+    }
 }

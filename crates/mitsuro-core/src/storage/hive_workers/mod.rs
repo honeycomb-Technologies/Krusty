@@ -13,8 +13,11 @@ pub(crate) mod store;
 mod tests;
 
 pub use model::{
-    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
-    HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, NewHiveWorker,
-    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
+    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerConversationBinding,
+    HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus,
+    NewHiveWorker, DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
 };
-pub use store::{load_worker_with_conn, resolve_worker_for_crew_slug_with_conn, HiveWorkerStore};
+pub use store::{
+    load_worker_with_conn, resolve_worker_conversation_with_conn,
+    resolve_worker_for_crew_slug_with_conn, HiveWorkerStore,
+};

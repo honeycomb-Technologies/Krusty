@@ -282,7 +282,7 @@ impl RuntimePersistence {
             let response_json = serde_json::to_string(&result.response).map_err(|error| {
                 RuntimeStoreError::Internal(anyhow::anyhow!(error).context("encoding response"))
             })?;
-            tx.execute(
+            let finalized = tx.execute(
                 "UPDATE hive_idempotency_keys
                  SET resource_id = ?4, response_json = ?5
                  WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3",
@@ -292,6 +292,193 @@ impl RuntimePersistence {
                     idempotency_key,
                     result.resource_id,
                     response_json
+                ],
+            )?;
+            if finalized != 1 {
+                return Err(RuntimeStoreError::Internal(anyhow::anyhow!(
+                    "external idempotency receipt changed before finalization"
+                )));
+            }
+            tx.commit()?;
+            Ok(MutationOutcome {
+                response: result.response,
+                events: result.events,
+                replayed: false,
+            })
+        })
+        .await
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+    }
+
+    /// Reserve an ordinary daemon idempotency receipt, run a separately
+    /// transactional but intrinsically idempotent core mutation, then finalize
+    /// the exact protocol response. A crash after the core commit leaves a
+    /// pending receipt; retrying the same hash reruns the core mutation, which
+    /// must adopt its exact immutable result before this receipt is finalized.
+    pub(crate) async fn mutate_external_idempotent<F>(
+        &self,
+        actor: Actor,
+        idempotency_key: String,
+        operation: &'static str,
+        request_hash: String,
+        mutation: F,
+    ) -> Result<MutationOutcome, RuntimeStoreError>
+    where
+        F: FnOnce(&Actor) -> Result<Mutation, RuntimeStoreError> + Send + 'static,
+    {
+        let path = self.database_path.clone();
+        let ttl = self.idempotency_ttl;
+        tokio::task::spawn_blocking(move || {
+            let scope = actor_scope(&actor);
+            let now = Utc::now();
+            let now_text = canonical_timestamp(now);
+            let expires_at = now
+                .checked_add_signed(
+                    chrono::Duration::from_std(ttl)
+                        .map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?,
+                )
+                .ok_or_else(|| RuntimeStoreError::Invalid("idempotency expiry overflow".into()))?;
+            let expires_at = canonical_timestamp(expires_at);
+
+            {
+                let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+                let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate)?;
+                cleanup_expired_idempotency(&tx, &now_text)?;
+                let existing = tx
+                    .query_row(
+                        "SELECT request_hash, response_json, expires_at
+                         FROM hive_idempotency_keys
+                         WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3",
+                        params![scope, operation, idempotency_key],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some((existing_hash, response_json, existing_expiry)) = existing {
+                    if existing_expiry > now_text {
+                        if existing_hash != request_hash {
+                            return Err(RuntimeStoreError::Conflict(
+                                "the idempotency key was already used for different arguments"
+                                    .into(),
+                            ));
+                        }
+                        if let Some(response_json) = response_json {
+                            let response =
+                                serde_json::from_str(&response_json).map_err(|error| {
+                                    RuntimeStoreError::Internal(
+                                        anyhow::anyhow!(error)
+                                            .context("decoding replayed external response"),
+                                    )
+                                })?;
+                            tx.commit()?;
+                            return Ok(MutationOutcome {
+                                response,
+                                events: Vec::new(),
+                                replayed: true,
+                            });
+                        }
+                        // A pending receipt is a crash-recovery marker, never a
+                        // successful response. The external mutation must be
+                        // exactly adoptable before finalization below.
+                        tx.commit()?;
+                    } else {
+                        tx.execute(
+                            "DELETE FROM hive_idempotency_keys
+                             WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3",
+                            params![scope, operation, idempotency_key],
+                        )?;
+                        tx.execute(
+                            "INSERT INTO hive_idempotency_keys (
+                                scope_key, operation, idempotency_key, request_hash,
+                                resource_id, response_json, created_at, expires_at
+                             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6)",
+                            params![
+                                scope,
+                                operation,
+                                idempotency_key,
+                                request_hash,
+                                now_text,
+                                expires_at
+                            ],
+                        )?;
+                        tx.commit()?;
+                    }
+                } else {
+                    tx.execute(
+                        "INSERT INTO hive_idempotency_keys (
+                            scope_key, operation, idempotency_key, request_hash,
+                            resource_id, response_json, created_at, expires_at
+                         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6)",
+                        params![
+                            scope,
+                            operation,
+                            idempotency_key,
+                            request_hash,
+                            now_text,
+                            expires_at
+                        ],
+                    )?;
+                    tx.commit()?;
+                }
+            }
+
+            let result = mutation(&actor)?;
+            let response_json = serde_json::to_string(&result.response).map_err(|error| {
+                RuntimeStoreError::Internal(
+                    anyhow::anyhow!(error).context("encoding external response"),
+                )
+            })?;
+            let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+            let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate)?;
+            let receipt = tx
+                .query_row(
+                    "SELECT request_hash, response_json
+                     FROM hive_idempotency_keys
+                     WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3",
+                    params![scope, operation, idempotency_key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    RuntimeStoreError::Internal(anyhow::anyhow!(
+                        "external idempotency receipt disappeared before finalization"
+                    ))
+                })?;
+            if receipt.0 != request_hash {
+                return Err(RuntimeStoreError::Conflict(
+                    "the idempotency key changed before response finalization".into(),
+                ));
+            }
+            if let Some(existing_json) = receipt.1 {
+                let response = serde_json::from_str(&existing_json).map_err(|error| {
+                    RuntimeStoreError::Internal(
+                        anyhow::anyhow!(error).context("decoding concurrently finalized response"),
+                    )
+                })?;
+                tx.commit()?;
+                return Ok(MutationOutcome {
+                    response,
+                    events: Vec::new(),
+                    replayed: true,
+                });
+            }
+            tx.execute(
+                "UPDATE hive_idempotency_keys
+                 SET resource_id = ?4, response_json = ?5
+                 WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3
+                   AND request_hash = ?6 AND response_json IS NULL",
+                params![
+                    scope,
+                    operation,
+                    idempotency_key,
+                    result.resource_id,
+                    response_json,
+                    request_hash
                 ],
             )?;
             tx.commit()?;

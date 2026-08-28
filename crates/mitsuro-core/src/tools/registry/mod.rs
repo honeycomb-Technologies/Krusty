@@ -7,7 +7,9 @@ mod policy;
 mod result;
 mod runtime;
 
-pub use context::{FileObservationTracker, FilesystemAccess, ToolContext, ToolOutputChunk};
+pub use context::{
+    FileObservationTracker, FilesystemAccess, ShellIsolationPolicy, ToolContext, ToolOutputChunk,
+};
 pub use policy::{
     agent_call_action, agent_call_execution_profile, agent_call_is_research,
     agent_call_may_start_run, agent_call_requests_write, agent_call_starts_run,

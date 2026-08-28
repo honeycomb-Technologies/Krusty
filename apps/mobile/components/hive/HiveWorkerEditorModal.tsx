@@ -13,7 +13,6 @@ import type {
   HiveWorker,
   HiveWorkerAutonomy,
   ModelInfo,
-  UpdateHiveWorkerRequest,
 } from "@mitsuro/api";
 import { useThemeContext } from "../../hooks/useTheme";
 import {
@@ -23,6 +22,17 @@ import {
 } from "./hooks/useHiveWorkerDeliveries";
 import { formatRelativeTime } from "./utils";
 import { HIVE_WORKER_COLORS } from "./workerAppearance";
+import type { UpdateHiveWorkerPatch } from "./hooks/useHiveWorkers";
+import { HiveWorkerGovernorPanel } from "./HiveWorkerGovernorPanel";
+import {
+  buildWorkerHeartbeatCreateFields,
+  buildWorkerHeartbeatUpdateFields,
+  parseWorkerHeartbeatCadence,
+} from "./worker-heartbeat-cadence";
+import {
+  buildWorkerModelCreateFields,
+  buildWorkerModelUpdateFields,
+} from "./worker-model-request-fields";
 
 const AUTONOMY_OPTIONS: Array<{ value: HiveWorkerAutonomy; label: string }> = [
   { value: "manual", label: "Manual" },
@@ -34,6 +44,31 @@ const PERMISSION_OPTIONS = [
   { value: "autonomous", label: "Autonomous" },
   { value: "supervised", label: "Supervised" },
 ];
+
+function modelOptionKey(model: ModelInfo): string {
+  const key = model.key;
+  return key
+    ? JSON.stringify([
+      key.provider,
+      key.model_id,
+      key.auth_scope ?? null,
+      key.api_format,
+    ])
+    : JSON.stringify([model.provider, model.id, null, "legacy"]);
+}
+
+function workerModelOptionKey(worker: HiveWorker | null): string | null {
+  const key = worker?.model_key;
+  if (key) {
+    return JSON.stringify([
+      key.provider,
+      key.model_id,
+      key.auth_scope ?? null,
+      key.api_format,
+    ]);
+  }
+  return null;
+}
 
 export function slugFromWorkerName(name: string): string {
   return name
@@ -57,7 +92,7 @@ interface HiveWorkerEditorModalProps {
   isSaving: boolean;
   onClose: () => void;
   onCreate: (request: CreateHiveWorkerRequest) => Promise<void>;
-  onUpdate: (id: string, request: UpdateHiveWorkerRequest) => Promise<void>;
+  onUpdate: (id: string, request: UpdateHiveWorkerPatch) => Promise<void>;
   onPause: (id: string) => Promise<void>;
   onResume: (id: string) => Promise<void>;
   onArchive: (id: string) => Promise<void>;
@@ -65,8 +100,9 @@ interface HiveWorkerEditorModalProps {
 
 /**
  * Create/edit surface for one Hive Worker: name, slug (create only), pinned
- * model, permission mode, autonomy, and lifecycle actions. Persona documents
- * are edited from the roster row via the shared document editor.
+ * model, permission mode, autonomy, heartbeat cadence, and lifecycle actions.
+ * Persona documents are edited from the roster row via the shared document
+ * editor.
  */
 export function HiveWorkerEditorModal({
   visible,
@@ -88,9 +124,10 @@ export function HiveWorkerEditorModal({
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
   const [avatarColor, setAvatarColor] = useState<string>(HIVE_WORKER_COLORS[0]);
-  const [modelId, setModelId] = useState<string | null>(null);
+  const [modelOption, setModelOption] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<HiveWorkerAutonomy>("manual");
   const [permissionMode, setPermissionMode] = useState("autonomous");
+  const [heartbeatCadenceInput, setHeartbeatCadenceInput] = useState("");
   const [confirmingArchive, setConfirmingArchive] = useState(false);
 
   useEffect(() => {
@@ -101,25 +138,51 @@ export function HiveWorkerEditorModal({
     setSlug(worker?.slug ?? "");
     setSlugEdited(false);
     setAvatarColor(worker?.avatar_color ?? HIVE_WORKER_COLORS[0]);
-    setModelId(worker?.model ?? null);
+    setModelOption(workerModelOptionKey(worker));
     setAutonomy(worker?.autonomy ?? "manual");
     setPermissionMode(worker?.permission_mode ?? "autonomous");
+    setHeartbeatCadenceInput(
+      worker?.heartbeat_interval_secs == null
+        ? ""
+        : String(worker.heartbeat_interval_secs),
+    );
     setConfirmingArchive(false);
   }, [visible, worker]);
 
   const effectiveSlug = isCreate
-    ? slugEdited
-      ? slug
-      : slugFromWorkerName(displayName)
+    ? slugEdited ? slug : slugFromWorkerName(displayName)
     : slug;
   const slugValid = !isCreate || isValidWorkerSlug(effectiveSlug);
   const nameValid = displayName.trim().length > 0;
-  const canSave = nameValid && slugValid && !isSaving;
-
   const selectedModel = useMemo(
-    () => models.find((candidate) => candidate.id === modelId) ?? null,
-    [modelId, models],
+    () =>
+      models.find((candidate) => modelOptionKey(candidate) === modelOption) ??
+        null,
+    [modelOption, models],
   );
+  const modelFields = isCreate
+    ? buildWorkerModelCreateFields(selectedModel)
+    : buildWorkerModelUpdateFields(selectedModel, worker?.model_key);
+  const heartbeatCadence = useMemo(
+    () => parseWorkerHeartbeatCadence(heartbeatCadenceInput),
+    [heartbeatCadenceInput],
+  );
+  const heartbeatCadenceHint = autonomy === "always_on"
+    ? `Always-on Workers wake on this cadence. ${
+      isCreate
+        ? "Leave blank to use the server default."
+        : "Clear the field to keep the stored value unchanged."
+    }`
+    : `Manual and Scheduled Workers can retain a cadence, but it triggers wakeups only while autonomy is Always on. ${
+      isCreate
+        ? "Leave blank for no explicit value."
+        : "Clear the field to keep the stored value unchanged."
+    }`;
+  const canSave = nameValid &&
+    slugValid &&
+    modelFields !== null &&
+    heartbeatCadence.error === null &&
+    !isSaving;
   const wakes = useHiveWorkerDeliveries({
     workerId: worker?.id ?? null,
     enabled: visible && !isCreate && Boolean(worker?.id),
@@ -130,9 +193,9 @@ export function HiveWorkerEditorModal({
     if (!canSave) {
       return;
     }
-    const modelFields = selectedModel
-      ? { model: selectedModel.id, model_key: selectedModel.key ?? undefined }
-      : {};
+    if (modelFields === null) {
+      return;
+    }
     if (isCreate) {
       await onCreate({
         slug: effectiveSlug,
@@ -141,6 +204,7 @@ export function HiveWorkerEditorModal({
         permission_mode: permissionMode,
         autonomy,
         ...modelFields,
+        ...buildWorkerHeartbeatCreateFields(heartbeatCadence.value),
       });
     } else if (worker) {
       await onUpdate(worker.id, {
@@ -149,6 +213,10 @@ export function HiveWorkerEditorModal({
         permission_mode: permissionMode,
         autonomy,
         ...modelFields,
+        ...buildWorkerHeartbeatUpdateFields(
+          heartbeatCadence.value,
+          worker.heartbeat_interval_secs ?? null,
+        ),
       });
     }
   };
@@ -188,7 +256,12 @@ export function HiveWorkerEditorModal({
   );
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
       <View style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View
@@ -199,7 +272,9 @@ export function HiveWorkerEditorModal({
         >
           <View style={[styles.header, { borderBottomColor: t.border }]}>
             <Text style={[styles.title, { color: t.foreground }]}>
-              {isCreate ? "New Worker" : `Edit ${worker?.display_name ?? "Worker"}`}
+              {isCreate
+                ? "New Worker"
+                : `Edit ${worker?.display_name ?? "Worker"}`}
             </Text>
             <Text style={[styles.subtitle, { color: t.mutedForeground }]}>
               {isCreate
@@ -208,8 +283,13 @@ export function HiveWorkerEditorModal({
             </Text>
           </View>
 
-          <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Name</Text>
+          <ScrollView
+            style={styles.body}
+            contentContainerStyle={styles.bodyContent}
+          >
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
+              Name
+            </Text>
             <TextInput
               value={displayName}
               onChangeText={setDisplayName}
@@ -217,36 +297,50 @@ export function HiveWorkerEditorModal({
               placeholderTextColor={`${t.mutedForeground}aa`}
               style={[
                 styles.input,
-                { color: t.foreground, borderColor: t.border, backgroundColor: t.card },
+                {
+                  color: t.foreground,
+                  borderColor: t.border,
+                  backgroundColor: t.card,
+                },
               ]}
             />
 
-            {isCreate ? (
-              <>
-                <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Slug</Text>
-                <TextInput
-                  value={effectiveSlug}
-                  onChangeText={(value) => {
-                    setSlugEdited(true);
-                    setSlug(slugFromWorkerName(value));
-                  }}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  placeholder="deep-researcher"
-                  placeholderTextColor={`${t.mutedForeground}aa`}
-                  style={[
-                    styles.input,
-                    {
-                      color: t.foreground,
-                      borderColor: slugValid || effectiveSlug.length === 0 ? t.border : t.error,
-                      backgroundColor: t.card,
-                    },
-                  ]}
-                />
-              </>
-            ) : null}
+            {isCreate
+              ? (
+                <>
+                  <Text
+                    style={[styles.fieldLabel, { color: t.mutedForeground }]}
+                  >
+                    Slug
+                  </Text>
+                  <TextInput
+                    value={effectiveSlug}
+                    onChangeText={(value) => {
+                      setSlugEdited(true);
+                      setSlug(slugFromWorkerName(value));
+                    }}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="deep-researcher"
+                    placeholderTextColor={`${t.mutedForeground}aa`}
+                    style={[
+                      styles.input,
+                      {
+                        color: t.foreground,
+                        borderColor: slugValid || effectiveSlug.length === 0
+                          ? t.border
+                          : t.error,
+                        backgroundColor: t.card,
+                      },
+                    ]}
+                  />
+                </>
+              )
+              : null}
 
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Color</Text>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
+              Color
+            </Text>
             <View style={styles.colorRow}>
               {HIVE_WORKER_COLORS.map((color) => (
                 <Pressable
@@ -264,20 +358,29 @@ export function HiveWorkerEditorModal({
               ))}
             </View>
 
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Model</Text>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
+              Model
+            </Text>
             <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
-              {selectedModel
+              {selectedModel?.key
                 ? `${selectedModel.display_name} · ${selectedModel.provider}`
-                : "No pinned model — the DM keeps the server default."}
+                : selectedModel
+                ? "This legacy catalog entry lacks an exact model key. Choose an exact provider and model."
+                : isCreate
+                ? "Choose an exact provider and model before meeting this Worker."
+                : worker?.model_key
+                ? "Pinned model unavailable in the current catalog — leaving it unchanged."
+                : "No pinned model — select one to change this Worker."}
             </Text>
             <View style={[styles.modelList, { borderColor: t.border }]}>
               <ScrollView nestedScrollEnabled style={styles.modelScroll}>
                 {models.map((model) => {
-                  const active = model.id === modelId;
+                  const optionKey = modelOptionKey(model);
+                  const active = optionKey === modelOption;
                   return (
                     <Pressable
-                      key={`${model.provider}:${model.id}`}
-                      onPress={() => setModelId(active ? null : model.id)}
+                      key={optionKey}
+                      onPress={() => setModelOption(active ? null : optionKey)}
                       style={[
                         styles.modelRow,
                         { borderBottomColor: t.border },
@@ -293,114 +396,231 @@ export function HiveWorkerEditorModal({
                       >
                         {model.display_name}
                       </Text>
-                      <Text style={[styles.modelProvider, { color: t.mutedForeground }]}>
+                      <Text
+                        style={[styles.modelProvider, {
+                          color: t.mutedForeground,
+                        }]}
+                      >
                         {model.provider}
                       </Text>
                     </Pressable>
                   );
                 })}
-                {models.length === 0 ? (
-                  <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
-                    Model catalog unavailable.
-                  </Text>
-                ) : null}
+                {models.length === 0
+                  ? (
+                    <Text
+                      style={[styles.fieldHint, { color: t.mutedForeground }]}
+                    >
+                      Model catalog unavailable.
+                    </Text>
+                  )
+                  : null}
               </ScrollView>
             </View>
 
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Permissions</Text>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
+              Permissions
+            </Text>
             {choiceRow(PERMISSION_OPTIONS, permissionMode, setPermissionMode)}
 
-            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Autonomy</Text>
+            <Text
+              style={[styles.fieldLabel, { color: t.mutedForeground }]}
+            >
+              Autonomy
+            </Text>
             {choiceRow(AUTONOMY_OPTIONS, autonomy, setAutonomy)}
 
-            {!isCreate && worker ? (
-              <View style={[styles.wakeBlock, { borderTopColor: t.border }]}>
-                <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>
-                  Why this Worker woke
+            <Text
+              style={[styles.fieldLabel, { color: t.mutedForeground }]}
+            >
+              Heartbeat cadence · seconds
+            </Text>
+            <Text
+              style={[styles.fieldHint, { color: t.mutedForeground }]}
+            >
+              {heartbeatCadenceHint}
+            </Text>
+            <TextInput
+              value={heartbeatCadenceInput}
+              onChangeText={setHeartbeatCadenceInput}
+              keyboardType="number-pad"
+              inputMode="numeric"
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="Optional"
+              placeholderTextColor={`${t.mutedForeground}aa`}
+              accessibilityLabel="Heartbeat cadence in seconds"
+              accessibilityHint={heartbeatCadenceHint}
+              style={[
+                styles.input,
+                {
+                  color: t.foreground,
+                  borderColor: heartbeatCadence.error ? t.error : t.border,
+                  backgroundColor: t.card,
+                },
+              ]}
+            />
+            {heartbeatCadence.error
+              ? (
+                <Text
+                  accessibilityLiveRegion="polite"
+                  style={[styles.fieldHint, { color: t.error }]}
+                >
+                  {heartbeatCadence.error}
                 </Text>
-                <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
-                  Durable deliveries and peer messages that claimed this lane.
-                </Text>
-                {wakes.error ? (
-                  <Text style={[styles.fieldHint, { color: t.error }]}>{wakes.error}</Text>
-                ) : null}
-                {wakes.isLoading && wakes.items.length === 0 ? (
-                  <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
-                    Loading wake history...
-                  </Text>
-                ) : null}
-                {!wakes.isLoading && wakes.items.length === 0 ? (
-                  <Text style={[styles.fieldHint, { color: t.mutedForeground }]}>
-                    No wakes recorded yet. Peer messages, heartbeats, and schedule
-                    targets will appear here.
-                  </Text>
-                ) : null}
-                {wakes.items.map((item) => (
-                  <View
-                    key={item.id}
-                    style={[styles.wakeRow, { borderColor: t.border, backgroundColor: t.card }]}
-                  >
-                    <View style={styles.wakeHeader}>
-                      <Text style={[styles.wakeKind, { color: t.foreground }]} numberOfLines={1}>
-                        {wakeReasonLabel(item)}
-                        {item.priority === "high" ? " · interrupt" : ""}
-                      </Text>
-                      <Text style={[styles.wakeMeta, { color: t.mutedForeground }]}>
-                        {wakeStatusLabel(item.status)} · {formatRelativeTime(item.created_at)}
-                      </Text>
-                    </View>
-                    {item.body.trim().length > 0 ? (
-                      <Text style={[styles.wakeBody, { color: t.mutedForeground }]} numberOfLines={2}>
-                        {item.body.trim()}
-                      </Text>
-                    ) : null}
-                    {item.last_error ? (
-                      <Text style={[styles.wakeBody, { color: t.error }]} numberOfLines={2}>
-                        {item.last_error}
-                      </Text>
-                    ) : null}
-                  </View>
-                ))}
-              </View>
-            ) : null}
+              )
+              : null}
 
-            {!isCreate && worker ? (
-              <View style={[styles.lifecycle, { borderTopColor: t.border }]}>
-                <Pressable
-                  onPress={() => {
-                    void (worker.status === "paused"
-                      ? onResume(worker.id)
-                      : onPause(worker.id));
-                  }}
-                  disabled={isSaving}
-                  style={styles.lifecycleAction}
-                >
-                  <Text style={[styles.lifecycleText, { color: t.userMessage }]}>
-                    {worker.status === "paused" ? "Resume Worker" : "Pause Worker"}
+            {!isCreate && worker
+              ? (
+                <HiveWorkerGovernorPanel
+                  worker={worker}
+                  sessionId={worker.dm_session_id ?? null}
+                  enabled={visible && Boolean(worker.dm_session_id)}
+                  poll={false}
+                />
+              )
+              : null}
+
+            {!isCreate && worker
+              ? (
+                <View style={[styles.wakeBlock, { borderTopColor: t.border }]}>
+                  <Text
+                    style={[styles.fieldLabel, { color: t.mutedForeground }]}
+                  >
+                    Why this Worker woke
                   </Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => {
-                    if (!confirmingArchive) {
-                      setConfirmingArchive(true);
-                      return;
-                    }
-                    void onArchive(worker.id);
-                  }}
-                  disabled={isSaving}
-                  style={styles.lifecycleAction}
-                >
-                  <Text style={[styles.lifecycleText, { color: t.error }]}>
-                    {confirmingArchive ? "Tap again to archive" : "Archive Worker"}
+                  <Text
+                    style={[styles.fieldHint, { color: t.mutedForeground }]}
+                  >
+                    Durable deliveries and peer messages that claimed this lane.
                   </Text>
-                </Pressable>
-              </View>
-            ) : null}
+                  {wakes.error
+                    ? (
+                      <Text style={[styles.fieldHint, { color: t.error }]}>
+                        {wakes.error}
+                      </Text>
+                    )
+                    : null}
+                  {wakes.isLoading && wakes.items.length === 0
+                    ? (
+                      <Text
+                        style={[styles.fieldHint, { color: t.mutedForeground }]}
+                      >
+                        Loading wake history...
+                      </Text>
+                    )
+                    : null}
+                  {!wakes.isLoading && wakes.items.length === 0
+                    ? (
+                      <Text
+                        style={[styles.fieldHint, { color: t.mutedForeground }]}
+                      >
+                        No wakes recorded yet. Peer messages, heartbeats, and
+                        schedule targets will appear here.
+                      </Text>
+                    )
+                    : null}
+                  {wakes.items.map((item) => (
+                    <View
+                      key={item.id}
+                      style={[styles.wakeRow, {
+                        borderColor: t.border,
+                        backgroundColor: t.card,
+                      }]}
+                    >
+                      <View style={styles.wakeHeader}>
+                        <Text
+                          style={[styles.wakeKind, { color: t.foreground }]}
+                          numberOfLines={1}
+                        >
+                          {wakeReasonLabel(item)}
+                          {item.priority === "high" ? " · interrupt" : ""}
+                        </Text>
+                        <Text
+                          style={[styles.wakeMeta, {
+                            color: t.mutedForeground,
+                          }]}
+                        >
+                          {wakeStatusLabel(item.status)} ·{" "}
+                          {formatRelativeTime(item.created_at)}
+                        </Text>
+                      </View>
+                      {item.body.trim().length > 0
+                        ? (
+                          <Text
+                            style={[styles.wakeBody, {
+                              color: t.mutedForeground,
+                            }]}
+                            numberOfLines={2}
+                          >
+                            {item.body.trim()}
+                          </Text>
+                        )
+                        : null}
+                      {item.last_error
+                        ? (
+                          <Text
+                            style={[styles.wakeBody, { color: t.error }]}
+                            numberOfLines={2}
+                          >
+                            {item.last_error}
+                          </Text>
+                        )
+                        : null}
+                    </View>
+                  ))}
+                </View>
+              )
+              : null}
+
+            {!isCreate && worker
+              ? (
+                <View style={[styles.lifecycle, { borderTopColor: t.border }]}>
+                  <Pressable
+                    onPress={() => {
+                      void (worker.status === "paused"
+                        ? onResume(worker.id)
+                        : onPause(worker.id));
+                    }}
+                    disabled={isSaving}
+                    style={styles.lifecycleAction}
+                  >
+                    <Text
+                      style={[styles.lifecycleText, { color: t.userMessage }]}
+                    >
+                      {worker.status === "paused"
+                        ? "Resume Worker"
+                        : "Pause Worker"}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      if (!confirmingArchive) {
+                        setConfirmingArchive(true);
+                        return;
+                      }
+                      void onArchive(worker.id);
+                    }}
+                    disabled={isSaving}
+                    style={styles.lifecycleAction}
+                  >
+                    <Text style={[styles.lifecycleText, { color: t.error }]}>
+                      {confirmingArchive
+                        ? "Tap again to archive"
+                        : "Archive Worker"}
+                    </Text>
+                  </Pressable>
+                </View>
+              )
+              : null}
           </ScrollView>
 
           <View style={[styles.actions, { borderTopColor: t.border }]}>
             <Pressable onPress={onClose} style={styles.action}>
-              <Text style={[styles.actionText, { color: t.mutedForeground }]}>Cancel</Text>
+              <Text style={[styles.actionText, { color: t.mutedForeground }]}>
+                Cancel
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => {

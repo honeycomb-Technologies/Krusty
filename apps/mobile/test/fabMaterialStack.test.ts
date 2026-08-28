@@ -78,8 +78,8 @@ Deno.test("FAB material strength is stable before and after interaction", async 
     "every composer and FAB material host must anchor its background layer",
   );
   assert(
-    (header.match(/position: "relative"/g)?.length ?? 0) >= 3
-      && modelPopover.includes("position: 'relative'"),
+    (header.match(/position: ["']relative["']/g)?.length ?? 0) >= 3
+      && /position: ["']relative["']/.test(modelPopover),
     "every non-absolute chat-chrome material host must bound its backdrop to the component",
   );
   assert(

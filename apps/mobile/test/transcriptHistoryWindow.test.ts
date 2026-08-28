@@ -104,7 +104,8 @@ Deno.test("transcript scroll has one measured auto-follow authority", async () =
     "virtualization must keep enough rows mounted for a normal phone fling",
   );
   assert(
-    transcriptSource.includes("isNearBottom ? undefined : { minIndexForVisible: 0 }"),
+    /maintainVisibleContentPosition=\{\s*isNearBottom\s*\?\s*undefined\s*:\s*\{\s*minIndexForVisible:\s*0\s*\}\s*\}/m
+      .test(transcriptSource),
     "native visible-position maintenance must disengage while bottom-follow owns the offset",
   );
 });

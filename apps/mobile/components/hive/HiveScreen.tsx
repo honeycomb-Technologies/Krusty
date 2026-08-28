@@ -20,7 +20,7 @@ import { useHiveGroups } from "./hooks/useHiveGroups";
 import { useHiveHome } from "./hooks/useHiveHome";
 import { useHiveMemories } from "./hooks/useHiveMemories";
 import { useHiveNavigation } from "./hooks/useHiveNavigation";
-import { useHiveWorkers } from "./hooks/useHiveWorkers";
+import type { HiveWorkersState } from "./hooks/useHiveWorkers";
 import type { HiveChatContext, HiveTopLevelView } from "./types";
 
 interface HiveScreenProps {
@@ -30,8 +30,13 @@ interface HiveScreenProps {
   requestedReportId?: string;
   chat: HiveChatContext;
   onOpenRunById: (runId: string) => Promise<void>;
-  onOpenProject?: (projectDir: string, targetBranch?: string | null) => Promise<void> | void;
+  onOpenWorkerDm: (sessionId: string) => void;
+  onOpenProject?: (
+    projectDir: string,
+    targetBranch?: string | null,
+  ) => Promise<void> | void;
   onDeleteRun: (runId: string) => void;
+  workers: HiveWorkersState;
   onOpenMenu?: () => void;
   onTopLevelChange?: (view: HiveTopLevelView) => void;
 }
@@ -43,8 +48,10 @@ export function HiveScreen({
   requestedReportId,
   chat,
   onOpenRunById,
+  onOpenWorkerDm,
   onOpenProject,
   onDeleteRun,
+  workers,
   onOpenMenu,
   onTopLevelChange,
 }: HiveScreenProps) {
@@ -52,22 +59,25 @@ export function HiveScreen({
   const { isDesktop } = useBreakpoint();
   const current = useHiveCurrent(true);
   const home = useHiveHome(true);
-  const navigation = useHiveNavigation();
-  // Workers are fetched only while a surface that needs the roster is
-  // visible (the Workers view, or the Groups editor picking members);
-  // opening a DM works from cached rows without a background poll.
-  const workers = useHiveWorkers(
-    navigation.topLevel === "crew" || navigation.topLevel === "groups",
-  );
+  // Mobile mounts this surface only for management destinations. Starting at
+  // the requested view prevents the transcript-owning Hive home from mounting
+  // for one frame before the synchronization effect runs.
+  const navigation = useHiveNavigation(requestedTopLevel);
   const groups = useHiveGroups(navigation.topLevel === "groups");
-  const memories = useHiveMemories(navigation.topLevel === "memory", workspaceDirectory);
-  const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
+  const memories = useHiveMemories(
+    navigation.topLevel === "memory",
+    workspaceDirectory,
+  );
+  const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(
+    null,
+  );
   const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
-  const selectedRun =
-    navigation.selectedRunId
-      ? current.current?.runs.find((run) => run.session_id === navigation.selectedRunId) ?? null
-      : null;
+  const selectedRun = navigation.selectedRunId
+    ? current.current?.runs.find((run) =>
+      run.session_id === navigation.selectedRunId
+    ) ?? null
+    : null;
 
   useEffect(() => {
     if (!requestedTopLevel) {
@@ -118,119 +128,138 @@ export function HiveScreen({
     memory: "Memory",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
-  const subtitle = navigation.topLevel === "hive" ? "The hive is always alive." : undefined;
+  const subtitle = navigation.topLevel === "hive"
+    ? "The hive is always alive."
+    : undefined;
 
   return (
     <SafeAreaView
       style={[styles.container, { backgroundColor: theme.colors.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      {navigation.selectedRunId ? (
-        <HiveRunView
-          key={navigation.selectedRunId}
-          runId={navigation.selectedRunId}
-          summary={selectedRun}
-          crewMembers={home.crew?.members ?? []}
-          chat={chat}
-          onBack={navigation.closeRun}
-          onDeleteRun={onDeleteRun}
-        />
-      ) : (
-        <>
-          <HiveTopBar
-            title={title}
-            subtitle={subtitle}
-            status={status}
-            titleStatus={navigation.topLevel === "hive" ? status : null}
-            showStatusBadge={false}
-            onOpenMenu={!isDesktop ? onOpenMenu : undefined}
+      {navigation.selectedRunId
+        ? (
+          <HiveRunView
+            key={navigation.selectedRunId}
+            runId={navigation.selectedRunId}
+            summary={selectedRun}
+            crewMembers={home.crew?.members ?? []}
+            chat={chat}
+            onBack={navigation.closeRun}
+            onDeleteRun={onDeleteRun}
           />
+        )
+        : (
+          <>
+            <HiveTopBar
+              title={title}
+              subtitle={subtitle}
+              status={status}
+              titleStatus={navigation.topLevel === "hive" ? status : null}
+              showStatusBadge={false}
+              onOpenMenu={!isDesktop ? onOpenMenu : undefined}
+            />
 
-          {navigation.topLevel === "hive" ? (
-            <HiveCurrentView
-              state={current}
-              homeState={home}
-              chat={chat}
-              threadJumpMessageId={threadJumpMessageId}
-              reportJumpId={reportJumpId}
-              onThreadJumpHandled={() => {
-                setThreadJumpMessageId(null);
-              }}
-              onReportJumpHandled={() => {
-                setReportJumpId(null);
-              }}
-            />
-          ) : null}
+            {navigation.topLevel === "hive"
+              ? (
+                <HiveCurrentView
+                  state={current}
+                  homeState={home}
+                  workers={workers}
+                  chat={chat}
+                  threadJumpMessageId={threadJumpMessageId}
+                  reportJumpId={reportJumpId}
+                  onThreadJumpHandled={() => {
+                    setThreadJumpMessageId(null);
+                  }}
+                  onReportJumpHandled={() => {
+                    setReportJumpId(null);
+                  }}
+                />
+              )
+              : null}
 
-          {navigation.topLevel === "attention" ? (
-            <HiveAttentionView
-              state={current}
-              chat={chat}
-              onSelectRun={(runId) => {
-                void handleOpenRun(runId);
-              }}
-              onOpenThread={(messageId) => {
-                setThreadJumpMessageId(messageId ?? null);
-                navigation.setTopLevel("hive");
-              }}
-            />
-          ) : null}
+            {navigation.topLevel === "attention"
+              ? (
+                <HiveAttentionView
+                  state={current}
+                  chat={chat}
+                  onSelectRun={(runId) => {
+                    void handleOpenRun(runId);
+                  }}
+                  onOpenThread={(messageId) => {
+                    setThreadJumpMessageId(messageId ?? null);
+                    navigation.setTopLevel("hive");
+                  }}
+                />
+              )
+              : null}
 
-          {navigation.topLevel === "schedule" ? (
-            <HiveScheduleView
-              state={current}
-              onOpenProject={onOpenProject}
-              onSelectRun={(runId) => {
-                void handleOpenRun(runId);
-              }}
-            />
-          ) : null}
+            {navigation.topLevel === "schedule"
+              ? (
+                <HiveScheduleView
+                  state={current}
+                  onOpenProject={onOpenProject}
+                  onSelectRun={(runId) => {
+                    void handleOpenRun(runId);
+                  }}
+                />
+              )
+              : null}
 
-          {navigation.topLevel === "runs" ? (
-            <HiveRunsView
-              state={current}
-              onSelectRun={(runId) => {
-                void handleOpenRun(runId);
-              }}
-            />
-          ) : null}
+            {navigation.topLevel === "runs"
+              ? (
+                <HiveRunsView
+                  state={current}
+                  onSelectRun={(runId) => {
+                    void handleOpenRun(runId);
+                  }}
+                />
+              )
+              : null}
 
-          {navigation.topLevel === "logbook" ? (
-            <HiveLogbookView workspaceDirectory={workspaceDirectory} />
-          ) : null}
-          {navigation.topLevel === "details" ? (
-            <HiveStatusView
-              state={current}
-              activeToolCallId={chat.activeToolCallId}
-              onSelectRun={(runId) => {
-                void handleOpenRun(runId);
-              }}
-              onApproveTool={chat.onApproveTool}
-              onDenyTool={chat.onDenyTool}
-            />
-          ) : null}
-          {navigation.topLevel === "crew" ? (
-            <HiveCrewView
-              state={home}
-              workers={workers}
-              models={chat.models}
-              onOpenWorkerDm={(sessionId) => {
-                // Load the Worker's DM into the hive session store, then land
-                // on the thread surface that renders it.
-                void onOpenRunById(sessionId);
-                navigation.setTopLevel("hive");
-              }}
-            />
-          ) : null}
-          {navigation.topLevel === "groups" ? (
-            <HiveGroupsView state={groups} workers={workers} />
-          ) : null}
-          {navigation.topLevel === "channels" ? <HiveChannelsView state={home} /> : null}
-          {navigation.topLevel === "memory" ? (
-            <HiveMemoryView workspaceDirectory={workspaceDirectory} state={memories} />
-          ) : null}
-        </>
-      )}
+            {navigation.topLevel === "logbook"
+              ? <HiveLogbookView workspaceDirectory={workspaceDirectory} />
+              : null}
+            {navigation.topLevel === "details"
+              ? (
+                <HiveStatusView
+                  state={current}
+                  activeToolCallId={chat.activeToolCallId}
+                  onSelectRun={(runId) => {
+                    void handleOpenRun(runId);
+                  }}
+                  onApproveTool={chat.onApproveTool}
+                  onDenyTool={chat.onDenyTool}
+                />
+              )
+              : null}
+            {navigation.topLevel === "crew"
+              ? (
+                <HiveCrewView
+                  state={home}
+                  workers={workers}
+                  models={chat.models}
+                  onOpenWorkerDm={onOpenWorkerDm}
+                />
+              )
+              : null}
+            {navigation.topLevel === "groups"
+              ? <HiveGroupsView state={groups} workers={workers} />
+              : null}
+            {navigation.topLevel === "channels"
+              ? <HiveChannelsView state={home} />
+              : null}
+            {navigation.topLevel === "memory"
+              ? (
+                <HiveMemoryView
+                  workspaceDirectory={workspaceDirectory}
+                  state={memories}
+                />
+              )
+              : null}
+          </>
+        )}
     </SafeAreaView>
   );
 }

@@ -455,6 +455,10 @@ pub(super) async fn delete_session(
 ) -> Result<StatusCode, AppError> {
     let session_manager = open_session_manager(&state)?;
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    state
+        .hive_runtime
+        .ensure_generic_session_delete_allowed(&state, &id, current_user_id(user.as_ref()))
+        .map_err(crate::hive_runtime::control_plane_app_error)?;
 
     if session.session_type == SessionType::Hive {
         state

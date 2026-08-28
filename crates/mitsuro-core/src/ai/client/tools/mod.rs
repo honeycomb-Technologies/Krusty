@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use super::config::CallOptions;
 use super::core::AiClient;
+use super::RemoteAttemptPolicy;
 use crate::ai::providers::ReasoningEffort;
 use crate::ai::retry::{with_retry, RetryConfig};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role, ThinkingConfig};
@@ -140,6 +141,34 @@ impl AiClient {
         session_id: Option<&str>,
         prompt_cache_key: Option<&str>,
     ) -> Result<Value> {
+        self.call_with_tools_at_reasoning_and_attempt_policy(
+            model,
+            system_prompt,
+            messages,
+            tools,
+            max_tokens,
+            reasoning_effort,
+            session_id,
+            prompt_cache_key,
+            RemoteAttemptPolicy::ConfiguredRetries,
+        )
+        .await
+    }
+
+    /// Typed non-streaming tool call with an explicit remote-attempt policy.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_with_tools_at_reasoning_and_attempt_policy(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[ModelMessage],
+        tools: &[AiTool],
+        max_tokens: usize,
+        reasoning_effort: Option<ReasoningEffort>,
+        session_id: Option<&str>,
+        prompt_cache_key: Option<&str>,
+        attempt_policy: RemoteAttemptPolicy,
+    ) -> Result<Value> {
         self.ensure_run_model(model)?;
         let requested_tool_count = tools.len();
         let thinking_enabled =
@@ -167,11 +196,16 @@ impl AiClient {
                 model
             );
         }
-        let retry_config = RetryConfig::gentle();
+        if !attempt_policy.allows_retry() {
+            return self
+                .call_with_tools_once(model, &options, messages, tools)
+                .await;
+        }
 
         // This method is the sole retry owner for non-streaming tool turns.
         // A retry is allowed only before any result has been exposed or any
         // local tool side effect has occurred.
+        let retry_config = RetryConfig::gentle();
         with_retry(&retry_config, || async {
             self.call_with_tools_once(model, &options, messages.clone(), tools.clone())
                 .await
@@ -206,8 +240,53 @@ impl AiClient {
 #[cfg(test)]
 mod tests {
     use super::{canonical_tool_definitions, canonical_tool_messages};
+    use crate::ai::client::{AiClient, AiClientConfig, RemoteAttemptPolicy};
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::{AuthHeader, ProviderId};
     use crate::ai::types::{AiTool, Content, ModelMessage, Role};
     use serde_json::json;
+    use std::sync::mpsc as std_mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use tiny_http::{Header, Response, Server};
+
+    fn openai_test_client(url: String) -> AiClient {
+        AiClient::new(
+            AiClientConfig {
+                model: "test-model".to_string(),
+                max_tokens: 128,
+                base_url: Some(url),
+                auth_header: AuthHeader::Bearer,
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAI,
+                custom_headers: Default::default(),
+            },
+            "test-key".to_string(),
+        )
+    }
+
+    fn user_message() -> ModelMessage {
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "reply with ok".to_string(),
+            }],
+        }
+    }
+
+    fn retry_after_zero() -> Header {
+        Header::from_bytes("Retry-After", "0").expect("retry header should be valid")
+    }
+
+    fn successful_tool_response() -> Response<std::io::Cursor<Vec<u8>>> {
+        Response::from_string(
+            r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+        )
+        .with_header(
+            Header::from_bytes("Content-Type", "application/json")
+                .expect("content type should be valid"),
+        )
+    }
 
     #[test]
     fn canonical_history_drops_nonportable_reasoning_and_keeps_tool_lifecycle() {
@@ -256,5 +335,96 @@ mod tests {
         let tools = canonical_tool_definitions(&[tool("write"), tool("read")]);
         assert_eq!(tools[0]["name"], "read");
         assert_eq!(tools[1]["name"], "write");
+    }
+
+    #[tokio::test]
+    async fn configured_tool_call_retains_bounded_retry() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let url = format!("http://{}", server.server_addr());
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            for attempt in 0..2 {
+                let request = server.recv().expect("request should arrive");
+                request_tx.send(()).expect("request should be counted");
+                if attempt == 0 {
+                    request
+                        .respond(
+                            Response::from_string("capacity")
+                                .with_status_code(429)
+                                .with_header(retry_after_zero()),
+                        )
+                        .expect("429 should be sent");
+                } else {
+                    request
+                        .respond(successful_tool_response())
+                        .expect("success should be sent");
+                }
+            }
+        });
+
+        let client = openai_test_client(url);
+        client
+            .call_with_tools_at_reasoning_and_attempt_policy(
+                "test-model",
+                "system",
+                &[user_message()],
+                &[],
+                128,
+                None,
+                None,
+                None,
+                RemoteAttemptPolicy::ConfiguredRetries,
+            )
+            .await
+            .expect("configured tool call should retry once");
+
+        server_thread.join().expect("server thread should finish");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first request should be recorded");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retry should be recorded");
+        assert!(request_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn governed_tool_call_does_not_retry_transient_http_failure() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let url = format!("http://{}", server.server_addr());
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let request = server.recv().expect("one request should arrive");
+            request_tx.send(()).expect("request should be counted");
+            request
+                .respond(
+                    Response::from_string("capacity")
+                        .with_status_code(429)
+                        .with_header(retry_after_zero()),
+                )
+                .expect("429 should be sent");
+        });
+
+        let client = openai_test_client(url);
+        client
+            .call_with_tools_at_reasoning_and_attempt_policy(
+                "test-model",
+                "system",
+                &[user_message()],
+                &[],
+                128,
+                None,
+                None,
+                None,
+                RemoteAttemptPolicy::GovernedSingleAttempt,
+            )
+            .await
+            .expect_err("governed tool call must expose the first failure");
+
+        server_thread.join().expect("server thread should finish");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("one request should be recorded");
+        assert!(request_rx.try_recv().is_err());
     }
 }

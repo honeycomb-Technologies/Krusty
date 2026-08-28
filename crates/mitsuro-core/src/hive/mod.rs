@@ -9,6 +9,7 @@ mod time;
 pub use misfire::{
     resolve_misfires, MisfireConfig, MisfireDispatch, MisfirePolicy, MisfireResolution,
 };
+pub(crate) use recurrence::resolve_local_datetime;
 pub use recurrence::{
     occurrences_between, parse_timezone, DstFoldPolicy, DstGapPolicy, DstPolicy, MonthlyDayPolicy,
     RecurrenceError, RecurrenceV1, ScheduleWeekday,

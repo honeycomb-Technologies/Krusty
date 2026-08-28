@@ -37,7 +37,10 @@ export interface SessionListProps {
   sessions: SessionResponse[];
   activeSessionId: string | null;
   onSelectSession: (session: SessionResponse) => void;
-  onDeleteSession: (id: string) => void;
+  onDeleteSession: (
+    id: string,
+    sessionType: SessionResponse['session_type'],
+  ) => void;
   onNewSession: () => void;
   onNewSessionWithDir: (path: string) => void;
   activeTab: number;
@@ -160,7 +163,7 @@ export function SessionList({
       <Pressable
         key={item.id}
         onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onSelectSession(item); }}
-        onLongPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); onDeleteSession(item.id); }}
+        onLongPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); onDeleteSession(item.id, item.session_type); }}
         style={[styles.sessionItem, isActive && { backgroundColor: t.userMessage + '12' }]}
       >
         <Text style={[styles.sessionTitle, { color: isActive ? t.userMessage : t.foreground }]} numberOfLines={2}>

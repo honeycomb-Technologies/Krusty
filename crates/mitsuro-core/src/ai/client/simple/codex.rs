@@ -4,6 +4,7 @@ use tracing::debug;
 
 use super::super::config::CallOptions;
 use super::super::core::AiClient;
+use super::super::RemoteAttemptPolicy;
 use super::openai::extract_openai_text;
 use super::shared::trim_or_empty;
 use super::SimpleCallResult;
@@ -25,6 +26,7 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
         options: &CallOptions,
+        attempt_policy: RemoteAttemptPolicy,
     ) -> Result<SimpleCallResult> {
         let messages = [ModelMessage {
             role: Role::User,
@@ -33,7 +35,8 @@ impl AiClient {
             }],
         }];
         let body = self.build_simple_codex_body(system_prompt, &messages, max_tokens, options);
-        self.send_simple_codex_body(model, body).await
+        self.send_simple_codex_body(model, body, attempt_policy)
+            .await
     }
 
     fn build_conversation_codex_body(
@@ -72,6 +75,7 @@ impl AiClient {
         appended_user_message: &str,
         max_tokens: usize,
         options: &CallOptions,
+        attempt_policy: RemoteAttemptPolicy,
     ) -> Result<SimpleCallResult> {
         let mut messages = conversation.to_vec();
         messages.push(ModelMessage {
@@ -87,7 +91,8 @@ impl AiClient {
             max_tokens,
             options,
         );
-        self.send_simple_codex_body(model, body).await
+        self.send_simple_codex_body(model, body, attempt_policy)
+            .await
     }
 
     fn build_simple_codex_body(
@@ -108,12 +113,21 @@ impl AiClient {
         )
     }
 
-    async fn send_simple_codex_body(&self, model: &str, body: Value) -> Result<SimpleCallResult> {
+    async fn send_simple_codex_body(
+        &self,
+        model: &str,
+        body: Value,
+        attempt_policy: RemoteAttemptPolicy,
+    ) -> Result<SimpleCallResult> {
         let mut retry = 0_u32;
         loop {
             match self.send_simple_codex_body_once(model, body.clone()).await {
                 Ok(result) => return Ok(result),
-                Err(error) if error.to_string().contains("code=server_error") && retry < 3 => {
+                Err(error)
+                    if attempt_policy.allows_retry()
+                        && error.to_string().contains("code=server_error")
+                        && retry < 3 =>
+                {
                     retry += 1;
                     tokio::time::sleep(std::time::Duration::from_secs(1 << (retry - 1))).await;
                 }
@@ -257,10 +271,42 @@ fn process_codex_sse_line(
 #[cfg(test)]
 mod tests {
     use super::{process_codex_sse_line, AiClient};
-    use crate::ai::client::{AiClientConfig, CallOptions};
+    use crate::ai::client::{AiClientConfig, CallOptions, RemoteAttemptPolicy};
     use crate::ai::models::ApiFormat;
     use crate::ai::providers::ProviderId;
     use crate::ai::types::{Content, ModelMessage, Role, Usage};
+    use std::sync::mpsc as std_mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use tiny_http::{Header, Response, Server};
+
+    fn codex_test_client(url: String) -> AiClient {
+        AiClient::new(
+            AiClientConfig {
+                model: "gpt-test".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                base_url: Some(format!("{url}/chatgpt.com/backend-api/codex/responses")),
+                ..Default::default()
+            },
+            "test-key".to_string(),
+        )
+    }
+
+    fn codex_sse(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        Response::from_string(body).with_header(
+            Header::from_bytes("Content-Type", "text/event-stream")
+                .expect("content type should be valid"),
+        )
+    }
+
+    const RETRYABLE_CODEX_ERROR: &str =
+        "data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\",\"type\":\"server_error\",\"message\":\"temporary\"}}\n\n";
+    const SUCCESSFUL_CODEX_RESPONSE: &str = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n",
+        "data: [DONE]\n\n"
+    );
 
     #[test]
     fn conversation_body_preserves_history_and_appended_instruction() {
@@ -466,5 +512,75 @@ mod tests {
 
         assert!(!error.contains(SENTINEL));
         assert!(error.contains("message_fingerprint=sha256:"));
+    }
+
+    #[tokio::test]
+    async fn configured_simple_codex_call_retains_server_error_retry() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let url = format!("http://{}", server.server_addr());
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            for response in [RETRYABLE_CODEX_ERROR, SUCCESSFUL_CODEX_RESPONSE] {
+                let request = server.recv().expect("request should arrive");
+                request_tx.send(()).expect("request should be counted");
+                request
+                    .respond(codex_sse(response))
+                    .expect("response should be sent");
+            }
+        });
+
+        let client = codex_test_client(url);
+        let response = client
+            .call_simple_with_usage_and_attempt_policy(
+                "gpt-test",
+                "system",
+                "user",
+                128,
+                RemoteAttemptPolicy::ConfiguredRetries,
+            )
+            .await
+            .expect("configured Codex call should retry once");
+
+        server_thread.join().expect("server thread should finish");
+        assert_eq!(response.text, "ok");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first request should be recorded");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retry should be recorded");
+        assert!(request_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn governed_simple_codex_call_does_not_retry_server_error() {
+        let server = Server::http("127.0.0.1:0").expect("test server should bind");
+        let url = format!("http://{}", server.server_addr());
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let request = server.recv().expect("one request should arrive");
+            request_tx.send(()).expect("request should be counted");
+            request
+                .respond(codex_sse(RETRYABLE_CODEX_ERROR))
+                .expect("response should be sent");
+        });
+
+        let client = codex_test_client(url);
+        client
+            .call_simple_with_usage_and_attempt_policy(
+                "gpt-test",
+                "system",
+                "user",
+                128,
+                RemoteAttemptPolicy::GovernedSingleAttempt,
+            )
+            .await
+            .expect_err("governed Codex call must expose the first server error");
+
+        server_thread.join().expect("server thread should finish");
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("one request should be recorded");
+        assert!(request_rx.try_recv().is_err());
     }
 }

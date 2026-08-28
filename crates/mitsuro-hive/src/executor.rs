@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use mitsuro_core::agent::LoopInput;
 use mitsuro_core::ai::types::Content;
+use mitsuro_core::storage::{HiveRunExecutionModeV1, HiveRunKind};
 use mitsuro_server::hive_execution_host::HiveExecutionHost;
 use mitsuro_server::types::AgenticEvent;
 use serde_json::{json, Value};
@@ -111,13 +112,23 @@ impl TerminalState {
         }
     }
 
-    fn into_outcome(self, completion: std::result::Result<(), String>) -> ExecutionOutcome {
+    fn into_outcome(
+        self,
+        completion: std::result::Result<(), String>,
+        externally_committed_worker_run: bool,
+    ) -> ExecutionOutcome {
         if self.finish_reason.as_deref() == Some("user_abort") {
             return ExecutionOutcome::Cancelled {
                 reason: "agent execution was cancelled".to_string(),
             };
         }
         if let Err(error) = completion {
+            if externally_committed_worker_run
+                && self.finish_reason.is_none()
+                && error.contains("requires fenced reconciliation")
+            {
+                return ExecutionOutcome::RecoveryRequired { reason: error };
+            }
             if self.finish_reason.is_none()
                 && (self.observed_event
                     || error.contains("event stream ended before LoopEvent::Finished"))
@@ -149,6 +160,14 @@ impl TerminalState {
                     reason: "agent entered sleeping state without durable wake metadata".into(),
                 },
             },
+            Some("awaiting_input") if externally_committed_worker_run => {
+                ExecutionOutcome::RecoveryRequired {
+                    reason: self.error.unwrap_or_else(|| {
+                        "fenced Worker execution requires recovery; it has no live user-input boundary"
+                            .to_string()
+                    }),
+                }
+            }
             Some("awaiting_input") => ExecutionOutcome::AwaitingInput {
                 details: self
                     .awaiting_input
@@ -224,9 +243,34 @@ fn transient_execution_error(error: &str) -> bool {
     TRANSIENT.iter().any(|marker| normalized.contains(marker))
 }
 
+fn worker_goal_acceptance_execution_forbidden(
+    kind: HiveRunKind,
+    mode: Option<&HiveRunExecutionModeV1>,
+) -> bool {
+    kind == HiveRunKind::WorkerWorkflowAcceptance
+        || mode
+            .is_some_and(|mode| matches!(mode, HiveRunExecutionModeV1::WorkerGoalAcceptance { .. }))
+}
+
 #[async_trait]
 impl ExecutionBackend for MitsuroExecutionBackend {
     async fn execute(&self, request: ExecutionRequest) -> ExecutionOutcome {
+        if worker_goal_acceptance_execution_forbidden(
+            request.claim.run.kind,
+            request
+                .claim
+                .run
+                .execution_context
+                .as_ref()
+                .map(|context| &context.mode),
+        ) {
+            return ExecutionOutcome::Failed {
+                error: "Worker Workflow acceptance is awaiting owner input and cannot execute"
+                    .into(),
+                retryable: false,
+                retry_after: None,
+            };
+        }
         let Some(session_id) = request.claim.run.session_id.clone() else {
             return ExecutionOutcome::Failed {
                 error: "claimed Hive run has no session".into(),
@@ -235,6 +279,19 @@ impl ExecutionBackend for MitsuroExecutionBackend {
             };
         };
         let run_id = request.claim.run.id.clone();
+        let externally_committed_worker_run = request
+            .claim
+            .run
+            .execution_context
+            .as_ref()
+            .is_some_and(|context| {
+                matches!(
+                    &context.mode,
+                    HiveRunExecutionModeV1::WorkerConversationNeutral { .. }
+                        | HiveRunExecutionModeV1::WorkerWorkspaceAttached { .. }
+                        | HiveRunExecutionModeV1::WorkerGoal { .. }
+                )
+            });
         let wake_reason = request.claim.run.kind.to_string();
         let run = match self
             .host
@@ -307,6 +364,7 @@ impl ExecutionBackend for MitsuroExecutionBackend {
         terminal.into_outcome(
             completion_result
                 .unwrap_or_else(|| Err("Hive execution completed without a result".to_string())),
+            externally_committed_worker_run,
         )
     }
 
@@ -430,11 +488,26 @@ impl ExecutionBackend for MitsuroExecutionBackend {
 
 #[cfg(test)]
 mod tests {
+    use mitsuro_core::storage::HiveRunKind;
     use mitsuro_server::types::AgenticEvent;
 
     use crate::ExecutionOutcome;
 
-    use super::{transient_execution_error, TerminalState};
+    use super::{
+        transient_execution_error, worker_goal_acceptance_execution_forbidden, TerminalState,
+    };
+
+    #[test]
+    fn worker_goal_acceptance_is_not_an_executable_backend_kind() {
+        assert!(worker_goal_acceptance_execution_forbidden(
+            HiveRunKind::WorkerWorkflowAcceptance,
+            None,
+        ));
+        assert!(!worker_goal_acceptance_execution_forbidden(
+            HiveRunKind::WorkerWorkflow,
+            None,
+        ));
+    }
 
     #[test]
     fn deterministic_execution_errors_do_not_retry() {
@@ -462,11 +535,50 @@ mod tests {
             is_error: false,
         });
 
-        let outcome = terminal.into_outcome(Err(
-            "agent event stream ended before LoopEvent::Finished; external side effects are uncertain"
-                .into(),
-        ));
+        let outcome = terminal.into_outcome(
+            Err(
+                "agent event stream ended before LoopEvent::Finished; external side effects are uncertain"
+                    .into(),
+            ),
+            false,
+        );
         assert!(matches!(outcome, ExecutionOutcome::RecoveryRequired { .. }));
+    }
+
+    #[test]
+    fn neutral_worker_attention_requires_recovery_instead_of_live_input() {
+        let mut terminal = TerminalState::default();
+        terminal.observe(&AgenticEvent::Error {
+            error: "provider call remains Started without a canonical response".into(),
+        });
+        terminal.observe(&AgenticEvent::Finish {
+            session_id: "worker-dm".into(),
+            stop_reason: "awaiting_input".into(),
+        });
+
+        let outcome = terminal.into_outcome(Ok(()), true);
+        assert!(matches!(
+            outcome,
+            ExecutionOutcome::RecoveryRequired { reason }
+                if reason.contains("provider call remains Started")
+        ));
+    }
+
+    #[test]
+    fn worker_goal_wall_timeout_requires_fenced_recovery() {
+        let terminal = TerminalState::default();
+        let outcome = terminal.into_outcome(
+            Err(
+                "Worker Workflow exceeded its frozen wall-time budget; outcome requires fenced reconciliation"
+                    .into(),
+            ),
+            true,
+        );
+        assert!(matches!(
+            outcome,
+            ExecutionOutcome::RecoveryRequired { reason }
+                if reason.contains("requires fenced reconciliation")
+        ));
     }
 
     #[test]

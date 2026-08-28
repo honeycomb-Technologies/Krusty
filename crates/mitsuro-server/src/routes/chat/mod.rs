@@ -186,6 +186,7 @@ async fn chat(
             state
                 .hive_runtime
                 .begin_daemon_chat_turn_for_user(
+                    state.db_path.as_ref().clone(),
                     &session_id,
                     message,
                     user_id.as_deref(),

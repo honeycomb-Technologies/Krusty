@@ -1,28 +1,30 @@
 import {
   createContext,
+  type ReactNode,
   useContext,
   useEffect,
   useState,
-  type ReactNode,
 } from "react";
 import {
+  createGitStore,
+  createPlanStore,
   createSessionsStore,
   createSessionStore,
   createWorkspaceStore,
-  createGitStore,
-  createPlanStore,
 } from "@mitsuro/state";
 import type {
+  GitStoreState,
+  MitsuroStorage,
+  PlanStoreState,
   SessionsStoreState,
   SessionStoreState,
   WorkspaceStoreState,
-  GitStoreState,
-  PlanStoreState,
 } from "@mitsuro/state";
 import type { MitsuroClient } from "@mitsuro/api";
 import type { SessionType } from "@mitsuro/api";
 import { createStorage } from "../platform/mitsuro-storage";
 import { IDENTITY_STORAGE_KEYS } from "../platform/identity-storage";
+import { guardRecoveryTransport } from "../platform/recovery-transport-guard";
 import { useStore } from "zustand";
 
 // Store types
@@ -52,7 +54,13 @@ const StoresContext = createContext<StoresContextValue | null>(null);
 
 interface StoresProviderProps {
   client: MitsuroClient | null;
+  recoveryConnectionScope: string | null;
   children: ReactNode;
+}
+
+interface ScopedStoreGraph {
+  recoveryConnectionScope: string;
+  stores: StoresContextValue;
 }
 
 const STORAGE_HYDRATION_KEYS = [
@@ -63,15 +71,33 @@ const STORAGE_HYDRATION_KEYS = [
   IDENTITY_STORAGE_KEYS.presenceClientId.canonical,
 ] as const;
 
-function buildStores(client: MitsuroClient, storage: ReturnType<typeof createStorage>) {
+function recoveryGuardedClient(
+  client: MitsuroClient,
+  storage: MitsuroStorage,
+): MitsuroClient {
+  if (!storage.ensureDurableRecoveryAuthority) return client;
+  return guardRecoveryTransport(
+    client,
+    storage.ensureDurableRecoveryAuthority.bind(storage),
+  );
+}
+
+function buildStores(client: MitsuroClient, storage: MitsuroStorage) {
   // Code keeps the original shared workspace slot; the storage adapter upgrades
   // its prior key before the mode stores are constructed.
   const workspaces: Record<SessionType, WorkspaceStore> = {
-    chat: createWorkspaceStore(storage, IDENTITY_STORAGE_KEYS.workspaceChat.canonical),
+    chat: createWorkspaceStore(
+      storage,
+      IDENTITY_STORAGE_KEYS.workspaceChat.canonical,
+    ),
     code: createWorkspaceStore(storage),
-    hive: createWorkspaceStore(storage, IDENTITY_STORAGE_KEYS.workspaceHive.canonical),
+    hive: createWorkspaceStore(
+      storage,
+      IDENTITY_STORAGE_KEYS.workspaceHive.canonical,
+    ),
   };
-  const sessions = createSessionsStore(client, workspaces.code);
+  const sessionClient = recoveryGuardedClient(client, storage);
+  const sessions = createSessionsStore(sessionClient, workspaces.code);
   const modes = (["chat", "code", "hive"] as const).reduce(
     (result, mode) => {
       const plan = createPlanStore();
@@ -79,11 +105,12 @@ function buildStores(client: MitsuroClient, storage: ReturnType<typeof createSto
         workspace: workspaces[mode],
         plan,
         session: createSessionStore(
-          client,
+          sessionClient,
           storage,
           workspaces[mode],
           sessions,
           plan,
+          mode,
         ),
       };
       return result;
@@ -105,39 +132,103 @@ function buildStores(client: MitsuroClient, storage: ReturnType<typeof createSto
   };
 }
 
-export function StoresProvider({ client, children }: StoresProviderProps) {
-  const [stores, setStores] = useState<StoresContextValue | null>(null);
+export function StoresProvider({
+  client,
+  recoveryConnectionScope,
+  children,
+}: StoresProviderProps) {
+  const [scopedStoreGraph, setScopedStoreGraph] = useState<
+    ScopedStoreGraph | null
+  >(null);
+  // React may render new ConnectionContext state before this effect has built
+  // its replacement graph. Never expose a prior principal's stores during
+  // that async handoff. A same-scope reconnect may retain its existing shell.
+  const stores = client && recoveryConnectionScope &&
+      scopedStoreGraph?.recoveryConnectionScope === recoveryConnectionScope
+    ? scopedStoreGraph.stores
+    : null;
+  const isConnectionHandoff = Boolean(
+    client && recoveryConnectionScope && !stores,
+  );
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!client) {
-      setStores(null);
+    if (!client || !recoveryConnectionScope) {
+      setScopedStoreGraph(null);
       return () => {
         cancelled = true;
       };
     }
 
+    const storage = createStorage(recoveryConnectionScope);
+    let initialized = false;
+    let rebuildPending = false;
+    let rebuildScheduled = false;
+
+    const rebuild = () => {
+      if (cancelled) return;
+      storage.beginDurableRecoverySnapshot?.();
+      const nextStores = buildStores(client, storage);
+      storage.acknowledgeDurableRecoverySnapshot?.();
+      if (!cancelled) {
+        setScopedStoreGraph({
+          recoveryConnectionScope,
+          stores: nextStores,
+        });
+      }
+    };
+
+    const scheduleRebuild = () => {
+      if (cancelled) return;
+      if (!initialized) {
+        rebuildPending = true;
+        return;
+      }
+      if (rebuildScheduled) return;
+      rebuildScheduled = true;
+      queueMicrotask(() => {
+        rebuildScheduled = false;
+        rebuild();
+      });
+    };
+
+    const unsubscribe = storage.subscribeDurableRecoveryInvalidation?.(
+      scheduleRebuild,
+    );
+
     // Keep the previous shell mounted while the next store graph hydrates so
-    // reconnect / client swaps do not blank the entire app.
+    // reconnect / client swaps do not blank the entire app. A peer web tab is
+    // allowed to build a read-only graph; guarded transport and every durable
+    // mutation still fail closed until this graph owns the origin-wide lock.
     void (async () => {
-      const storage = createStorage();
+      try {
+        await storage.activateDurableRecovery?.();
+      } catch {
+        // Unsupported or unavailable lock authority is surfaced on send.
+      }
       if (typeof storage.hydrate === "function") {
         try {
           await storage.hydrate([...STORAGE_HYDRATION_KEYS]);
-        } catch {}
+        } catch {
+          // Existing shell state remains available if optional hydration fails.
+        }
       }
-      if (cancelled) {
-        return;
+      if (cancelled) return;
+      initialized = true;
+      rebuild();
+      if (rebuildPending) {
+        rebuildPending = false;
+        scheduleRebuild();
       }
-
-      setStores(buildStores(client, storage));
     })();
 
     return () => {
       cancelled = true;
+      unsubscribe?.();
+      storage.disposeDurableRecovery?.();
     };
-  }, [client]);
+  }, [client, recoveryConnectionScope]);
 
   useEffect(() => {
     if (!stores) return;
@@ -154,7 +245,9 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
   }, [stores]);
 
   return (
-    <StoresContext.Provider value={stores}>{children}</StoresContext.Provider>
+    <StoresContext.Provider value={stores}>
+      {isConnectionHandoff ? null : children}
+    </StoresContext.Provider>
   );
 }
 

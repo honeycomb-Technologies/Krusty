@@ -186,6 +186,28 @@ fn group_settings_update_and_membership_replacement() {
 }
 
 #[test]
+fn combined_group_update_rejects_atomically_before_roster_mutation() {
+    let fixture = fixture();
+    let group = fixture.store.create(&new_group(&fixture)).unwrap();
+    let original_members = fixture.store.members(&group.id).unwrap();
+
+    let error = fixture
+        .store
+        .update_settings_and_members(
+            &group.id,
+            &HiveGroupUpdate {
+                title: "   ".into(),
+                ..HiveGroupUpdate::from(&group)
+            },
+            Some(&[fixture.workers[0].clone()]),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("title"), "{error}");
+    assert_eq!(fixture.store.members(&group.id).unwrap(), original_members);
+    assert_eq!(fixture.store.get(&group.id).unwrap(), Some(group));
+}
+
+#[test]
 fn message_seq_is_monotonic_and_append_is_idempotent() {
     let fixture = fixture();
     let group = fixture.store.create(&new_group(&fixture)).unwrap();

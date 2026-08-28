@@ -4,9 +4,13 @@ import {
 	KrustyApiError,
 	KrustyClient,
 	type ChatRequest,
+	type HiveWorkerGovernorRecoveryResponse,
+	type HiveWorkerIntroductionReviewStatus,
 	type ModelKey,
 	type ModelsResponse,
 } from "../src";
+
+const queuedIntroductionReviewStatus: HiveWorkerIntroductionReviewStatus = "queued";
 
 const exactGrokKey: ModelKey = {
 	provider: "grok",
@@ -326,5 +330,584 @@ describe("KrustyClient Mako schedules", () => {
 		expect((requestInit?.headers as Record<string, string>)["If-Match"]).toBe(
 			'"7"',
 		);
+	});
+});
+
+describe("MitsuroClient Hive Worker Introduction controls", () => {
+	it("keeps the queued durable review status in the shared client contract", () => {
+		expect(queuedIntroductionReviewStatus).toBe("queued");
+	});
+	it("sends exact replay keys and typed decision bodies", async () => {
+		const requests: Array<{
+			url: string;
+			method?: string;
+			headers: Record<string, string>;
+			body?: unknown;
+		}> = [];
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				requests.push({
+					url: String(input),
+					method: init?.method,
+					headers: init?.headers as Record<string, string>,
+					body: init?.body ? JSON.parse(String(init.body)) : undefined,
+				});
+				return Response.json({
+					id: "worker-1",
+					slug: "researcher",
+					display_name: "Researcher",
+					permission_mode: "supervised",
+					autonomy: "manual",
+					status: "active",
+					created_at: "2026-08-24T00:00:00Z",
+					updated_at: "2026-08-24T00:00:00Z",
+				});
+			}) as typeof fetch,
+		});
+
+		await client.createHiveWorker(
+			{
+				slug: "researcher",
+				model: exactGrokKey.model_id,
+				model_key: exactGrokKey,
+			},
+			{ idempotencyKey: "create-introduction-key" },
+		);
+		await client.retryHiveWorkerIntroduction("worker-1", {
+			idempotencyKey: "retry-introduction-key",
+		});
+		await client.skipHiveWorkerIntroduction("worker-1", {
+			idempotencyKey: "skip-introduction-key",
+		});
+		await client.confirmHiveWorkerIntroduction(
+			"worker-1",
+			{
+				proposal_id: "proposal-1",
+				proposal_revision: 2,
+				selected_facts: [
+					{
+						fact_id: "fact-1",
+						final_statement: "Help with runtime reliability.",
+					},
+				],
+			},
+			{ idempotencyKey: "confirm-introduction-key" },
+		);
+		await client.keepTalkingHiveWorkerIntroduction(
+			"worker-1",
+			{ proposal_id: "proposal-1", proposal_revision: 2 },
+			{ idempotencyKey: "keep-introduction-key" },
+		);
+
+		expect(requests.map(({ url, method }) => ({ url, method }))).toEqual([
+			{
+				url: "http://mitsuro.test/api/hive/workers",
+				method: "POST",
+			},
+			{
+				url: "http://mitsuro.test/api/hive/workers/worker-1/introduction/retry",
+				method: "POST",
+			},
+			{
+				url: "http://mitsuro.test/api/hive/workers/worker-1/introduction/skip",
+				method: "POST",
+			},
+			{
+				url:
+					"http://mitsuro.test/api/hive/workers/worker-1/introduction/confirm",
+				method: "POST",
+			},
+			{
+				url:
+					"http://mitsuro.test/api/hive/workers/worker-1/introduction/keep-talking",
+				method: "POST",
+			},
+		]);
+		expect(
+			requests.map((request) => request.headers["Idempotency-Key"]),
+		).toEqual([
+			"create-introduction-key",
+			"retry-introduction-key",
+			"skip-introduction-key",
+			"confirm-introduction-key",
+			"keep-introduction-key",
+		]);
+		expect(requests[0]?.body).toEqual({
+			slug: "researcher",
+			model: "grok-4.5",
+			model_key: exactGrokKey,
+		});
+		expect(requests[1]?.body).toBeUndefined();
+		expect(requests[2]?.body).toBeUndefined();
+		expect(requests[3]?.body).toEqual({
+			proposal_id: "proposal-1",
+			proposal_revision: 2,
+			selected_facts: [
+				{
+					fact_id: "fact-1",
+					final_statement: "Help with runtime reliability.",
+				},
+			],
+		});
+		expect(requests[4]?.body).toEqual({
+			proposal_id: "proposal-1",
+			proposal_revision: 2,
+		});
+	});
+
+	it("forwards AbortSignal when loading Worker detail", async () => {
+		const controller = new AbortController();
+		let observedSignal: AbortSignal | null | undefined;
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (_input, init) => {
+				observedSignal = init?.signal;
+				return Response.json({
+					id: "worker-1",
+					slug: "worker",
+					display_name: "Worker",
+					permission_mode: "supervised",
+					autonomy: "manual",
+					status: "active",
+					created_at: "2026-08-24T00:00:00Z",
+					updated_at: "2026-08-24T00:00:00Z",
+				});
+			}) as typeof fetch,
+		});
+
+		await client.getHiveWorker("worker-1", { signal: controller.signal });
+		expect(observedSignal).toBe(controller.signal);
+	});
+
+	it("loads the aggregate Worker governor over the exact encoded GET path", async () => {
+		const controller = new AbortController();
+		let observedUrl = "";
+		let observedInit: RequestInit | undefined;
+		const projection = {
+			schema_version: 1 as const,
+			worker_id: "worker/id",
+			worker_revision: 4,
+			dm_session_id: "dm-1",
+			evaluated_at: "2026-08-25T12:00:00.000000Z",
+			policy: {
+				worker_id: "worker/id",
+				revision: 2,
+				daily_call_limit: 128,
+				daily_token_limit: 1_000_000,
+				timezone: "UTC",
+				quiet_start_minute: null,
+				quiet_end_minute: null,
+				quiet_gap_policy: "shift_forward",
+				quiet_fold_policy: "first",
+				idle_base_secs: 900,
+				idle_max_secs: 21_600,
+				tracking_started_at: "2026-08-25T00:00:00.000000Z",
+				created_at: "2026-08-25T00:00:00.000000Z",
+				updated_at: "2026-08-25T00:00:00.000000Z",
+			},
+			daily: {
+				local_day: "2026-08-25",
+				timezone: "UTC",
+				starts_at: "2026-08-25T00:00:00.000000Z",
+				resets_at: "2026-08-26T00:00:00.000000Z",
+				calls_used: 3,
+				calls_limit: 128,
+				tokens_used_or_reserved: 1_250,
+				tokens_limit: 1_000_000,
+			},
+			autonomous_dm: {
+				origin: "workflow_rollover",
+				lane_key: "dm",
+				reservation_tokens: 1,
+				decision: {
+					disposition: "allow",
+					primary_reason: null,
+					reasons: [],
+					evaluated_at: "2026-08-25T12:00:00.000000Z",
+					next_eligible_at: null,
+					policy_revision: 2,
+					tracking_started_at: "2026-08-25T00:00:00.000000Z",
+					daily: {},
+					idle: { lane_key: "dm", idle_streak: 0 },
+					override_grant_id: null,
+				},
+			},
+			foreground_dm: {
+				origin: "user_dm",
+				lane_key: "dm",
+				reservation_tokens: 1,
+				decision: {
+					disposition: "allow",
+					primary_reason: null,
+					reasons: [],
+					evaluated_at: "2026-08-25T12:00:00.000000Z",
+					next_eligible_at: null,
+					policy_revision: 2,
+					tracking_started_at: "2026-08-25T00:00:00.000000Z",
+					daily: {},
+					idle: { lane_key: "dm", idle_streak: 0 },
+					override_grant_id: null,
+				},
+			},
+			unresolved_started_count: 0,
+			response_loss_recovery_required: false,
+			estimated_daily_cost: {
+				local_day: "2026-08-25",
+				timezone: "UTC",
+				starts_at: "2026-08-25T00:00:00.000000Z",
+				resets_at: "2026-08-26T00:00:00.000000Z",
+				by_currency: [{
+					currency: "USD",
+					estimated_cost_microunits: "40",
+					priced_call_count: 1,
+				}],
+				unpriced_call_count: 0,
+			},
+		};
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				observedUrl = String(input);
+				observedInit = init;
+				return Response.json(projection);
+			}) as typeof fetch,
+		});
+
+		const response = await client.getHiveWorkerGovernor("worker/id", {
+			signal: controller.signal,
+		});
+		expect(observedUrl).toBe(
+			"http://mitsuro.test/api/hive/workers/worker%2Fid/governor",
+		);
+		expect(observedInit?.signal).toBe(controller.signal);
+		expect(observedInit?.method).toBeUndefined();
+		expect(observedInit?.body).toBeUndefined();
+		expect(response.daily.calls_used).toBe(3);
+		expect(
+			response.estimated_daily_cost.by_currency[0]?.estimated_cost_microunits,
+		)
+			.toBe("40");
+	});
+
+	it("requests one exact-owner Worker governor recovery without a request body", async () => {
+		let observedUrl = "";
+		let observedInit: RequestInit | undefined;
+		let recovery: HiveWorkerGovernorRecoveryResponse = {
+			worker_id: "worker/id",
+			grant_id: "grant-1",
+			expires_at: "2026-08-25T12:05:00.000000Z",
+			status: "granted" as const,
+			bypass_unresolved_provider_call: true as const,
+		};
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				observedUrl = String(input);
+				observedInit = init;
+				return Response.json(recovery);
+			}) as typeof fetch,
+		});
+
+		const response = await client.grantHiveWorkerGovernorRecovery("worker/id", {
+			idempotencyKey: "recover-worker-id-attempt-1",
+		});
+		expect(observedUrl).toBe(
+			"http://mitsuro.test/api/hive/workers/worker%2Fid/governor/recovery",
+		);
+		expect(observedInit?.method).toBe("POST");
+		expect((observedInit?.headers as Record<string, string>)["Idempotency-Key"])
+			.toBe("recover-worker-id-attempt-1");
+		expect(observedInit?.body).toBeUndefined();
+		expect(response).toEqual(recovery);
+
+		recovery = {
+			worker_id: "worker/id",
+			grant_id: null,
+			expires_at: null,
+			status: "response_loss_acknowledged",
+			bypass_unresolved_provider_call: false,
+		};
+		const responseLoss = await client.grantHiveWorkerGovernorRecovery(
+			"worker/id",
+			{ idempotencyKey: "acknowledge-worker-response-loss" },
+		);
+		expect(responseLoss).toEqual(recovery);
+	});
+
+	it("looks up an archived Worker by exact direct session with cancellation", async () => {
+		const controller = new AbortController();
+		let observedUrl = "";
+		let observedSignal: AbortSignal | null | undefined;
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				observedUrl = String(input);
+				observedSignal = init?.signal;
+				return Response.json({
+					kind: "worker_dm",
+					session_id: "worker dm/archived",
+					worker: {
+						id: "worker-archived",
+						revision: 9,
+						slug: "archived-friend",
+						display_name: "Archived Friend",
+						permission_mode: "supervised",
+						autonomy: "manual",
+						status: "archived",
+						dm_session_id: "worker dm/archived",
+						attention: [],
+						created_at: "2026-08-24T00:00:00Z",
+						updated_at: "2026-08-25T00:00:00Z",
+					},
+				});
+			}) as typeof fetch,
+		});
+
+		const response = await client.getHiveWorkerBySession(
+			"worker dm/archived",
+			{ signal: controller.signal },
+		);
+		expect(observedUrl).toBe(
+			"http://mitsuro.test/api/hive/workers/by-session/worker%20dm%2Farchived",
+		);
+		expect(observedSignal).toBe(controller.signal);
+		expect(response.kind).toBe("worker_dm");
+		if (response.kind === "worker_dm") {
+			expect(response.worker.status).toBe("archived");
+		}
+	});
+
+	it("revision-fences Worker updates and lifecycle actions with replay keys", async () => {
+		const requests: Array<{
+			url: string;
+			method?: string;
+			headers: Record<string, string>;
+			body?: unknown;
+		}> = [];
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				requests.push({
+					url: String(input),
+					method: init?.method,
+					headers: init?.headers as Record<string, string>,
+					body: init?.body ? JSON.parse(String(init.body)) : undefined,
+				});
+				return Response.json({
+					id: "worker-1",
+					revision: 8,
+					slug: "researcher",
+					display_name: "Researcher",
+					permission_mode: "supervised",
+					autonomy: "manual",
+					status: "paused",
+					attention: [],
+					created_at: "2026-08-24T00:00:00Z",
+					updated_at: "2026-08-24T00:00:00Z",
+				});
+			}) as typeof fetch,
+		});
+
+		await client.updateHiveWorker(
+			"worker-1",
+			{ expected_revision: 7, display_name: "Researcher" },
+			{ idempotencyKey: "worker-update-key" },
+		);
+		await client.pauseHiveWorker("worker-1", 8, {
+			idempotencyKey: "worker-pause-key",
+		});
+		await client.resumeHiveWorker("worker-1", 9, {
+			idempotencyKey: "worker-resume-key",
+		});
+		await client.archiveHiveWorker("worker-1", 10, {
+			idempotencyKey: "worker-archive-key",
+		});
+
+		expect(requests.map((request) => request.method)).toEqual([
+			"PATCH",
+			"POST",
+			"POST",
+			"DELETE",
+		]);
+		expect(
+			requests.map((request) => request.headers["Idempotency-Key"]),
+		).toEqual([
+			"worker-update-key",
+			"worker-pause-key",
+			"worker-resume-key",
+			"worker-archive-key",
+		]);
+		expect(requests.map((request) => request.body)).toEqual([
+			{ expected_revision: 7, display_name: "Researcher" },
+			{ expected_revision: 8 },
+			{ expected_revision: 9 },
+			{ expected_revision: 10 },
+		]);
+	});
+
+	it("keeps Worker Goal lifecycle on dedicated revision-fenced routes", async () => {
+		const requests: Array<{
+			url: string;
+			method?: string;
+			headers: Record<string, string>;
+			body?: unknown;
+		}> = [];
+		const projection = {
+			schema_version: 1,
+			worker_id: "worker/id",
+			worker_revision: 4,
+			worker_status: "active",
+			session_id: "dm-1",
+			workspace: {
+				mode: "selected",
+				working_dir: "/work",
+				project_dir: "/work",
+			},
+			introduction_ready: true,
+			workflow: null,
+			active_run: null,
+			attention: [],
+			allowed_actions: [],
+		};
+		const client = new KrustyClient({
+			baseUrl: "http://mitsuro.test",
+			hiveTransport: "canonical",
+			fetchImpl: (async (input, init) => {
+				requests.push({
+					url: String(input),
+					method: init?.method,
+					headers: init?.headers as Record<string, string>,
+					body: init?.body ? JSON.parse(String(init.body)) : undefined,
+				});
+				return Response.json(projection);
+			}) as typeof fetch,
+		});
+		const fence = {
+			goal_id: "goal-1",
+			expected_worker_revision: 4,
+			expected_goal_revision: 7,
+		};
+
+		await client.getHiveWorkerGoal("worker/id");
+		await client.createHiveWorkerGoal(
+			"worker/id",
+			{
+				expected_worker_revision: 4,
+				goal: {
+					title: "Ship the bridge",
+					objective: "Verify the Worker Goal vertical",
+					criteria: [{ description: "All focused tests pass", required: true }],
+				},
+				plan: {
+					title: "One bounded step",
+					steps: [{
+						display_key: "1",
+						description: "Run focused validation",
+						acceptance_criteria: ["Validation is green"],
+						required: true,
+					}],
+				},
+			},
+			{ idempotencyKey: "goal-create" },
+		);
+		await client.approveHiveWorkerGoal(
+			"worker/id",
+			{ ...fence, plan_revision_id: "plan-2" },
+			{ idempotencyKey: "goal-approve" },
+		);
+		await client.activateHiveWorkerGoal("worker/id", fence, {
+			idempotencyKey: "goal-activate",
+		});
+		await client.pauseHiveWorkerGoal(
+			"worker/id",
+			{ ...fence, reason: "paused_from_mobile" },
+			{ idempotencyKey: "goal-pause" },
+		);
+		await client.cancelHiveWorkerGoal(
+			"worker/id",
+			{ ...fence, reason: "cancelled_from_mobile" },
+			{ idempotencyKey: "goal-cancel" },
+		);
+		await client.resolveHiveWorkerGoalAcceptance(
+			"worker/id",
+			{
+				expected_worker_revision: 4,
+				acceptance_run_id: "acceptance-1",
+				expected_goal_revision: 7,
+				decision: "accept",
+				reason: "Reviewed the result",
+				criteria: [{
+					criterion_id: "criterion-1",
+					decision: "passed",
+					evidence: ["Focused validation passed"],
+				}],
+			},
+			{ idempotencyKey: "goal-acceptance" },
+		);
+		await client.setHiveWorkerWorkspace(
+			"worker/id",
+			{
+				expected_worker_revision: 4,
+				workspace_mode: "selected",
+				working_dir: "/work",
+				project_dir: "/work",
+			},
+			{ idempotencyKey: "workspace-set" },
+		);
+
+		expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
+			"/api/hive/workers/worker%2Fid/workflow",
+			"/api/hive/workers/worker%2Fid/workflow",
+			"/api/hive/workers/worker%2Fid/workflow/approve",
+			"/api/hive/workers/worker%2Fid/workflow/activate",
+			"/api/hive/workers/worker%2Fid/workflow/pause",
+			"/api/hive/workers/worker%2Fid/workflow/cancel",
+			"/api/hive/workers/worker%2Fid/workflow/acceptance",
+			"/api/hive/workers/worker%2Fid/workspace",
+		]);
+		expect(
+			requests.some(({ url }) =>
+				url.includes("/sessions/") && url.includes("/workflow/commands")
+			),
+		).toBe(false);
+		expect(requests.slice(1).map(({ method }) => method)).toEqual([
+			"POST",
+			"POST",
+			"POST",
+			"POST",
+			"POST",
+			"POST",
+			"PUT",
+		]);
+		expect(
+			requests.slice(1).map(({ headers }) => headers["Idempotency-Key"]),
+		).toEqual([
+			"goal-create",
+			"goal-approve",
+			"goal-activate",
+			"goal-pause",
+			"goal-cancel",
+			"goal-acceptance",
+			"workspace-set",
+		]);
+		expect(requests[6]?.body).toEqual({
+			expected_worker_revision: 4,
+			acceptance_run_id: "acceptance-1",
+			expected_goal_revision: 7,
+			decision: "accept",
+			reason: "Reviewed the result",
+			criteria: [{
+				criterion_id: "criterion-1",
+				decision: "passed",
+				evidence: ["Focused validation passed"],
+			}],
+		});
 	});
 });

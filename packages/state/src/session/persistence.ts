@@ -1,4 +1,4 @@
-import type { MitsuroClient, ModelKey } from '@mitsuro/api';
+import type { MitsuroClient, ModelKey, SessionType } from '@mitsuro/api';
 import type { createSessionsStore } from '../sessions';
 import type { PermissionMode, SessionMode, SessionStoreState } from './types';
 
@@ -28,9 +28,14 @@ export async function persistSessionMode(
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   mode: SessionMode,
+  ownerSessionType?: SessionType,
 ) {
   const state = getState();
-  if (!state.sessionId) return;
+  if (
+    !state.sessionId ||
+    ownerSessionType === 'hive' ||
+    state.sessionType === 'hive'
+  ) return;
 
   try {
     await client.updateSession(state.sessionId, { mode });
@@ -45,9 +50,14 @@ export async function persistSessionPermissionMode(
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   permissionMode: PermissionMode,
+  ownerSessionType?: SessionType,
 ) {
   const state = getState();
-  if (!state.sessionId) return;
+  if (
+    !state.sessionId ||
+    ownerSessionType === 'hive' ||
+    state.sessionType === 'hive'
+  ) return;
 
   try {
     await client.updateSession(state.sessionId, { permission_mode: permissionMode });
@@ -63,9 +73,14 @@ export async function persistSessionModel(
   getState: () => SessionStoreState,
   model: string | null,
   modelKey?: ModelKey | null,
+  ownerSessionType?: SessionType,
 ) {
   const state = getState();
-  if (!state.sessionId) return;
+  if (
+    !state.sessionId ||
+    ownerSessionType === 'hive' ||
+    state.sessionType === 'hive'
+  ) return;
 
   try {
     await client.updateSession(state.sessionId, {

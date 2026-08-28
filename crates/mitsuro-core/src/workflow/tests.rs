@@ -334,6 +334,68 @@ fn stale_writers_and_second_unfinished_goal_fail_safely() {
 }
 
 #[test]
+fn goal_with_first_plan_rolls_back_between_phases_and_replays_exactly() {
+    let (temp, session_id, manager) = setup();
+    let path = temp.path().join("workflow.db");
+    let db = Database::new(&path).expect("database");
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_first_plan
+             BEFORE INSERT ON workflow_plan_revisions
+             BEGIN
+               SELECT RAISE(ABORT, 'injected first-plan failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+    drop(db);
+
+    let failed = manager.create_goal_with_plan(
+        &session_id,
+        goal_input(),
+        plan_input(),
+        "atomic-create-plan",
+        "user",
+    );
+    assert!(failed.is_err(), "the injected plan write must fail");
+    assert!(
+        manager
+            .get_snapshot(&session_id)
+            .expect("snapshot query")
+            .is_none(),
+        "the Goal insert must roll back with its plan"
+    );
+
+    let db = Database::new(&path).expect("database");
+    db.conn()
+        .execute_batch("DROP TRIGGER fail_first_plan;")
+        .expect("failure trigger should drop");
+    drop(db);
+
+    let created = manager
+        .create_goal_with_plan(
+            &session_id,
+            goal_input(),
+            plan_input(),
+            "atomic-create-plan",
+            "user",
+        )
+        .expect("retry should atomically create both records");
+    assert!(created.snapshot.plan_revision.is_some());
+    assert_eq!(created.snapshot.steps.len(), 1);
+
+    let replayed = manager
+        .create_goal_with_plan(
+            &session_id,
+            goal_input(),
+            plan_input(),
+            "atomic-create-plan",
+            "user",
+        )
+        .expect("same operation should replay");
+    assert_eq!(replayed, created);
+}
+
+#[test]
 fn legacy_import_preserves_completed_evidence_but_never_activates() {
     let temp = TempDir::new().expect("temp dir");
     let path = temp.path().join("legacy-workflow.db");
@@ -493,6 +555,101 @@ fn startup_recovery_pauses_running_attempt_and_releases_its_step() {
     );
     assert_eq!(recovered.steps[0].status, WorkflowStepStatus::Pending);
     assert!(recovered.steps[0].claimed_attempt_id.is_none());
+}
+
+#[test]
+fn startup_recovery_leaves_hive_linked_workflow_attempt_to_hive_reconciliation() {
+    let (temp, session_id, manager) = setup();
+    let (goal_id, _plan_id, revision) = activate_fixture(&manager, &session_id);
+    let step_id = manager
+        .get_snapshot(&session_id)
+        .expect("snapshot")
+        .expect("workflow")
+        .steps[0]
+        .id
+        .clone();
+    let started = manager
+        .start_attempt(
+            &session_id,
+            &goal_id,
+            revision,
+            StartAttemptInput {
+                step_id: Some(step_id),
+                permission_mode: "autonomous".to_string(),
+                max_turns: 8,
+                max_tool_calls: 32,
+                max_wall_time_secs: 600,
+                max_research_actions: 8,
+            },
+            "hive-linked-before-restart",
+            "hive_runtime",
+        )
+        .expect("attempt should start");
+    let attempt_id = started
+        .snapshot
+        .latest_attempt
+        .as_ref()
+        .expect("attempt")
+        .id
+        .clone();
+
+    // This fixture exercises only generic-recovery selection. Production
+    // Worker Workflow inserts are covered by the strict migration-76 guard
+    // and activation-facade tests.
+    let db = Database::new(&temp.path().join("workflow.db")).expect("reopen workflow database");
+    db.conn()
+        .execute_batch(
+            "DROP TRIGGER hive_runs_worker_workflow_insert_guard;
+             DROP TRIGGER hive_runs_worker_context_insert_guard;",
+        )
+        .expect("narrow fixture guard bypass");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_controllers (
+                 id, scope_key, session_id, status, timezone,
+                 max_concurrent_runs, created_at, updated_at
+             ) VALUES (
+                 'workflow-recovery-controller', 'test:workflow-recovery', ?1,
+                 'active', 'UTC', 1, ?2, ?2
+             )",
+            rusqlite::params![session_id, "2026-08-25T00:00:00.000000Z"],
+        )
+        .expect("insert fixture controller");
+    db.conn()
+        .execute(
+            "INSERT INTO hive_runs (
+                 id, controller_id, session_id, kind, objective, config_json,
+                 status, available_at, max_attempts, created_at, updated_at,
+                 workflow_goal_id, workflow_attempt_id
+             ) VALUES (
+                 'hive-linked-run', 'workflow-recovery-controller', ?1,
+                 'worker_workflow', 'fixture', '{}', 'queued', ?2, 1, ?2, ?2,
+                 ?3, ?4
+             )",
+            rusqlite::params![
+                session_id,
+                "2026-08-25T00:00:00.000000Z",
+                goal_id,
+                attempt_id,
+            ],
+        )
+        .expect("link Workflow attempt to Hive run");
+
+    assert_eq!(
+        manager
+            .recover_interrupted_attempts()
+            .expect("generic recovery should succeed"),
+        0
+    );
+    let snapshot = manager
+        .get_snapshot(&session_id)
+        .expect("snapshot")
+        .expect("workflow");
+    assert_eq!(
+        snapshot.latest_attempt.expect("attempt").status,
+        AttemptStatus::Running
+    );
+    assert_eq!(snapshot.goal.status, GoalStatus::Active);
 }
 
 #[test]

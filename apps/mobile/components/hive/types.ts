@@ -2,15 +2,15 @@ import type {
   HiveChannelsResponse,
   HiveCrewDocumentKind,
   HiveCrewResponse,
-  HiveCurrentRunSummary,
   HiveCurrentResponse,
+  HiveCurrentRunSummary,
   HiveHomeDocumentKind,
   HiveHomeResponse,
   HiveRunPriority,
-  ModelKey,
   HiveRunWakeEvent,
   HiveSessionStatus,
   ModelInfo,
+  ModelKey,
   PermissionMode,
   ThinkingLevel,
 } from "@mitsuro/api";
@@ -27,7 +27,12 @@ export type HiveTopLevelView =
   | "groups"
   | "channels"
   | "memory";
-export type HiveRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
+export type HiveRunSection =
+  | "overview"
+  | "wake"
+  | "tasks"
+  | "chat"
+  | "artifacts";
 export type HiveKnowledgeView = "recent" | "memory";
 export type HiveKnowledgeScope = "workspace" | "all";
 export type HiveAttentionItemKind =
@@ -56,25 +61,30 @@ export interface HiveChatContext {
   fastModeSupported: boolean;
   mode: "build" | "plan";
   model: string | null;
+  modelKey: ModelKey | null;
   models: ModelInfo[];
   tokenCount: number;
   onApproveTool: (sessionId: string, toolCallId: string) => void;
   onDenyTool: (sessionId: string, toolCallId: string) => void;
   onSubmitToolResult: (
+    sessionId: string,
     toolCallId: string,
     result: string,
   ) => void | Promise<void>;
   onPlanConfirm: (
+    sessionId: string,
     toolCallId: string,
     choice: "execute" | "abandon",
   ) => void | Promise<void>;
   onSend: (content: string, attachments?: ChatBarAttachment[]) => Promise<void>;
+  onWorkerSend: (sessionId: string, content: string) => Promise<void>;
+  onWorkerStop: (sessionId: string) => void;
   onStop: () => void;
   onThinkingChange: (level: ThinkingLevel) => void;
   onPermissionModeToggle: () => void;
   onFastModeToggle: () => void;
   onModeToggle: () => void;
-  onModelSelect: (modelId: string) => void;
+  onModelSelect: (model: ModelInfo) => void;
 }
 
 export interface HiveCurrentState {

@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::process::{ProcessInfo, ProcessRegistry, ProcessStatus};
-use crate::tools::registry::Tool;
+use crate::tools::registry::{ShellIsolationPolicy, Tool};
 use crate::tools::truncation;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
@@ -219,9 +219,120 @@ fn normalized_working_dir(path: &std::path::Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[cfg(target_os = "linux")]
+fn workspace_only_shell_command(
+    command: &str,
+    root: &std::path::Path,
+    working_dir: &std::path::Path,
+) -> Result<String, String> {
+    const RUNTIME_ROOTS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64"];
+
+    let unsafe_root = root == std::path::Path::new("/")
+        || RUNTIME_ROOTS.iter().any(|runtime_root| {
+            let runtime_root = std::path::Path::new(runtime_root);
+            root == runtime_root
+                || runtime_root
+                    .canonicalize()
+                    .is_ok_and(|canonical| root == canonical.as_path())
+        });
+    if unsafe_root {
+        return Err(format!(
+            "Strong Worker Goal shell isolation refused unsafe workspace root '{}'",
+            root.display()
+        ));
+    }
+
+    let shell = ["/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .ok_or_else(|| {
+            "Strong Worker Goal shell isolation is unavailable: bash was not found in a system runtime root"
+                .to_string()
+        })?;
+    let mut arguments = vec![
+        "/usr/bin/bwrap".to_string(),
+        "--die-with-parent".to_string(),
+        "--new-session".to_string(),
+        "--unshare-user".to_string(),
+        "--unshare-ipc".to_string(),
+        "--unshare-pid".to_string(),
+        "--unshare-net".to_string(),
+        "--unshare-uts".to_string(),
+        "--hostname".to_string(),
+        "mitsuro-worker".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+    ];
+
+    // Start from an empty mount namespace. Only immutable system runtime
+    // roots and the exact writable workspace are made visible; notably there
+    // is no host-root, home, /etc, /run, /sys, or host /proc bind.
+    for runtime_root in RUNTIME_ROOTS {
+        if std::path::Path::new(runtime_root).exists() {
+            arguments.extend([
+                "--ro-bind".to_string(),
+                (*runtime_root).to_string(),
+                (*runtime_root).to_string(),
+            ]);
+        }
+    }
+    arguments.extend([
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
+        "--dir".to_string(),
+        "/etc".to_string(),
+        "--dir".to_string(),
+        "/run".to_string(),
+        "--dir".to_string(),
+        "/var".to_string(),
+        "--dir".to_string(),
+        "/var/tmp".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+    ]);
+
+    let mut ancestors = root
+        .ancestors()
+        .skip(1)
+        .filter(|path| *path != std::path::Path::new("/"))
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        arguments.extend(["--dir".to_string(), ancestor.display().to_string()]);
+    }
+    arguments.extend([
+        "--bind".to_string(),
+        root.display().to_string(),
+        root.display().to_string(),
+        "--chdir".to_string(),
+        working_dir.display().to_string(),
+        "--".to_string(),
+        shell.to_string(),
+        "--noprofile".to_string(),
+        "--norc".to_string(),
+        "-c".to_string(),
+        command.to_string(),
+    ]);
+
+    Ok(arguments
+        .into_iter()
+        .map(|argument| shell_words::quote(&argument).into_owned())
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
 fn sandboxed_shell_command(command: &str, ctx: &ToolContext) -> Result<String, String> {
-    let Some(root) = ctx.sandbox_root.as_deref() else {
-        return Ok(command.to_string());
+    let root = match ctx.sandbox_root.as_deref() {
+        Some(root) => root,
+        None if ctx.shell_isolation_policy == ShellIsolationPolicy::WorkspaceOnly => {
+            return Err(
+                "Strong Worker Goal shell isolation is unavailable: no workspace root was configured"
+                    .to_string(),
+            );
+        }
+        None => return Ok(command.to_string()),
     };
     let root = root.canonicalize().map_err(|error| {
         format!(
@@ -251,17 +362,30 @@ fn sandboxed_shell_command(command: &str, ctx: &ToolContext) -> Result<String, S
                     .to_string(),
             );
         }
-        let quote = |value: &str| shell_words::quote(value).into_owned();
-        Ok(format!(
-            "/usr/bin/bwrap --die-with-parent --new-session --ro-bind / / --tmpfs /tmp --bind {root} {root} --proc /proc --dev /dev --chdir {working_dir} -- /bin/bash -lc {command}",
-            root = quote(&root.display().to_string()),
-            working_dir = quote(&working_dir.display().to_string()),
-            command = quote(command),
-        ))
+        if ctx.shell_isolation_policy == ShellIsolationPolicy::WorkspaceOnly {
+            workspace_only_shell_command(command, &root, &working_dir)
+        } else {
+            let quote = |value: &str| shell_words::quote(value).into_owned();
+            Ok(format!(
+                "/usr/bin/bwrap --die-with-parent --new-session --ro-bind / / --tmpfs /tmp --bind {root} {root} --proc /proc --dev /dev --chdir {working_dir} -- /bin/bash -lc {command}",
+                root = quote(&root.display().to_string()),
+                working_dir = quote(&working_dir.display().to_string()),
+                command = quote(command),
+            ))
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
-    Ok(command.to_string())
+    {
+        if ctx.shell_isolation_policy == ShellIsolationPolicy::WorkspaceOnly {
+            Err(
+                "Strong Worker Goal shell isolation is unavailable on this operating system"
+                    .to_string(),
+            )
+        } else {
+            Ok(command.to_string())
+        }
+    }
 }
 
 fn launch_signature(command: &str, working_dir: &std::path::Path) -> (PathBuf, String) {

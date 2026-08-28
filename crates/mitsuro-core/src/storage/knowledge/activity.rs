@@ -3,8 +3,8 @@ use std::path::Path;
 
 use crate::agent::loop_events::LoopStopReason;
 use crate::storage::{
-    AutonomousTask, AutonomousTaskStore, Database, RuntimeTraceStore, SessionManager, SessionType,
-    TaskStatus,
+    resolve_worker_conversation_with_conn, AutonomousTask, AutonomousTaskStore, Database,
+    RuntimeTraceStore, SessionManager, SessionType, TaskStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -51,6 +51,7 @@ pub(super) fn load_snapshot_activity(
     let task_store = AutonomousTaskStore::new(Database::new(db_path)?);
     let trace_db = Database::new(db_path)?;
     let trace_store = RuntimeTraceStore::new(&trace_db);
+    let binding_db = Database::new(db_path)?;
     // The legacy session listing API treats `None` as an administrator-style
     // wildcard. Snapshot generation is a prompt boundary, so narrow the result
     // back to the exact owner (including local `None`) and exact project.
@@ -65,6 +66,11 @@ pub(super) fn load_snapshot_activity(
     let mut task_outcomes = Vec::new();
 
     for session in sessions {
+        if resolve_worker_conversation_with_conn(binding_db.conn(), &session.id)?.is_some() {
+            // The primary snapshot must not aggregate a Worker's private DM
+            // or group-lane activity into owner-wide orientation.
+            continue;
+        }
         let tasks = task_store.list_tasks(&session.id)?;
         let counts = summarize_task_counts(&tasks);
         let trace_summary = trace_store.summarize_latest_run(&session.id)?;

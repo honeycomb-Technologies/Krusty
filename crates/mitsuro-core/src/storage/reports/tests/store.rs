@@ -1,4 +1,4 @@
-use super::{create_store, CreateReportInput};
+use super::{create_store, CreateReportInput, ReportScope};
 
 #[test]
 fn create_and_get_report() {
@@ -13,6 +13,7 @@ fn create_and_get_report() {
             summary: "OAuth2 flow review",
             tags: &["auth".into(), "security".into()],
             sources: &["RFC 6749".into()],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -37,6 +38,7 @@ fn list_reports_by_project() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -49,6 +51,7 @@ fn list_reports_by_project() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -61,6 +64,7 @@ fn list_reports_by_project() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -84,6 +88,7 @@ fn search_reports_by_title_summary_tags_and_sources() {
             summary: "Steps for a safe schema rollout",
             tags: &["database".into(), "migration".into()],
             sources: &["docs/schema.md".into()],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     store
@@ -96,6 +101,7 @@ fn search_reports_by_title_summary_tags_and_sources() {
             summary: "",
             tags: &["api".into()],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
 
@@ -129,6 +135,7 @@ fn delete_report() {
             summary: "",
             tags: &[],
             sources: &[],
+            scope: ReportScope::owner_shared(),
         })
         .unwrap();
     assert!(store.get_report(&id).unwrap().is_some());

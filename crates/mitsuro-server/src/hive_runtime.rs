@@ -6,24 +6,32 @@ mod state;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use mitsuro_core::agent::LoopInput;
+use mitsuro_core::hive::HiveRunStatus;
 use mitsuro_core::storage::{
-    Database, HiveRunPriority, HiveRuntimeStateStatus, HiveRuntimeStateStore, SessionManager,
-    SessionType,
+    resolve_worker_conversation_with_conn, Database, HiveRunPriority, HiveRuntimeStateStatus,
+    HiveRuntimeStateStore, SessionManager, SessionType,
 };
-use mitsuro_hive_protocol::ClientError;
+#[cfg(test)]
+use mitsuro_core::storage::{WorkerConversationInput, WorkerConversationInputState};
+use mitsuro_hive_protocol::{
+    ClientError, EventEnvelope, EventSubscription, HiveEvent, WorkerConversationInputDisposition,
+    WorkerConversationInputResponse,
+};
 
-use self::ipc::{map_daemon_event, HiveDaemonControl, HiveDaemonError};
+use self::ipc::{map_daemon_event, DaemonInputAcceptance, HiveDaemonControl, HiveDaemonError};
 #[cfg(test)]
 use self::notify::hive_notification_title;
 use self::runner::run_hive_session;
@@ -55,6 +63,7 @@ const HIVE_SUBSCRIPTION_STABLE_WINDOW: Duration = Duration::from_millis(100);
 const HIVE_SUBSCRIPTION_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const HIVE_SUBSCRIPTION_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
+const WORKER_STAGED_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 type SseItem = std::result::Result<Event, Infallible>;
 type HiveSse = Sse<ReceiverStream<SseItem>>;
 
@@ -114,6 +123,669 @@ impl HiveSteerStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiveSteerResult {
+    pub status: HiveSteerStatus,
+    pub active_run_id: Option<String>,
+    pub staged_input_id: Option<String>,
+    pub successor_run_id: Option<String>,
+}
+
+impl HiveSteerResult {
+    fn plain(status: HiveSteerStatus) -> Self {
+        Self {
+            status,
+            active_run_id: None,
+            staged_input_id: None,
+            successor_run_id: None,
+        }
+    }
+
+    fn worker(response: WorkerConversationInputResponse) -> Result<Self> {
+        match response.disposition {
+            WorkerConversationInputDisposition::Queued => Ok(Self {
+                status: HiveSteerStatus::Queued,
+                active_run_id: None,
+                staged_input_id: None,
+                successor_run_id: Some(response.run_id),
+            }),
+            WorkerConversationInputDisposition::Staged => Ok(Self {
+                status: HiveSteerStatus::Queued,
+                active_run_id: Some(response.run_id),
+                staged_input_id: Some(
+                    response
+                        .staged_input_id
+                        .context("staged Worker steer has no durable input id")?,
+                ),
+                successor_run_id: None,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+fn validate_staged_worker_input_successor(
+    input: WorkerConversationInput,
+    worker_id: &str,
+    owner_user_id: Option<&str>,
+    session_id: &str,
+    active_run_id: &str,
+    staged_input_id: &str,
+) -> Result<Option<String>> {
+    anyhow::ensure!(
+        input.worker_id == worker_id
+            && input.owner_user_id.as_deref() == owner_user_id
+            && input.session_id == session_id
+            && input.accepted_while_run_id == active_run_id
+            && input.id == staged_input_id,
+        "staged Worker input durable binding changed"
+    );
+    match input.state {
+        WorkerConversationInputState::Staged => {
+            anyhow::ensure!(
+                input.canonical_message_id.is_none()
+                    && input.assigned_run_id.is_none()
+                    && input.materialized_at.is_none(),
+                "staged Worker input carries premature successor projections"
+            );
+            Ok(None)
+        }
+        WorkerConversationInputState::Materialized => {
+            let successor_run_id = input
+                .assigned_run_id
+                .filter(|run_id| !run_id.trim().is_empty())
+                .context("materialized Worker input has no assigned successor run")?;
+            anyhow::ensure!(
+                input
+                    .canonical_message_id
+                    .is_some_and(|message_id| message_id > 0)
+                    && input.materialized_at.is_some(),
+                "materialized Worker input has incomplete canonical projections"
+            );
+            Ok(Some(successor_run_id))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerRunFollowTarget {
+    run_id: String,
+    earliest_event_sequence: Option<i64>,
+    status: HiveRunStatus,
+    attempt_count: u32,
+    started_at: Option<String>,
+}
+
+impl WorkerRunFollowTarget {
+    fn can_wait_on_live_cursor_without_history(&self) -> bool {
+        self.status == HiveRunStatus::Queued && self.attempt_count == 0 && self.started_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StagedWorkerFollowProjection {
+    Waiting,
+    Materialized(WorkerRunFollowTarget),
+}
+
+fn validate_exact_owned_worker_dm(
+    tx: &Transaction<'_>,
+    worker_id: &str,
+    owner_user_id: Option<&str>,
+    session_id: &str,
+) -> Result<()> {
+    let binding = resolve_worker_conversation_with_conn(tx, session_id)?
+        .context("Worker input has no durable conversation binding")?;
+    anyhow::ensure!(
+        binding.group_id.is_none()
+            && binding.worker.id == worker_id
+            && binding.worker.user_id.as_deref() == owner_user_id
+            && binding.worker.dm_session_id.as_deref() == Some(session_id),
+        "Worker input durable conversation binding changed"
+    );
+    Ok(())
+}
+
+fn validate_worker_staging_predecessor(
+    tx: &Transaction<'_>,
+    worker_id: &str,
+    owner_user_id: Option<&str>,
+    session_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    let valid: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM hive_runs run
+             JOIN hive_workers worker ON worker.id = run.worker_id
+             JOIN sessions session ON session.id = run.session_id
+             JOIN hive_controllers controller ON controller.id = run.controller_id
+             WHERE run.id = ?1
+               AND run.worker_id = ?2
+               AND run.session_id = ?3
+               AND run.kind IN ('worker_conversation', 'worker_introduction_review')
+               AND run.group_id IS NULL
+               AND run.group_turn_id IS NULL
+               AND worker.user_id IS ?4
+               AND worker.dm_session_id = session.id
+               AND session.user_id IS worker.user_id
+               AND session.session_type = 'hive'
+               AND controller.worker_id = worker.id
+               AND controller.session_id = session.id
+               AND controller.user_id IS worker.user_id
+         )",
+        params![run_id, worker_id, session_id, owner_user_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(valid, "staged Worker input predecessor binding changed");
+    Ok(())
+}
+
+fn exact_worker_run_follow_target(
+    tx: &Transaction<'_>,
+    worker_id: &str,
+    owner_user_id: Option<&str>,
+    session_id: &str,
+    run_id: &str,
+    canonical_message_id: Option<i64>,
+) -> Result<WorkerRunFollowTarget> {
+    let row = tx
+        .query_row(
+            "SELECT run.status, run.attempt_count, run.started_at,
+                    MIN(event.sequence)
+             FROM hive_runs run
+             JOIN hive_workers worker ON worker.id = run.worker_id
+             JOIN sessions session ON session.id = run.session_id
+             JOIN hive_controllers controller ON controller.id = run.controller_id
+             JOIN messages objective ON objective.id = run.objective_message_id
+             LEFT JOIN hive_controller_events event
+               ON event.controller_id = controller.id AND event.run_id = run.id
+             WHERE run.id = ?1
+               AND run.kind = 'worker_conversation'
+               AND run.worker_id = ?2
+               AND run.session_id = ?3
+               AND run.group_id IS NULL
+               AND run.group_turn_id IS NULL
+               AND (?4 IS NULL OR run.objective_message_id = ?4)
+               AND run.conversation_through_message_id IS run.objective_message_id
+               AND worker.user_id IS ?5
+               AND worker.dm_session_id = session.id
+               AND session.user_id IS worker.user_id
+               AND session.session_type = 'hive'
+               AND controller.worker_id = worker.id
+               AND controller.session_id = session.id
+               AND controller.user_id IS worker.user_id
+               AND objective.session_id = session.id
+               AND objective.role = 'user'
+             GROUP BY run.id, run.status, run.attempt_count, run.started_at",
+            params![
+                run_id,
+                worker_id,
+                session_id,
+                canonical_message_id,
+                owner_user_id,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .context("Worker response run has no exact durable DM binding")?;
+    let status = HiveRunStatus::parse(&row.0).context("Worker response run has invalid status")?;
+    let attempt_count = u32::try_from(row.1).context("Worker response attempt count is invalid")?;
+    anyhow::ensure!(
+        row.3.is_none_or(|sequence| sequence > 0),
+        "Worker response run has an invalid event sequence"
+    );
+    Ok(WorkerRunFollowTarget {
+        run_id: run_id.to_string(),
+        earliest_event_sequence: row.3,
+        status,
+        attempt_count,
+        started_at: row.2,
+    })
+}
+
+fn queued_worker_follow_target(
+    database_path: &Path,
+    owner_user_id: Option<&str>,
+    response: &WorkerConversationInputResponse,
+) -> Result<WorkerRunFollowTarget> {
+    anyhow::ensure!(
+        response.disposition == WorkerConversationInputDisposition::Queued,
+        "queued Worker follower received a staged response"
+    );
+    let canonical_message_id = response
+        .canonical_message_id
+        .filter(|message_id| *message_id > 0)
+        .context("queued Worker response has no canonical message")?;
+    let database = Database::new(database_path)?;
+    let tx = Transaction::new_unchecked(database.conn(), TransactionBehavior::Deferred)?;
+    validate_exact_owned_worker_dm(
+        &tx,
+        &response.worker_id,
+        owner_user_id,
+        &response.session_id,
+    )?;
+    let target = exact_worker_run_follow_target(
+        &tx,
+        &response.worker_id,
+        owner_user_id,
+        &response.session_id,
+        &response.run_id,
+        Some(canonical_message_id),
+    )?;
+    tx.commit()?;
+    Ok(target)
+}
+
+fn staged_worker_follow_projection(
+    database_path: &Path,
+    worker_id: &str,
+    owner_user_id: Option<&str>,
+    session_id: &str,
+    active_run_id: &str,
+    staged_input_id: &str,
+) -> Result<StagedWorkerFollowProjection> {
+    let database = Database::new(database_path)?;
+    let tx = Transaction::new_unchecked(database.conn(), TransactionBehavior::Deferred)?;
+    validate_exact_owned_worker_dm(&tx, worker_id, owner_user_id, session_id)?;
+    validate_worker_staging_predecessor(&tx, worker_id, owner_user_id, session_id, active_run_id)?;
+    let input = tx
+        .query_row(
+            "SELECT worker_id, owner_user_id, session_id, accepted_while_run_id,
+                    state, canonical_message_id, assigned_run_id, materialized_at
+             FROM hive_worker_conversation_inputs WHERE id = ?1",
+            [staged_input_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .optional()?
+        .context("durably accepted Worker input disappeared")?;
+    anyhow::ensure!(
+        input.0 == worker_id
+            && input.1.as_deref() == owner_user_id
+            && input.2 == session_id
+            && input.3 == active_run_id,
+        "staged Worker input durable binding changed"
+    );
+    let projection = match input.4.as_str() {
+        "staged" => {
+            anyhow::ensure!(
+                input.5.is_none() && input.6.is_none() && input.7.is_none(),
+                "staged Worker input carries premature successor projections"
+            );
+            StagedWorkerFollowProjection::Waiting
+        }
+        "materialized" => {
+            let canonical_message_id = input
+                .5
+                .filter(|message_id| *message_id > 0)
+                .context("materialized Worker input has no canonical message")?;
+            let successor_run_id = input
+                .6
+                .filter(|run_id| !run_id.trim().is_empty())
+                .context("materialized Worker input has no assigned successor run")?;
+            anyhow::ensure!(
+                input.7.is_some(),
+                "materialized Worker input has no materialization time"
+            );
+            StagedWorkerFollowProjection::Materialized(exact_worker_run_follow_target(
+                &tx,
+                worker_id,
+                owner_user_id,
+                session_id,
+                &successor_run_id,
+                Some(canonical_message_id),
+            )?)
+        }
+        _ => anyhow::bail!("Worker input has invalid durable state"),
+    };
+    tx.commit()?;
+    Ok(projection)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum WorkerSuccessBoundary {
+    #[default]
+    None,
+    Pending,
+    Committed,
+    TurnComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExactWorkerEventDisposition {
+    Continue,
+    Finish,
+    Error,
+    Invalid(String),
+}
+
+fn validate_worker_response_boundary(
+    payload: &serde_json::Value,
+    worker_id: &str,
+    session_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        payload.get("worker_id").and_then(serde_json::Value::as_str) == Some(worker_id)
+            && payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(session_id)
+            && payload.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id),
+        "Worker response boundary has a mismatched durable identity"
+    );
+    Ok(())
+}
+
+fn exact_worker_event_disposition(
+    envelope: &EventEnvelope,
+    worker_id: &str,
+    session_id: &str,
+    run_id: &str,
+    success_boundary: &mut WorkerSuccessBoundary,
+) -> Result<ExactWorkerEventDisposition> {
+    match &envelope.event {
+        HiveEvent::Extension(extension) if extension.name == "agentic_event" => {
+            let payload = &extension.payload;
+            match payload.get("type").and_then(serde_json::Value::as_str) {
+                Some("worker_response_pending") => {
+                    validate_worker_response_boundary(payload, worker_id, session_id, run_id)?;
+                    if *success_boundary == WorkerSuccessBoundary::None {
+                        *success_boundary = WorkerSuccessBoundary::Pending;
+                    }
+                    Ok(ExactWorkerEventDisposition::Continue)
+                }
+                Some("worker_response_committed") => {
+                    validate_worker_response_boundary(payload, worker_id, session_id, run_id)?;
+                    if *success_boundary == WorkerSuccessBoundary::Pending {
+                        *success_boundary = WorkerSuccessBoundary::Committed;
+                    }
+                    Ok(ExactWorkerEventDisposition::Continue)
+                }
+                Some("turn_complete") => {
+                    if payload
+                        .get("has_more")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+                        && *success_boundary == WorkerSuccessBoundary::Committed
+                    {
+                        *success_boundary = WorkerSuccessBoundary::TurnComplete;
+                    }
+                    Ok(ExactWorkerEventDisposition::Continue)
+                }
+                Some("finish") => {
+                    anyhow::ensure!(
+                        payload
+                            .get("session_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(session_id),
+                        "Worker finish boundary has a mismatched session"
+                    );
+                    let stop_reason = payload
+                        .get("stop_reason")
+                        .and_then(serde_json::Value::as_str)
+                        .context("Worker finish boundary has no stop reason")?;
+                    if stop_reason == "completed"
+                        && *success_boundary != WorkerSuccessBoundary::TurnComplete
+                    {
+                        return Ok(ExactWorkerEventDisposition::Invalid(
+                            "Exact Worker response replay is missing its pending, committed, or terminal turn boundary"
+                                .to_string(),
+                        ));
+                    }
+                    Ok(ExactWorkerEventDisposition::Finish)
+                }
+                Some("error") => Ok(ExactWorkerEventDisposition::Error),
+                _ => Ok(ExactWorkerEventDisposition::Continue),
+            }
+        }
+        HiveEvent::Runtime(runtime) => match runtime.event_type.as_str() {
+            "run_completed" => Ok(ExactWorkerEventDisposition::Invalid(
+                "Exact Worker response replay reached durable success without its completed stream boundary"
+                    .to_string(),
+            )),
+            "run_failed" | "run_cancelled" | "run_dead_lettered" | "recovery_required" => {
+                Ok(ExactWorkerEventDisposition::Error)
+            }
+            _ => Ok(ExactWorkerEventDisposition::Continue),
+        },
+        _ => Ok(ExactWorkerEventDisposition::Continue),
+    }
+}
+
+fn send_exact_worker_error(sender: &broadcast::Sender<AgenticEvent>, message: impl Into<String>) {
+    let _ = sender.send(AgenticEvent::Error {
+        error: message.into(),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_exact_worker_run(
+    daemon: HiveDaemonControl,
+    mut subscription: EventSubscription,
+    owner_user_id: Option<String>,
+    worker_id: String,
+    session_id: String,
+    target: WorkerRunFollowTarget,
+    event_sender: broadcast::Sender<AgenticEvent>,
+    mut shutdown: broadcast::Receiver<()>,
+) {
+    let pre_send_high_water = subscription.accepted.high_water_sequence.unwrap_or(0);
+    let replay_after = match target.earliest_event_sequence {
+        Some(earliest) if earliest <= pre_send_high_water => Some(earliest.saturating_sub(1)),
+        Some(_) => None,
+        None if target.can_wait_on_live_cursor_without_history() => None,
+        None => {
+            send_exact_worker_error(
+                &event_sender,
+                "Exact Worker response history is no longer available for this terminal or already-started run",
+            );
+            return;
+        }
+    };
+    let terminal_at_snapshot =
+        target.status.is_terminal() || target.status == HiveRunStatus::RecoveryRequired;
+    let mut replay_high_water = None;
+    let mut last_sequence = subscription.accepted.high_water_sequence;
+    if let Some(after_sequence) = replay_after {
+        if event_sender
+            .send(AgenticEvent::Lagged { skipped: 1 })
+            .is_err()
+        {
+            return;
+        }
+        subscription = match tokio::select! {
+            _ = event_sender.closed() => return,
+            _ = shutdown.recv() => return,
+            subscription = daemon.subscribe(
+                owner_user_id.as_deref(),
+                &session_id,
+                Some(after_sequence),
+                Some(HIVE_EVENT_BUFFER),
+            ) => subscription,
+        } {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                send_exact_worker_error(
+                    &event_sender,
+                    format!("Exact Worker response replay could not be opened: {error:#}"),
+                );
+                return;
+            }
+        };
+        replay_high_water = subscription.accepted.high_water_sequence;
+        last_sequence = Some(after_sequence);
+    }
+
+    let mut success_boundary = WorkerSuccessBoundary::None;
+    let mut reconnect_attempts = 0usize;
+    loop {
+        let received = tokio::select! {
+            _ = event_sender.closed() => return,
+            _ = shutdown.recv() => return,
+            received = subscription.next_event() => received,
+        };
+        match received {
+            Ok(Some(envelope)) => {
+                let session_matches = envelope.session_id.as_deref() == Some(session_id.as_str());
+                let session_stream_control = session_matches
+                    && envelope.run_id.is_none()
+                    && matches!(
+                        &envelope.event,
+                        HiveEvent::ReplayGap(_) | HiveEvent::Lagged(_)
+                    );
+                let global_shutdown = envelope.session_id.is_none()
+                    && matches!(&envelope.event, HiveEvent::DaemonShuttingDown { .. });
+                if !session_matches && !global_shutdown {
+                    send_exact_worker_error(
+                        &event_sender,
+                        "Exact Worker response subscription returned another session",
+                    );
+                    return;
+                }
+                if envelope
+                    .sequence
+                    .zip(last_sequence)
+                    .is_some_and(|(sequence, cursor)| sequence <= cursor)
+                {
+                    continue;
+                }
+                last_sequence = max_sequence(last_sequence, envelope.sequence);
+
+                if session_stream_control || global_shutdown {
+                    let terminal = matches!(
+                        &envelope.event,
+                        HiveEvent::ReplayGap(_) | HiveEvent::DaemonShuttingDown { .. }
+                    );
+                    let mapped = map_daemon_event(envelope);
+                    if event_sender.send(mapped).is_err() || terminal {
+                        return;
+                    }
+                    continue;
+                }
+
+                if envelope.run_id.as_deref() == Some(target.run_id.as_str()) {
+                    let disposition = match exact_worker_event_disposition(
+                        &envelope,
+                        &worker_id,
+                        &session_id,
+                        &target.run_id,
+                        &mut success_boundary,
+                    ) {
+                        Ok(disposition) => disposition,
+                        Err(error) => {
+                            send_exact_worker_error(
+                                &event_sender,
+                                format!("Exact Worker response binding failed: {error:#}"),
+                            );
+                            return;
+                        }
+                    };
+                    let mapped = map_daemon_event(envelope);
+                    match disposition {
+                        ExactWorkerEventDisposition::Continue => {
+                            if event_sender.send(mapped).is_err() {
+                                return;
+                            }
+                        }
+                        ExactWorkerEventDisposition::Finish => {
+                            let _ = event_sender.send(mapped);
+                            return;
+                        }
+                        ExactWorkerEventDisposition::Error => {
+                            let mapped_is_error = matches!(&mapped, AgenticEvent::Error { .. });
+                            let _ = event_sender.send(mapped);
+                            if !mapped_is_error {
+                                send_exact_worker_error(
+                                    &event_sender,
+                                    "The exact Worker run ended without a replayable response; reload to reconcile it",
+                                );
+                            }
+                            return;
+                        }
+                        ExactWorkerEventDisposition::Invalid(message) => {
+                            send_exact_worker_error(&event_sender, message);
+                            return;
+                        }
+                    }
+                }
+
+                if terminal_at_snapshot
+                    && replay_high_water
+                        .zip(last_sequence)
+                        .is_some_and(|(high_water, cursor)| cursor >= high_water)
+                {
+                    send_exact_worker_error(
+                        &event_sender,
+                        "Bounded Worker response replay did not contain the exact terminal stream",
+                    );
+                    return;
+                }
+                reconnect_attempts = 0;
+            }
+            Ok(None) | Err(_) => {
+                reconnect_attempts = reconnect_attempts.saturating_add(1);
+                if reconnect_attempts >= HIVE_SUBSCRIPTION_RECONNECT_ATTEMPTS {
+                    send_exact_worker_error(
+                        &event_sender,
+                        "Exact Worker response stream closed before its terminal event",
+                    );
+                    return;
+                }
+                let delay = daemon_subscription_reconnect_delay(&session_id, reconnect_attempts);
+                tokio::select! {
+                    _ = event_sender.closed() => return,
+                    _ = shutdown.recv() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                let after_sequence = last_sequence;
+                let reconnected = tokio::select! {
+                    _ = event_sender.closed() => return,
+                    _ = shutdown.recv() => return,
+                    subscription = daemon.subscribe(
+                        owner_user_id.as_deref(),
+                        &session_id,
+                        after_sequence,
+                        Some(HIVE_EVENT_BUFFER),
+                    ) => subscription,
+                };
+                match reconnected {
+                    Ok(next) => {
+                        subscription = next;
+                        replay_high_water = subscription.accepted.high_water_sequence;
+                        let _ = event_sender.send(AgenticEvent::Lagged { skipped: 1 });
+                    }
+                    Err(error) => tracing::warn!(
+                        session_id,
+                        run_id = %target.run_id,
+                        attempt = reconnect_attempts,
+                        error = %error,
+                        "Exact Worker response stream reconnect failed"
+                    ),
+                }
+            }
+        }
+    }
+}
+
 pub fn control_plane_app_error(error: anyhow::Error) -> AppError {
     let daemon_error = error
         .chain()
@@ -157,6 +829,18 @@ impl HiveRuntimeManager {
 
     pub async fn daemon_from_discovered() -> Result<Arc<Self>> {
         let daemon = HiveDaemonControl::connect_discovered().await?;
+        Ok(Self::build(Some(daemon), false))
+    }
+
+    /// Connect to one explicitly selected Hive daemon without consulting
+    /// process environment, runtime-directory discovery, or the production
+    /// control key. The key is load-only; an acceptance client may never
+    /// bootstrap new daemon authority.
+    pub(crate) async fn daemon_from_explicit(
+        socket_path: PathBuf,
+        key_path: PathBuf,
+    ) -> Result<Arc<Self>> {
+        let daemon = HiveDaemonControl::connect_explicit(socket_path, key_path).await?;
         Ok(Self::build(Some(daemon), false))
     }
 
@@ -455,6 +1139,186 @@ impl HiveRuntimeManager {
         Ok(HiveDispatchResult { session_id, status })
     }
 
+    /// Create-and-meet is deliberately daemon-only: Worker identity, DM
+    /// binding, controller state, and the first run must share one durable
+    /// idempotency receipt and one SQLite transaction.
+    pub async fn create_worker_introduction_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::CreateWorkerIntroductionCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerIntroductionResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker Introduction requires the daemon control plane")?
+            .create_worker_introduction(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn retry_worker_introduction_for_user(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerIntroductionActionResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker Introduction retry requires the daemon control plane")?
+            .retry_worker_introduction(user_id, worker_id, idempotency_key)
+            .await
+    }
+
+    pub async fn skip_worker_introduction_for_user(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerIntroductionActionResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker Introduction skip requires the daemon control plane")?
+            .skip_worker_introduction(user_id, worker_id, idempotency_key)
+            .await
+    }
+
+    pub async fn confirm_worker_introduction_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::ConfirmWorkerIntroductionCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerIntroductionActionResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker Introduction confirmation requires the daemon control plane")?
+            .confirm_worker_introduction(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn return_worker_introduction_to_context_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::ReturnWorkerIntroductionToContextCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerIntroductionActionResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker Introduction return requires the daemon control plane")?
+            .return_worker_introduction_to_context(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn update_worker_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::UpdateWorkerCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerMutationResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker updates require the daemon control plane")?
+            .update_worker(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn set_worker_status_for_user(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        expected_revision: u64,
+        status: mitsuro_hive_protocol::WorkerTargetStatus,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerMutationResponse> {
+        self.daemon
+            .as_ref()
+            .context("Hive Worker lifecycle changes require the daemon control plane")?
+            .set_worker_status(
+                user_id,
+                worker_id,
+                expected_revision,
+                status,
+                idempotency_key,
+            )
+            .await
+    }
+
+    pub async fn grant_worker_governor_recovery_for_user(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerGovernorRecoveryResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker governor recovery requires the daemon control plane")?
+            .grant_worker_governor_recovery(user_id, worker_id, idempotency_key)
+            .await
+    }
+
+    pub async fn activate_or_resume_worker_workflow_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::ActivateOrResumeWorkerWorkflowCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerWorkflowResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker Workflow activation requires the daemon control plane")?
+            .activate_or_resume_worker_workflow(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn pause_worker_workflow_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::WorkerWorkflowLifecycleCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerWorkflowResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker Workflow pause requires the daemon control plane")?
+            .pause_worker_workflow(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn cancel_worker_workflow_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::WorkerWorkflowLifecycleCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerWorkflowResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker Workflow cancellation requires the daemon control plane")?
+            .cancel_worker_workflow(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn resolve_worker_goal_acceptance_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::ResolveWorkerGoalAcceptanceCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerGoalAcceptanceResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker Goal acceptance requires the daemon control plane")?
+            .resolve_worker_goal_acceptance(user_id, command, idempotency_key)
+            .await
+    }
+
+    pub async fn set_worker_workspace_for_user(
+        &self,
+        user_id: Option<&str>,
+        command: mitsuro_hive_protocol::SetWorkerWorkspaceCommand,
+        idempotency_key: &str,
+    ) -> Result<mitsuro_hive_protocol::WorkerWorkspaceResponse> {
+        self.daemon
+            .as_ref()
+            .context("Worker workspace changes require the daemon control plane")?
+            .set_worker_workspace(user_id, command, idempotency_key)
+            .await
+    }
+
     pub async fn create_schedule_for_user(
         &self,
         user_id: Option<&str>,
@@ -745,8 +1609,159 @@ impl HiveRuntimeManager {
         Ok(receiver)
     }
 
+    fn follow_worker_input(
+        &self,
+        database_path: PathBuf,
+        user_id: Option<&str>,
+        requested_session_id: &str,
+        expected_worker_id: &str,
+        response: WorkerConversationInputResponse,
+        initial_subscription: EventSubscription,
+    ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        anyhow::ensure!(
+            response.session_id == requested_session_id && response.worker_id == expected_worker_id,
+            "Hive Worker input acceptance does not match the requested durable DM"
+        );
+        let worker_id = response.worker_id.clone();
+        let session_id = response.session_id.clone();
+        let owner_user_id = user_id.map(ToOwned::to_owned);
+        let daemon = self
+            .daemon
+            .clone()
+            .context("Worker input follow requires the daemon control plane")?;
+        let (event_sender, receiver) = broadcast::channel(HIVE_EVENT_BUFFER);
+        let mut shutdown = self.subscription_shutdown.subscribe();
+
+        match response.disposition {
+            WorkerConversationInputDisposition::Queued => {
+                let response_for_projection = response;
+                let projection_owner_user_id = owner_user_id.clone();
+                tokio::spawn(async move {
+                    let projection = tokio::task::spawn_blocking(move || {
+                        queued_worker_follow_target(
+                            &database_path,
+                            projection_owner_user_id.as_deref(),
+                            &response_for_projection,
+                        )
+                    })
+                    .await;
+                    let target = match projection {
+                        Ok(Ok(target)) => target,
+                        Ok(Err(error)) => {
+                            send_exact_worker_error(
+                                &event_sender,
+                                format!("Exact Worker response binding failed: {error:#}"),
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            send_exact_worker_error(
+                                &event_sender,
+                                format!("Worker response binding task failed: {error}"),
+                            );
+                            return;
+                        }
+                    };
+                    relay_exact_worker_run(
+                        daemon,
+                        initial_subscription,
+                        owner_user_id,
+                        worker_id,
+                        session_id,
+                        target,
+                        event_sender,
+                        shutdown,
+                    )
+                    .await;
+                });
+            }
+            WorkerConversationInputDisposition::Staged => {
+                let staged_input_id = response
+                    .staged_input_id
+                    .clone()
+                    .context("staged Worker input has no durable input id")?;
+                let active_run_id = response.run_id;
+                let _ = event_sender.send(AgenticEvent::WorkerInputStaged {
+                    worker_id: worker_id.clone(),
+                    session_id: session_id.clone(),
+                    active_run_id: active_run_id.clone(),
+                    staged_input_id: staged_input_id.clone(),
+                    successor_run_id: None,
+                });
+                tokio::spawn(async move {
+                    let target = loop {
+                        let poll_database_path = database_path.clone();
+                        let poll_worker_id = worker_id.clone();
+                        let poll_session_id = session_id.clone();
+                        let poll_active_run_id = active_run_id.clone();
+                        let poll_staged_input_id = staged_input_id.clone();
+                        let poll_owner_user_id = owner_user_id.clone();
+                        let projection = tokio::task::spawn_blocking(move || {
+                            staged_worker_follow_projection(
+                                &poll_database_path,
+                                &poll_worker_id,
+                                poll_owner_user_id.as_deref(),
+                                &poll_session_id,
+                                &poll_active_run_id,
+                                &poll_staged_input_id,
+                            )
+                        })
+                        .await;
+                        match projection {
+                            Ok(Ok(StagedWorkerFollowProjection::Materialized(target))) => {
+                                break target;
+                            }
+                            Ok(Ok(StagedWorkerFollowProjection::Waiting)) => {}
+                            Ok(Err(error)) => {
+                                send_exact_worker_error(
+                                    &event_sender,
+                                    format!(
+                                        "Durable Worker input follow failed before materialization: {error:#}"
+                                    ),
+                                );
+                                return;
+                            }
+                            Err(error) => {
+                                send_exact_worker_error(
+                                    &event_sender,
+                                    format!("Worker input follow task failed: {error}"),
+                                );
+                                return;
+                            }
+                        }
+                        tokio::select! {
+                            _ = event_sender.closed() => return,
+                            _ = shutdown.recv() => return,
+                            _ = tokio::time::sleep(WORKER_STAGED_INPUT_POLL_INTERVAL) => {}
+                        }
+                    };
+                    let _ = event_sender.send(AgenticEvent::WorkerInputStaged {
+                        worker_id: worker_id.clone(),
+                        session_id: session_id.clone(),
+                        active_run_id,
+                        staged_input_id,
+                        successor_run_id: Some(target.run_id.clone()),
+                    });
+                    relay_exact_worker_run(
+                        daemon,
+                        initial_subscription,
+                        owner_user_id,
+                        worker_id,
+                        session_id,
+                        target,
+                        event_sender,
+                        shutdown,
+                    )
+                    .await;
+                });
+            }
+        }
+        Ok(receiver)
+    }
+
     pub async fn begin_daemon_chat_turn_for_user(
         &self,
+        database_path: PathBuf,
         session_id: &str,
         message: &str,
         user_id: Option<&str>,
@@ -757,16 +1772,62 @@ impl HiveRuntimeManager {
             .daemon
             .as_ref()
             .context("Hive chat requires the daemon control plane")?;
+        let target = classify_hive_conversation_at(&database_path, session_id, user_id)?;
+        let expected_worker_id = match &target {
+            HiveConversationTarget::Primary => None,
+            HiveConversationTarget::WorkerDm { worker_id } => Some(worker_id.clone()),
+        };
         if is_first_message {
             // Send creates the controller for legacy/new-chat sessions. Start
             // then queues the first run, and sequence-zero replay closes the
             // race between those durable mutations and subscription.
-            daemon
-                .send_message(user_id, session_id, message, idempotency_key)
-                .await?;
-            daemon
-                .start(user_id, session_id, "chat_first_message", idempotency_key)
-                .await?;
+            let staged_cursor = daemon.subscribe(user_id, session_id, None, Some(0)).await?;
+            let acceptance = match &target {
+                HiveConversationTarget::Primary => {
+                    daemon
+                        .send_message(user_id, session_id, message, idempotency_key)
+                        .await?
+                }
+                HiveConversationTarget::WorkerDm { .. } => {
+                    daemon
+                        .send_worker_message(user_id, session_id, message, idempotency_key)
+                        .await?
+                }
+            };
+            match (&target, acceptance) {
+                (
+                    HiveConversationTarget::WorkerDm { .. },
+                    DaemonInputAcceptance::Worker(response),
+                ) => {
+                    // The atomic Worker input mutation already selected its
+                    // exact queued run or staged successor. Follow only that
+                    // durable identity; a generic StartSession would be both
+                    // redundant and workspace-bound.
+                    return self.follow_worker_input(
+                        database_path,
+                        user_id,
+                        session_id,
+                        expected_worker_id
+                            .as_deref()
+                            .context("Worker DM classification lost its Worker binding")?,
+                        response,
+                        staged_cursor,
+                    );
+                }
+                (HiveConversationTarget::Primary, DaemonInputAcceptance::Ack(_)) => {
+                    daemon
+                        .start(user_id, session_id, "chat_first_message", idempotency_key)
+                        .await?;
+                }
+                (HiveConversationTarget::WorkerDm { .. }, DaemonInputAcceptance::Ack(_)) => {
+                    anyhow::bail!(
+                        "Hive Worker input returned an untyped acknowledgement; refusing generic session startup"
+                    );
+                }
+                (HiveConversationTarget::Primary, DaemonInputAcceptance::Worker(_)) => {
+                    anyhow::bail!("primary Hive chat returned a Worker input acceptance");
+                }
+            }
             return self
                 .subscribe_for_user_from(session_id, user_id, Some(0), Some(256))
                 .await;
@@ -774,11 +1835,47 @@ impl HiveRuntimeManager {
 
         // Existing interactive controllers can subscribe live before the
         // message so no response event races past the stream.
-        let receiver = self.subscribe_for_user(session_id, user_id).await?;
-        daemon
-            .send_message(user_id, session_id, message, idempotency_key)
-            .await?;
-        Ok(receiver)
+        let staged_cursor = daemon.subscribe(user_id, session_id, None, Some(0)).await?;
+        let primary_receiver = match &target {
+            HiveConversationTarget::Primary => {
+                Some(self.subscribe_for_user(session_id, user_id).await?)
+            }
+            HiveConversationTarget::WorkerDm { .. } => None,
+        };
+        let acceptance = match &target {
+            HiveConversationTarget::Primary => {
+                daemon
+                    .send_message(user_id, session_id, message, idempotency_key)
+                    .await?
+            }
+            HiveConversationTarget::WorkerDm { .. } => {
+                daemon
+                    .send_worker_message(user_id, session_id, message, idempotency_key)
+                    .await?
+            }
+        };
+        match (&target, acceptance) {
+            (HiveConversationTarget::WorkerDm { .. }, DaemonInputAcceptance::Worker(response)) => {
+                self.follow_worker_input(
+                    database_path,
+                    user_id,
+                    session_id,
+                    expected_worker_id
+                        .as_deref()
+                        .context("Worker DM classification lost its Worker binding")?,
+                    response,
+                    staged_cursor,
+                )
+            }
+            (HiveConversationTarget::Primary, DaemonInputAcceptance::Ack(_)) => primary_receiver
+                .context("primary Hive chat did not establish its live event subscription"),
+            (HiveConversationTarget::WorkerDm { .. }, DaemonInputAcceptance::Ack(_)) => {
+                anyhow::bail!("Hive Worker input returned an untyped acknowledgement")
+            }
+            (HiveConversationTarget::Primary, DaemonInputAcceptance::Worker(_)) => {
+                anyhow::bail!("primary Hive chat returned a Worker input acceptance")
+            }
+        }
     }
 
     pub async fn observe(&self, session_id: &str) -> HiveSse {
@@ -827,6 +1924,7 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        self.ensure_primary_hive_generic_control(state, session_id, user_id, "pause")?;
         if let Some(daemon) = &self.daemon {
             return daemon.pause(user_id, session_id, idempotency_key).await;
         }
@@ -868,6 +1966,7 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        self.ensure_primary_hive_generic_control(state, &session_id, user_id, "schedule")?;
         if let Some(daemon) = &self.daemon {
             return daemon
                 .schedule(
@@ -890,6 +1989,7 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        self.ensure_primary_hive_generic_control(&state, &session_id, user_id, "resume")?;
         if let Some(daemon) = &self.daemon {
             return daemon.resume(user_id, &session_id, idempotency_key).await;
         }
@@ -904,6 +2004,17 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        let target = classify_hive_conversation(state, session_id, user_id)?;
+        if matches!(target, HiveConversationTarget::WorkerDm { .. }) {
+            let daemon = self
+                .daemon
+                .as_ref()
+                .context("Hive Worker Stop requires the daemon control plane")?;
+            daemon
+                .stop_worker_conversation(user_id, session_id, idempotency_key)
+                .await?;
+            return Ok(());
+        }
         if let Some(daemon) = &self.daemon {
             return daemon.cancel(user_id, session_id, idempotency_key).await;
         }
@@ -918,6 +2029,7 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        self.ensure_generic_session_delete_allowed(state, session_id, user_id)?;
         if let Some(daemon) = &self.daemon {
             daemon.delete(user_id, session_id, idempotency_key).await?;
             self.forget_session(session_id).await;
@@ -932,6 +2044,44 @@ impl HiveRuntimeManager {
         Ok(())
     }
 
+    /// Generic session deletion is never an ownership surface for durable
+    /// Worker DMs or internal group lanes. Keep this check at the manager
+    /// boundary as defense in depth for callers outside the HTTP route.
+    pub fn ensure_generic_session_delete_allowed(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        match classify_hive_conversation(state, session_id, user_id)? {
+            HiveConversationTarget::Primary => Ok(()),
+            HiveConversationTarget::WorkerDm { .. } => Err(HiveDaemonError::Remote {
+                code: "state_conflict".to_string(),
+                message: "Hive Worker conversations are durable product lanes; archive the Worker from /api/hive/workers instead".to_string(),
+            }
+            .into()),
+        }
+    }
+
+    fn ensure_primary_hive_generic_control(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        user_id: Option<&str>,
+        operation: &str,
+    ) -> Result<()> {
+        match classify_hive_conversation(state, session_id, user_id)? {
+            HiveConversationTarget::Primary => Ok(()),
+            HiveConversationTarget::WorkerDm { .. } => Err(HiveDaemonError::Remote {
+                code: "state_conflict".to_string(),
+                message: format!(
+                    "Hive Worker conversations require typed Worker {operation} controls"
+                ),
+            }
+            .into()),
+        }
+    }
+
     pub async fn send_message_for_user(
         &self,
         state: AppState,
@@ -940,10 +2090,24 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<()> {
+        let worker_dm = matches!(
+            classify_hive_conversation(&state, &session_id, user_id)?,
+            HiveConversationTarget::WorkerDm { .. }
+        );
         if let Some(daemon) = &self.daemon {
-            return daemon
-                .send_message(user_id, &session_id, message, idempotency_key)
-                .await;
+            if worker_dm {
+                daemon
+                    .send_worker_message(user_id, &session_id, message, idempotency_key)
+                    .await?;
+            } else {
+                daemon
+                    .send_message(user_id, &session_id, message, idempotency_key)
+                    .await?;
+            }
+            return Ok(());
+        }
+        if worker_dm {
+            anyhow::bail!("Hive Worker messages require the daemon control plane");
         }
 
         let session_manager = SessionManager::new(Database::new(&state.db_path)?);
@@ -993,6 +2157,23 @@ impl HiveRuntimeManager {
         daemon.group_stop(user_id, group_id, idempotency_key).await
     }
 
+    /// Atomically stop active member work and archive the group through the
+    /// daemon's ownership-checked mutation transaction.
+    pub async fn group_archive_for_user(
+        &self,
+        group_id: &str,
+        user_id: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        let daemon = self
+            .daemon
+            .as_ref()
+            .context("Hive group archive requires the daemon control plane")?;
+        daemon
+            .group_archive(user_id, group_id, idempotency_key)
+            .await
+    }
+
     pub async fn set_priority_for_user(
         &self,
         state: &AppState,
@@ -1037,28 +2218,46 @@ impl HiveRuntimeManager {
         content: Vec<mitsuro_core::ai::types::Content>,
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
-    ) -> Result<HiveSteerStatus> {
+    ) -> Result<HiveSteerResult> {
+        let worker_dm = matches!(
+            classify_hive_conversation(state, session_id, user_id)?,
+            HiveConversationTarget::WorkerDm { .. }
+        );
         if let Some(daemon) = &self.daemon {
             let content = serde_json::to_value(content)?;
-            let acknowledgement = daemon
-                .steer(user_id, session_id, pending_id, content, idempotency_key)
-                .await?;
-            if acknowledgement.accepted {
-                return Ok(HiveSteerStatus::Accepted);
-            }
-            if acknowledgement.message.as_deref() == Some("queued") {
-                return Ok(HiveSteerStatus::Queued);
-            }
-            return Err(HiveDaemonError::Remote {
-                code: "conflict".to_string(),
-                message: format!(
-                    "Hive declined steering: {}",
-                    acknowledgement
-                        .message
-                        .unwrap_or_else(|| "no reason provided".to_string())
-                ),
-            }
-            .into());
+            let acceptance = if worker_dm {
+                daemon
+                    .steer_worker(user_id, session_id, pending_id, content, idempotency_key)
+                    .await?
+            } else {
+                daemon
+                    .steer(user_id, session_id, pending_id, content, idempotency_key)
+                    .await?
+            };
+            return match acceptance {
+                DaemonInputAcceptance::Worker(response) => HiveSteerResult::worker(response),
+                DaemonInputAcceptance::Ack(acknowledgement) if acknowledgement.accepted => {
+                    Ok(HiveSteerResult::plain(HiveSteerStatus::Accepted))
+                }
+                DaemonInputAcceptance::Ack(acknowledgement)
+                    if acknowledgement.message.as_deref() == Some("queued") =>
+                {
+                    Ok(HiveSteerResult::plain(HiveSteerStatus::Queued))
+                }
+                DaemonInputAcceptance::Ack(acknowledgement) => Err(HiveDaemonError::Remote {
+                    code: "conflict".to_string(),
+                    message: format!(
+                        "Hive declined steering: {}",
+                        acknowledgement
+                            .message
+                            .unwrap_or_else(|| "no reason provided".to_string())
+                    ),
+                }
+                .into()),
+            };
+        }
+        if worker_dm {
+            anyhow::bail!("Hive Worker steering requires the daemon control plane");
         }
 
         let content_json = serde_json::to_string(&content)?;
@@ -1069,17 +2268,17 @@ impl HiveRuntimeManager {
         )?;
         let sender = state.session_inputs.read().await.get(session_id).cloned();
         let Some(sender) = sender else {
-            return Ok(HiveSteerStatus::Queued);
+            return Ok(HiveSteerResult::plain(HiveSteerStatus::Queued));
         };
         let input = LoopInput::Steer {
             pending_id: Some(pending_id.to_string()),
             content,
         };
-        Ok(if sender.send(input).is_ok() {
+        Ok(HiveSteerResult::plain(if sender.send(input).is_ok() {
             HiveSteerStatus::Accepted
         } else {
             HiveSteerStatus::Queued
-        })
+        }))
     }
 
     pub async fn tool_approval_for_user(
@@ -1129,18 +2328,38 @@ impl HiveRuntimeManager {
         user_id: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        let worker_dm = matches!(
+            classify_hive_conversation(state, session_id, user_id)?,
+            HiveConversationTarget::WorkerDm { .. }
+        );
+        if worker_dm && self.daemon.is_none() {
+            anyhow::bail!("Hive Worker user responses require the daemon control plane");
+        }
         let receiver = self.subscribe_for_user(session_id, user_id).await?;
         if let Some(daemon) = &self.daemon {
-            daemon
-                .user_response(
-                    user_id,
-                    session_id,
-                    run_id,
-                    tool_call_id,
-                    response,
-                    idempotency_key,
-                )
-                .await?;
+            if worker_dm {
+                daemon
+                    .worker_user_response(
+                        user_id,
+                        session_id,
+                        run_id,
+                        tool_call_id,
+                        response,
+                        idempotency_key,
+                    )
+                    .await?;
+            } else {
+                daemon
+                    .user_response(
+                        user_id,
+                        session_id,
+                        run_id,
+                        tool_call_id,
+                        response,
+                        idempotency_key,
+                    )
+                    .await?;
+            }
             return Ok(receiver);
         }
         let sender = state
@@ -1251,6 +2470,64 @@ impl HiveRuntimeManager {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HiveConversationTarget {
+    Primary,
+    WorkerDm { worker_id: String },
+}
+
+fn classify_hive_conversation(
+    state: &AppState,
+    session_id: &str,
+    user_id: Option<&str>,
+) -> Result<HiveConversationTarget> {
+    classify_hive_conversation_at(state.db_path.as_path(), session_id, user_id)
+}
+
+fn classify_hive_conversation_at(
+    database_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+) -> Result<HiveConversationTarget> {
+    let database = Database::new(database_path)?;
+    let Some(binding) = resolve_worker_conversation_with_conn(database.conn(), session_id)? else {
+        let worker_lane_claimed: bool = database.conn().query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM hive_controllers
+                 WHERE session_id = ?1 AND worker_id IS NOT NULL
+                 UNION ALL
+                 SELECT 1 FROM hive_runs
+                 WHERE session_id = ?1 AND worker_id IS NOT NULL
+                 UNION ALL
+                 SELECT 1 FROM hive_group_worker_lanes WHERE session_id = ?1
+             )",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        if !worker_lane_claimed {
+            return Ok(HiveConversationTarget::Primary);
+        }
+        return Err(HiveDaemonError::Remote {
+            code: "not_found".to_string(),
+            message: "Hive session was not found".to_string(),
+        }
+        .into());
+    };
+    if binding.worker.user_id.as_deref() != user_id
+        || binding.group_id.is_some()
+        || binding.worker.dm_session_id.as_deref() != Some(session_id)
+    {
+        return Err(HiveDaemonError::Remote {
+            code: "not_found".to_string(),
+            message: "Hive session was not found".to_string(),
+        }
+        .into());
+    }
+    Ok(HiveConversationTarget::WorkerDm {
+        worker_id: binding.worker.id,
+    })
+}
+
 impl Drop for HiveRuntimeManager {
     fn drop(&mut self) {
         // Subscription bridges otherwise retain their daemon client after the
@@ -1334,18 +2611,24 @@ mod tests {
     use mitsuro_core::process::ProcessRegistry;
     use mitsuro_core::skills::SkillsManager;
     use mitsuro_core::storage::credentials::CredentialStore;
-    use mitsuro_core::storage::reports::CreateReportInput;
+    use mitsuro_core::storage::reports::{CreateReportInput, ReportScope};
     use mitsuro_core::storage::{
         get_current_snapshot, refresh_current_snapshot, Database, HiveRuntimeStateStatus,
-        HiveRuntimeStateStore, MemoryStore, MemoryType, ReportStore, SessionType, WorkspaceMode,
+        HiveRuntimeStateStore, MemoryStore, MemoryType, ReportStore, SessionType,
+        WorkerConversationInput, WorkerConversationInputState, WorkspaceMode,
     };
     use mitsuro_core::tools::registry::ToolRegistry;
     use mitsuro_core::SessionManager;
+    use mitsuro_hive_protocol::{
+        EventEnvelope, ExtensionEvent, HiveEvent, ProtocolVersion, RuntimeEvent,
+    };
 
     use super::{
-        apply_runtime_event_state, control_plane_app_error, hive_notification_title,
-        persist_runtime_state, refresh_snapshot_after_run, resolve_persisted_project_dir,
-        with_registered_session_input, ActiveHiveRuntime, HiveDaemonError, HiveRuntimeManager,
+        apply_runtime_event_state, control_plane_app_error, exact_worker_event_disposition,
+        hive_notification_title, persist_runtime_state, refresh_snapshot_after_run,
+        resolve_persisted_project_dir, validate_staged_worker_input_successor,
+        with_registered_session_input, ActiveHiveRuntime, ExactWorkerEventDisposition,
+        HiveDaemonError, HiveRuntimeManager, WorkerSuccessBoundary,
     };
     use crate::error::AppError;
     use crate::AppState;
@@ -1425,6 +2708,128 @@ mod tests {
         ));
         assert!(matches!(mapped("revision_conflict"), AppError::Conflict(_)));
         assert!(matches!(mapped("internal_error"), AppError::BadGateway(_)));
+    }
+
+    #[test]
+    fn exact_worker_failure_terminals_do_not_require_a_success_boundary_chain() {
+        let failure_events = [
+            HiveEvent::Extension(ExtensionEvent {
+                name: "agentic_event".to_string(),
+                payload: serde_json::json!({"type": "error", "error": "provider failed"}),
+            }),
+            HiveEvent::Runtime(RuntimeEvent {
+                event_type: "run_cancelled".to_string(),
+                payload: serde_json::json!({"run_id": "run-1"}),
+            }),
+        ];
+        for event in failure_events {
+            let envelope = EventEnvelope {
+                version: ProtocolVersion::CURRENT,
+                session_id: Some("worker-dm".to_string()),
+                run_id: Some("run-1".to_string()),
+                sequence: Some(1),
+                emitted_at_unix_ms: 0,
+                event,
+            };
+            let mut boundary = WorkerSuccessBoundary::None;
+            assert_eq!(
+                exact_worker_event_disposition(
+                    &envelope,
+                    "worker-1",
+                    "worker-dm",
+                    "run-1",
+                    &mut boundary,
+                )
+                .expect("failure terminal should be well-formed"),
+                ExactWorkerEventDisposition::Error
+            );
+        }
+
+        let completed_without_boundaries = EventEnvelope {
+            version: ProtocolVersion::CURRENT,
+            session_id: Some("worker-dm".to_string()),
+            run_id: Some("run-1".to_string()),
+            sequence: Some(1),
+            emitted_at_unix_ms: 0,
+            event: HiveEvent::Extension(ExtensionEvent {
+                name: "agentic_event".to_string(),
+                payload: serde_json::json!({
+                    "type": "finish",
+                    "session_id": "worker-dm",
+                    "stop_reason": "completed",
+                }),
+            }),
+        };
+        assert!(matches!(
+            exact_worker_event_disposition(
+                &completed_without_boundaries,
+                "worker-1",
+                "worker-dm",
+                "run-1",
+                &mut WorkerSuccessBoundary::None,
+            )
+            .expect("completed terminal should be well-formed"),
+            ExactWorkerEventDisposition::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn staged_worker_follow_waits_for_exact_durable_successor() {
+        let staged = WorkerConversationInput {
+            id: "input-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            owner_user_id: Some("alice".to_string()),
+            session_id: "worker-dm".to_string(),
+            request_id: "request-1".to_string(),
+            accepted_while_run_id: "active-run".to_string(),
+            body: r#"[{"type":"text","text":"next"}]"#.to_string(),
+            state: WorkerConversationInputState::Staged,
+            canonical_message_id: None,
+            assigned_run_id: None,
+            accepted_at: "2026-08-25T12:00:00Z".to_string(),
+            materialized_at: None,
+        };
+        assert_eq!(
+            validate_staged_worker_input_successor(
+                staged.clone(),
+                "worker-1",
+                Some("alice"),
+                "worker-dm",
+                "active-run",
+                "input-1",
+            )
+            .expect("staged projection should be valid"),
+            None
+        );
+
+        let materialized = WorkerConversationInput {
+            state: WorkerConversationInputState::Materialized,
+            canonical_message_id: Some(42),
+            assigned_run_id: Some("successor-run".to_string()),
+            materialized_at: Some("2026-08-25T12:00:01Z".to_string()),
+            ..staged
+        };
+        assert_eq!(
+            validate_staged_worker_input_successor(
+                materialized.clone(),
+                "worker-1",
+                Some("alice"),
+                "worker-dm",
+                "active-run",
+                "input-1",
+            )
+            .expect("materialized projection should be valid"),
+            Some("successor-run".to_string())
+        );
+        assert!(validate_staged_worker_input_successor(
+            materialized,
+            "worker-1",
+            Some("alice"),
+            "worker-dm",
+            "replacement-run",
+            "input-1",
+        )
+        .is_err());
     }
 
     #[test]
@@ -1703,6 +3108,7 @@ mod tests {
                 summary: "Fresh findings",
                 tags: &[],
                 sources: &[],
+                scope: ReportScope::owner_shared(),
             })
             .expect("report should persist");
 

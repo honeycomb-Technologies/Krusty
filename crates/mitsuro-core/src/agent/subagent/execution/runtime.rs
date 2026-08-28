@@ -694,6 +694,37 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
         }};
     }
 
+    macro_rules! return_governor_blocked {
+        ($reason:expr) => {{
+            let reason = $reason;
+            preserve_terminal_mailbox!();
+            send_progress(
+                AgentProgressStatus::Failed,
+                "provider call blocked",
+                total_tool_calls,
+                estimated_tokens,
+                None,
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: false,
+                output: final_output.clone(),
+                files_examined: files_examined.clone(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: Some(reason),
+                termination: SubAgentTermination::Failed,
+                policy_violations: policy_violations.clone(),
+                evidence: evidence.clone(),
+                background_processes: background_processes.clone(),
+            };
+        }};
+    }
+
     macro_rules! seal_terminal_or_continue {
         ($assistant_text:expr) => {{
             if let Some(mailbox) = task.mailbox.as_ref() {
@@ -888,7 +919,73 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             config,
         );
 
+        let delegated_permit = if let Some(governor) = task
+            .provider_call_trace
+            .as_ref()
+            .and_then(|trace| trace.provider_governor())
+        {
+            let trace = task
+                .provider_call_trace
+                .as_ref()
+                .expect("provider trace was present");
+            let child_scope = format!(
+                "{}:{}",
+                task.delegated_run_id.as_deref().unwrap_or("delegated"),
+                task_id
+            );
+            let slot = match crate::agent::WorkerProviderCallSlot::child(
+                crate::agent::WorkerProviderCallKind::DelegatedAgentTurn,
+                u32::try_from(trace.turn()).unwrap_or(u32::MAX),
+                u32::try_from(turns).unwrap_or(u32::MAX),
+                child_scope,
+            ) {
+                Ok(slot) => slot,
+                Err(error) => return_governor_blocked!(format!(
+                    "Hive Worker delegated provider slot failed closed: {error:#}"
+                )),
+            };
+            let request_bytes = serde_json::to_vec(&(&messages, tools_for_turn))
+                .map(|encoded| encoded.len())
+                .unwrap_or_default()
+                .saturating_add(system_prompt.len());
+            let reservation = crate::agent::bounded_reservation(
+                request_bytes
+                    .saturating_add(2)
+                    .saturating_div(3)
+                    .saturating_add(128),
+                config.max_tokens(),
+            );
+            match governor.admit(slot, reservation) {
+                Ok(crate::agent::WorkerProviderAdmission::Allowed(permit)) => Some(permit),
+                Ok(crate::agent::WorkerProviderAdmission::Gated(decision)) => {
+                    return_governor_blocked!(format!(
+                        "Hive Worker delegated provider call gated: {}",
+                        serde_json::to_string(&decision)
+                            .unwrap_or_else(|_| "durable policy".into())
+                    ))
+                }
+                Ok(crate::agent::WorkerProviderAdmission::AlreadyStarted(call)) => {
+                    return_governor_blocked!(format!(
+                        "Hive Worker delegated provider call {} was already Started and was not replayed",
+                        call.provider_call_id
+                    ))
+                }
+                Err(error) => return_governor_blocked!(format!(
+                    "Hive Worker delegated provider admission failed closed: {error:#}"
+                )),
+            }
+        } else {
+            None
+        };
+        let delegated_provider_call_id = delegated_permit
+            .as_ref()
+            .map(|permit| permit.provider_call_id().to_string());
         let provider_call_started = Instant::now();
+        let attempt_policy = if delegated_permit.is_some() {
+            crate::ai::client::RemoteAttemptPolicy::GovernedSingleAttempt
+        } else {
+            crate::ai::client::RemoteAttemptPolicy::ConfiguredRetries
+        };
         let api_future = call_subagent_api(
             client,
             model,
@@ -899,6 +996,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             task.reasoning_effort,
             &transport_session_id,
             prompt_cache_scope.as_deref(),
+            attempt_policy,
         );
 
         let api_result = tokio::select! {
@@ -913,20 +1011,56 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             None => ("cancelled", None),
         };
         if let Some(trace) = task.provider_call_trace.as_ref() {
-            trace
-                .record_delegated_call(
-                    "delegated_agent_turn",
-                    client.provider_id(),
-                    model,
-                    task.reasoning_effort,
-                    task.delegated_run_id.as_deref(),
-                    &task_id,
-                    turns,
-                    provider_call_started,
-                    provider_outcome,
+            if let Some(provider_call_id) = delegated_provider_call_id.clone() {
+                trace
+                    .record_delegated_call_with_id(
+                        provider_call_id,
+                        "delegated_agent_turn",
+                        client.provider_id(),
+                        model,
+                        task.reasoning_effort,
+                        task.delegated_run_id.as_deref(),
+                        &task_id,
+                        turns,
+                        provider_call_started,
+                        provider_outcome,
+                        provider_usage.clone(),
+                    )
+                    .await;
+            } else {
+                trace
+                    .record_delegated_call(
+                        "delegated_agent_turn",
+                        client.provider_id(),
+                        model,
+                        task.reasoning_effort,
+                        task.delegated_run_id.as_deref(),
+                        &task_id,
+                        turns,
+                        provider_call_started,
+                        provider_outcome,
+                        provider_usage.clone(),
+                    )
+                    .await;
+            }
+        }
+
+        if let (Some(permit), Some(Ok(Ok(_)))) = (delegated_permit.as_ref(), api_result.as_ref()) {
+            if let Err(error) =
+                permit.complete(crate::agent::WorkerProviderCompletion::acknowledged(
+                    crate::agent::WorkerProviderTerminalOutcome::Completed,
                     provider_usage.clone(),
-                )
-                .await;
+                ))
+            {
+                return_governor_blocked!(format!(
+                    "Hive Worker delegated provider accounting failed closed: {error:#}"
+                ));
+            }
+        } else if delegated_permit.is_some() && api_result.is_some() {
+            return_governor_blocked!(
+                "Hive Worker delegated provider acceptance is uncertain; the call was not retried"
+                    .to_string()
+            );
         }
 
         let Some(api_result) = api_result else {

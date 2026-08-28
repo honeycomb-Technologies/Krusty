@@ -2,8 +2,11 @@
 //!
 //! Mentions route a group turn to selected members: `@slug` matches exactly,
 //! `@Display Name` matches a Worker's spaced display name, `@all` (or no
-//! mention at all) targets every member, and an ambiguous short prefix
-//! selects every matching member (Grok-style) instead of failing the send.
+//! mention at all) targets every member. Exact slugs and full display names
+//! win; a unique slug prefix is accepted as a convenience, while ambiguous or
+//! unknown mentions fail closed instead of broadening the audience.
+
+use std::fmt;
 
 /// One roster entry a mention can resolve to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +15,60 @@ pub struct GroupMentionTarget {
     pub slug: String,
     pub display_name: String,
 }
+
+/// One shorthand mention that matched more than one Worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousGroupMention {
+    pub mention: String,
+    pub candidate_slugs: Vec<String>,
+}
+
+/// A mention routing error that must be corrected before a group turn starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MentionResolutionError {
+    Ambiguous {
+        mention: String,
+        candidate_slugs: Vec<String>,
+    },
+    Unresolved {
+        mentions: Vec<String>,
+    },
+}
+
+impl fmt::Display for MentionResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ambiguous {
+                mention,
+                candidate_slugs,
+            } => write!(
+                formatter,
+                "mention '@{mention}' is ambiguous; use one of: {}",
+                candidate_slugs
+                    .iter()
+                    .map(|slug| format!("@{slug}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Unresolved { mentions } => write!(
+                formatter,
+                "unknown group {}: {}",
+                if mentions.len() == 1 {
+                    "mention"
+                } else {
+                    "mentions"
+                },
+                mentions
+                    .iter()
+                    .map(|mention| format!("@{mention}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MentionResolutionError {}
 
 /// Outcome of scanning one message against a roster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,21 +79,37 @@ pub struct MentionResolution {
     pub mentions_all: bool,
     /// Explicitly resolved Worker ids in roster order, deduplicated.
     pub explicit_worker_ids: Vec<String>,
+    /// Shorthand mentions that matched more than one roster slug.
+    pub ambiguous: Vec<AmbiguousGroupMention>,
     /// Mention tokens that matched no roster entry.
     pub unresolved: Vec<String>,
 }
 
 impl MentionResolution {
-    /// Effective turn targets: explicit selections when present, otherwise
-    /// every member (`@all`, no mention, or only unresolved mentions).
-    pub fn resolve_targets(&self, roster: &[GroupMentionTarget]) -> Vec<String> {
-        if self.mentions_all || !self.saw_mention || self.explicit_worker_ids.is_empty() {
-            return roster
+    /// Effective turn targets. Invalid explicit mentions fail before the
+    /// caller persists or dispatches a group turn.
+    pub fn resolve_targets(
+        &self,
+        roster: &[GroupMentionTarget],
+    ) -> Result<Vec<String>, MentionResolutionError> {
+        if let Some(ambiguous) = self.ambiguous.first() {
+            return Err(MentionResolutionError::Ambiguous {
+                mention: ambiguous.mention.clone(),
+                candidate_slugs: ambiguous.candidate_slugs.clone(),
+            });
+        }
+        if !self.unresolved.is_empty() {
+            return Err(MentionResolutionError::Unresolved {
+                mentions: self.unresolved.clone(),
+            });
+        }
+        if self.mentions_all || !self.saw_mention {
+            return Ok(roster
                 .iter()
                 .map(|target| target.worker_id.clone())
-                .collect();
+                .collect());
         }
-        self.explicit_worker_ids.clone()
+        Ok(self.explicit_worker_ids.clone())
     }
 }
 
@@ -53,32 +126,49 @@ pub fn parse_group_mentions(content: &str, roster: &[GroupMentionTarget]) -> Men
             continue;
         }
         let after = &content[index + 1..];
-        resolution.saw_mention = true;
-
         // Longest match wins so "@Deep Researcher" resolves to the spaced
         // display name instead of stopping at the token "Deep".
-        if let Some((target, consumed)) = longest_display_name_match(after, roster) {
-            matched_ids.push(target.worker_id.clone());
-            index += 1 + consumed;
-            continue;
-        }
-
         let token = leading_mention_token(after);
         if token.is_empty() {
             index += 1;
             continue;
         }
+        resolution.saw_mention = true;
         let token_len = token.len();
         let token = token.to_ascii_lowercase();
         if token == "all" {
             resolution.mentions_all = true;
         } else {
-            let exact = roster
+            let display_match = longest_display_name_matches(after, roster);
+            if let Some((display_candidates, consumed)) = display_match.as_ref() {
+                if *consumed > token_len {
+                    let display_mention = after[..*consumed].to_ascii_lowercase();
+                    record_candidates(
+                        &display_mention,
+                        display_candidates,
+                        &mut matched_ids,
+                        &mut resolution,
+                    );
+                    index += 1 + consumed;
+                    continue;
+                }
+            }
+
+            let mut exact = roster
                 .iter()
                 .filter(|target| target.slug == token)
                 .collect::<Vec<_>>();
+            if let Some((display_candidates, _)) = display_match {
+                for candidate in display_candidates {
+                    if !exact
+                        .iter()
+                        .any(|target| target.worker_id == candidate.worker_id)
+                    {
+                        exact.push(candidate);
+                    }
+                }
+            }
             let candidates = if exact.is_empty() {
-                // Ambiguous short prefix selects every matching member.
                 roster
                     .iter()
                     .filter(|target| target.slug.starts_with(&token))
@@ -89,7 +179,7 @@ pub fn parse_group_mentions(content: &str, roster: &[GroupMentionTarget]) -> Men
             if candidates.is_empty() {
                 resolution.unresolved.push(token);
             } else {
-                matched_ids.extend(candidates.iter().map(|target| target.worker_id.clone()));
+                record_candidates(&token, &candidates, &mut matched_ids, &mut resolution);
             }
         }
         index += 1 + token_len;
@@ -103,6 +193,25 @@ pub fn parse_group_mentions(content: &str, roster: &[GroupMentionTarget]) -> Men
         .map(|target| target.worker_id.clone())
         .collect();
     resolution
+}
+
+fn record_candidates(
+    mention: &str,
+    candidates: &[&GroupMentionTarget],
+    matched_ids: &mut Vec<String>,
+    resolution: &mut MentionResolution,
+) {
+    if candidates.len() == 1 {
+        matched_ids.push(candidates[0].worker_id.clone());
+    } else {
+        resolution.ambiguous.push(AmbiguousGroupMention {
+            mention: mention.to_string(),
+            candidate_slugs: candidates
+                .iter()
+                .map(|target| target.slug.clone())
+                .collect(),
+        });
+    }
 }
 
 /// A mention starts at the beginning of the text or after a non-word
@@ -123,11 +232,12 @@ fn leading_mention_token(after: &str) -> &str {
 }
 
 /// Case-insensitive spaced display-name match followed by a word boundary.
-fn longest_display_name_match<'roster>(
+fn longest_display_name_matches<'roster>(
     after: &str,
     roster: &'roster [GroupMentionTarget],
-) -> Option<(&'roster GroupMentionTarget, usize)> {
-    let mut best: Option<(&GroupMentionTarget, usize)> = None;
+) -> Option<(Vec<&'roster GroupMentionTarget>, usize)> {
+    let mut best: Vec<&GroupMentionTarget> = Vec::new();
+    let mut best_length = 0usize;
     for target in roster {
         let name = target.display_name.trim();
         if name.is_empty() || after.len() < name.len() {
@@ -147,23 +257,20 @@ fn longest_display_name_match<'roster>(
         if !boundary_ok {
             continue;
         }
-        // Only prefer the display name when it is longer than the plain slug
-        // token would have been; a single-word name behaves like a token.
-        if best.is_none_or(|(_, length)| name.len() > length) {
-            best = Some((target, name.len()));
+        if name.len() > best_length {
+            best.clear();
+            best.push(target);
+            best_length = name.len();
+        } else if name.len() == best_length {
+            best.push(target);
         }
     }
-    // A display-name match shorter than or equal to the raw token is only
-    // meaningful when it actually contains a space; otherwise the token path
-    // (exact slug, then prefix) handles it with clearer semantics.
-    best.filter(|(target, consumed)| {
-        target.display_name.contains(' ') || *consumed > leading_mention_token(after).len()
-    })
+    (!best.is_empty()).then_some((best, best_length))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_group_mentions, GroupMentionTarget};
+    use super::{parse_group_mentions, GroupMentionTarget, MentionResolutionError};
 
     fn roster() -> Vec<GroupMentionTarget> {
         vec![
@@ -185,7 +292,7 @@ mod tests {
         ]
     }
 
-    fn target_ids(content: &str) -> Vec<String> {
+    fn target_ids(content: &str) -> Result<Vec<String>, MentionResolutionError> {
         parse_group_mentions(content, &roster()).resolve_targets(&roster())
     }
 
@@ -213,26 +320,42 @@ mod tests {
                 "@deep researcher dig into this",
                 vec!["w-researcher".into()],
             ),
-            // Ambiguous short prefix selects all matching (Grok-style).
-            (
-                "@re check the diff",
-                vec!["w-researcher".into(), "w-reviewer".into()],
-            ),
+            // A unique short prefix remains a convenient exact routing hint.
+            ("@b ship the fix", vec!["w-builder".into()]),
             // Multiple mentions combine in roster order without duplicates.
             (
                 "@builder and @researcher and @builder again",
                 vec!["w-researcher".into(), "w-builder".into()],
             ),
-            // Unresolved-only mentions fall back to everyone.
-            ("@nobody around?", all.clone()),
             // Emails never mention.
             ("mail bob@researcher.dev instead", all),
             // Mid-sentence mention after punctuation resolves.
             ("cc: @reviewer, thanks", vec!["w-reviewer".into()]),
         ];
         for (content, expected) in cases {
-            assert_eq!(target_ids(content), expected, "content: {content}");
+            assert_eq!(target_ids(content).unwrap(), expected, "content: {content}");
         }
+    }
+
+    #[test]
+    fn ambiguous_prefix_fails_with_candidate_slugs() {
+        assert_eq!(
+            target_ids("@re check the diff").unwrap_err(),
+            MentionResolutionError::Ambiguous {
+                mention: "re".into(),
+                candidate_slugs: vec!["researcher".into(), "reviewer".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn unresolved_mention_fails_instead_of_targeting_everyone() {
+        assert_eq!(
+            target_ids("@nobody around?").unwrap_err(),
+            MentionResolutionError::Unresolved {
+                mentions: vec!["nobody".into()],
+            }
+        );
     }
 
     #[test]
@@ -245,14 +368,24 @@ mod tests {
             resolution.explicit_worker_ids,
             vec!["w-builder".to_string()]
         );
-        // @all overrides explicit picks.
-        assert_eq!(resolution.resolve_targets(&roster()).len(), 3);
+        // Invalid mentions are not hidden even when @all is also present.
+        assert_eq!(
+            resolution.resolve_targets(&roster()).unwrap_err(),
+            MentionResolutionError::Unresolved {
+                mentions: vec!["nobody".into()],
+            }
+        );
     }
 
     #[test]
     fn empty_roster_resolves_to_no_targets() {
         let resolution = parse_group_mentions("@anyone", &[]);
         assert!(resolution.saw_mention);
-        assert!(resolution.resolve_targets(&[]).is_empty());
+        assert_eq!(
+            resolution.resolve_targets(&[]).unwrap_err(),
+            MentionResolutionError::Unresolved {
+                mentions: vec!["anyone".into()],
+            }
+        );
     }
 }

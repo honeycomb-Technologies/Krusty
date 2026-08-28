@@ -18,6 +18,8 @@ import {
   writeCanonicalAsyncValue,
 } from "../../platform/identity-storage";
 import { resolveModeLifecyclePolicy } from "./modeLifecyclePolicy";
+import { resolveModelPreferencePolicy } from "./modelPreferencePolicy";
+import { isCurrentVisibleModeHydrationIntent } from "./visibleModeHydrationFence";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -77,6 +79,7 @@ export function useSessionController({
   const sessionsRefreshInFlightRef = useRef(false);
   const persistedResolvedModelRef = useRef<string | null | undefined>(undefined);
   const persistedModelCandidateRef = useRef<string | null | undefined>(undefined);
+  const sharedExactSelectionRef = useRef<ModelInfo | null>(null);
   const attemptedWorkspaceSessionHydrationRef = useRef<
     Record<SessionType, string | null>
   >({
@@ -105,12 +108,19 @@ export function useSessionController({
       .filter((provider) => provider.configured || provider.has_oauth)
       .map((provider) => normalizeProviderId(provider.name));
     setModels((current) => jsonEqual(current, response.models) ? current : response.models);
-    setDefaultModelId((current) => current === (response.default_model ?? null)
-      ? current
-      : response.default_model ?? null);
-    setDefaultModelKey((current) => modelKeysEqual(current, response.default_model_key ?? null)
-      ? current
-      : response.default_model_key ?? null);
+    const localSelection = sharedExactSelectionRef.current;
+    const responseDefaultMatchesLocal = localSelection !== null &&
+      (localSelection.key
+        ? modelKeysEqual(localSelection.key, response.default_model_key ?? null)
+        : localSelection.id === (response.default_model ?? null));
+    if (localSelection === null || responseDefaultMatchesLocal) {
+      setDefaultModelId((current) => current === (response.default_model ?? null)
+        ? current
+        : response.default_model ?? null);
+      setDefaultModelKey((current) => modelKeysEqual(current, response.default_model_key ?? null)
+        ? current
+        : response.default_model_key ?? null);
+    }
     setConfiguredProviders((current) => stringArraysEqual(current, nextConfiguredProviders)
       ? current
       : nextConfiguredProviders);
@@ -123,14 +133,42 @@ export function useSessionController({
   const ensureModelReady = useCallback(async (
     targetStore: SessionStoreApi = sessionStore,
   ) => {
-    if (persistedModelCandidateRef.current === undefined) {
+    const targetsHiveStore = targetStore === modeStores.hive.session;
+    const hiveSessionBinding = targetsHiveStore
+      ? targetStore.getState().sessionId
+      : null;
+    const modelPreferencePolicy = resolveModelPreferencePolicy(
+      targetsHiveStore,
+      hiveSessionBinding,
+    );
+    const readsSharedModelPreference = modelPreferencePolicy === "shared";
+    const mutatesSharedModelPreference = modelPreferencePolicy === "shared";
+    const usesStoreModel = modelPreferencePolicy !== "default-only";
+    const exactSharedSelection = modelPreferencePolicy === "default-only" &&
+        sharedExactSelectionRef.current?.key
+      ? sharedExactSelectionRef.current
+      : null;
+    const hiveBindingIsCurrent = () =>
+      !targetsHiveStore ||
+      targetStore.getState().sessionId === hiveSessionBinding;
+    if (
+      readsSharedModelPreference &&
+      persistedModelCandidateRef.current === undefined
+    ) {
       persistedModelCandidateRef.current = await readMigratedAsyncValue(
         SecureStore,
         IDENTITY_STORAGE_KEYS.selectedModel,
       ).catch(() => null);
     }
+    if (!hiveBindingIsCurrent()) return targetStore.getState().model;
     const existingModel =
-      targetStore.getState().model ?? persistedModelCandidateRef.current;
+      (usesStoreModel
+        ? targetStore.getState().model
+        : exactSharedSelection?.id ?? null) ??
+      (readsSharedModelPreference ? persistedModelCandidateRef.current : null);
+    const existingModelKey = usesStoreModel
+      ? targetStore.getState().modelKey
+      : exactSharedSelection?.key ?? null;
     let catalog = models;
     let fallbackDefault = defaultModelId;
     let fallbackDefaultKey = defaultModelKey;
@@ -146,17 +184,19 @@ export function useSessionController({
       fallbackDefaultKey = result.response.default_model_key ?? null;
       allowedProviders = result.configuredProviders;
     }
+    if (!hiveBindingIsCurrent()) return targetStore.getState().model;
 
     const selectedModel = resolveUsableModel(
       existingModel,
       fallbackDefault,
       catalog,
       allowedProviders,
-      targetStore.getState().modelKey,
+      existingModelKey,
       fallbackDefaultKey,
     );
 
     if (selectedModel) {
+      if (!hiveBindingIsCurrent()) return targetStore.getState().model;
       const state = targetStore.getState();
       const nextProvider = selectedModel.provider ?? null;
       if (
@@ -167,7 +207,10 @@ export function useSessionController({
       ) {
         state.setModel(selectedModel.id, nextProvider, selectedModel);
       }
-      if (persistedResolvedModelRef.current !== selectedModel.id) {
+      if (
+        mutatesSharedModelPreference &&
+        persistedResolvedModelRef.current !== selectedModel.id
+      ) {
         await writeCanonicalAsyncValue(
           SecureStore,
           IDENTITY_STORAGE_KEYS.selectedModel,
@@ -179,10 +222,13 @@ export function useSessionController({
       return selectedModel.id;
     }
 
+    if (!hiveBindingIsCurrent()) return targetStore.getState().model;
     if (targetStore.getState().model !== null) {
       targetStore.getState().setModel(null);
     }
-    if (persistedResolvedModelRef.current !== null) {
+    if (
+      mutatesSharedModelPreference && persistedResolvedModelRef.current !== null
+    ) {
       await deleteMigratedAsyncValue(
         SecureStore,
         IDENTITY_STORAGE_KEYS.selectedModel,
@@ -196,9 +242,18 @@ export function useSessionController({
     defaultModelId,
     defaultModelKey,
     loadModelCatalog,
+    modeStores.hive.session,
     models,
     sessionStore,
   ]);
+
+  const recordSharedModelSelection = useCallback((selection: ModelInfo) => {
+    sharedExactSelectionRef.current = selection;
+    persistedModelCandidateRef.current = selection.id;
+    persistedResolvedModelRef.current = selection.id;
+    setDefaultModelId(selection.id);
+    setDefaultModelKey(selection.key ?? null);
+  }, []);
 
   // Connect warmup: list sessions once per connection. Model catalog refreshes
   // must not turn into unrelated session-list reloads.
@@ -353,8 +408,19 @@ export function useSessionController({
       return;
     }
 
+    const scheduledStoreSessionId = sessionState.sessionId;
     lastSessionIdByTypeRef.current[type] = scheduledTargetId;
     const hydrationTimer = setTimeout(() => {
+      if (
+        !isCurrentVisibleModeHydrationIntent(
+          scheduledTargetId,
+          scheduledStoreSessionId,
+          lastSessionIdByTypeRef.current[type],
+          slot.session.getState().sessionId,
+        )
+      ) {
+        return;
+      }
       attemptedWorkspaceSessionHydrationRef.current[type] = scheduledTargetId;
       void slot.session.getState().loadSession(scheduledTargetId, true).catch(() => {
         attemptedWorkspaceSessionHydrationRef.current[type] = null;
@@ -435,6 +501,7 @@ export function useSessionController({
     configuredProviders,
     loadModelCatalog,
     ensureModelReady,
+    recordSharedModelSelection,
     lastSessionIdByTypeRef,
   };
 }

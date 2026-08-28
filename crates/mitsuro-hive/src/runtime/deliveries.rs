@@ -1,8 +1,9 @@
 //! Durable Worker-to-Worker delivery pump.
 //!
 //! Each fenced tick claims due `hive_deliveries` rows and applies one
-//! atomic effect per row: wake the recipient's idle DM lane, steer an
-//! active high-priority run, or wait/backoff. Crash between claim and
+//! atomic effect per row: enqueue a typed recipient DM run or wait/backoff.
+//! High priority changes queue priority but never impersonates a user by
+//! steering an active run. Crash between claim and
 //! effect leaves the row `delivering`; the next due claim replays the
 //! effect idempotently.
 
@@ -11,15 +12,14 @@ use mitsuro_core::hive::{canonical_timestamp, RetryPolicy};
 use mitsuro_core::storage::{
     ack_for_terminal_runs_with_conn, claim_due_with_conn, fail_attempt_with_conn, load_delivery,
     load_worker_with_conn, mark_delivered_with_conn, revert_wait_with_conn, DaemonFence, Database,
-    HiveDelivery, HiveDeliveryPriority, HiveDeliveryStatus, HiveWorker, HiveWorkerStatus,
+    HiveDelivery, HiveDeliveryPriority, HiveDeliveryStatus, HiveWorker,
+    HiveWorkerIntroductionStore, HiveWorkerStatus, WorkerConversationLane, WorkerRunOrigin,
 };
-use mitsuro_core::Content;
 use mitsuro_hive_protocol::Actor;
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
-use serde_json::{json, Value};
+use serde_json::json;
 
-use super::backend::ExecutionControl;
-use super::handler::{insert_canonical_user_message, insert_pending_user_content, RuntimeShared};
+use super::handler::RuntimeShared;
 use super::persistence::{
     append_event, get_or_create_controller, require_owned_session, ControllerRecord,
     PersistedEvent, RuntimeStoreError,
@@ -29,15 +29,8 @@ const WAIT_BACKOFF_SECS: i64 = 5;
 const MAX_OBJECTIVE_BYTES: usize = 2 * 1024;
 const WORKER_MESSAGE_MAX_ATTEMPTS: u32 = 5;
 
-pub(super) struct DeliverySteer {
-    pub(super) session_id: String,
-    pub(super) pending_id: String,
-    pub(super) content: Value,
-}
-
 pub(super) struct DeliveryTick {
     pub(super) events: Vec<PersistedEvent>,
-    pub(super) steers: Vec<DeliverySteer>,
 }
 
 pub(super) async fn deliver_worker_messages(
@@ -59,10 +52,7 @@ pub(super) async fn deliver_worker_messages(
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
 
-    let mut tick = DeliveryTick {
-        events: Vec::new(),
-        steers: Vec::new(),
-    };
+    let mut tick = DeliveryTick { events: Vec::new() };
     for delivery in claimed {
         let path = path.clone();
         let fence = fence.clone();
@@ -73,30 +63,10 @@ pub(super) async fn deliver_worker_messages(
         .await
         .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
         tick.events.extend(applied.events);
-        tick.steers.extend(applied.steers);
     }
 
     for event in tick.events {
         shared.events.publish(event.envelope());
-    }
-    for steer in tick.steers {
-        if let Err(error) = shared
-            .backend
-            .control(
-                &steer.session_id,
-                ExecutionControl::Steer {
-                    pending_id: Some(steer.pending_id),
-                    content: steer.content,
-                },
-            )
-            .await
-        {
-            tracing::warn!(
-                session_id = %steer.session_id,
-                error = %error,
-                "Hive worker-message steer delivery failed; pending row will promote later"
-            );
-        }
     }
     Ok(())
 }
@@ -130,10 +100,7 @@ fn apply_claimed_delivery_on_path(
     let now_text = canonical_timestamp(now);
     if !daemon_fence_is_current(&tx, &fence, &now_text)? {
         tx.commit()?;
-        return Ok(DeliveryTick {
-            events: Vec::new(),
-            steers: Vec::new(),
-        });
+        return Ok(DeliveryTick { events: Vec::new() });
     }
     let tick = apply_claimed_delivery(&tx, delivery_id, now)?;
     tx.commit()?;
@@ -183,6 +150,20 @@ pub(super) fn apply_claimed_delivery(
             .map_err(RuntimeStoreError::Internal)?;
         return Ok(empty_tick());
     }
+    if HiveWorkerIntroductionStore::from_connection(tx)
+        .get_by_worker(&recipient.id)
+        .map_err(RuntimeStoreError::Internal)?
+        .is_some_and(|introduction| !introduction.status.allows_autonomy())
+    {
+        revert_wait_with_conn(
+            tx,
+            delivery_id,
+            ChronoDuration::seconds(WAIT_BACKOFF_SECS),
+            now,
+        )
+        .map_err(RuntimeStoreError::Internal)?;
+        return Ok(empty_tick());
+    }
     if recipient.status == HiveWorkerStatus::Paused {
         revert_wait_with_conn(
             tx,
@@ -223,6 +204,30 @@ pub(super) fn apply_claimed_delivery(
         Err(error) => return Err(error),
     };
     let controller = get_or_create_controller(tx, &session, &now_text)?;
+    let controller_bound = tx.execute(
+        "UPDATE hive_controllers
+         SET worker_id = ?2, scope_key = ?3, updated_at = ?4
+         WHERE id = ?1 AND session_id = ?5 AND user_id IS ?6
+           AND (worker_id IS NULL OR worker_id = ?2)",
+        params![
+            controller.id,
+            recipient.id,
+            format!("worker:{}", recipient.id),
+            now_text,
+            session.id,
+            recipient.user_id,
+        ],
+    )?;
+    if controller_bound != 1 {
+        fail_attempt_with_conn(
+            tx,
+            delivery_id,
+            "the recipient controller belongs to another Worker",
+            now,
+        )
+        .map_err(RuntimeStoreError::Internal)?;
+        return Ok(empty_tick());
+    }
     if controller.status == "paused" {
         revert_wait_with_conn(
             tx,
@@ -252,16 +257,6 @@ pub(super) fn apply_claimed_delivery(
         [&controller.id],
         |row| row.get(0),
     )?;
-    let live_run_id: Option<String> = tx
-        .query_row(
-            "SELECT id FROM hive_runs
-             WHERE controller_id = ?1 AND status IN ('leased', 'running')
-             ORDER BY updated_at DESC, created_at DESC LIMIT 1",
-            [&controller.id],
-            |row| row.get(0),
-        )
-        .optional()?;
-
     if unfinished > 0 && delivery.priority == HiveDeliveryPriority::Normal {
         revert_wait_with_conn(
             tx,
@@ -274,20 +269,6 @@ pub(super) fn apply_claimed_delivery(
     }
 
     let inbound = inbound_text(tx, &delivery, &recipient)?;
-    if let Some(live_run_id) =
-        live_run_id.filter(|_| delivery.priority == HiveDeliveryPriority::High)
-    {
-        return steer_active_run(
-            tx,
-            &delivery,
-            &controller,
-            &session.id,
-            &live_run_id,
-            &inbound,
-            now,
-        );
-    }
-
     wake_recipient_lane(
         tx,
         &delivery,
@@ -297,51 +278,6 @@ pub(super) fn apply_claimed_delivery(
         &inbound,
         now,
     )
-}
-
-fn steer_active_run(
-    tx: &Transaction<'_>,
-    delivery: &HiveDelivery,
-    controller: &ControllerRecord,
-    session_id: &str,
-    live_run_id: &str,
-    inbound: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<DeliveryTick, RuntimeStoreError> {
-    let now_text = canonical_timestamp(now);
-    let pending_id = format!("delivery:{}", delivery.id);
-    let content = serde_json::to_string(&vec![Content::Text {
-        text: inbound.to_string(),
-    }])
-    .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
-    insert_pending_user_content(tx, session_id, &pending_id, &content, &now_text)?;
-    mark_delivered_with_conn(tx, &delivery.id, Some(live_run_id), true, now)
-        .map_err(RuntimeStoreError::Internal)?;
-    let event = append_event(
-        tx,
-        controller,
-        "worker_message_steered",
-        Some(live_run_id),
-        None,
-        Some(&format!("delivery:{}:steered", delivery.id)),
-        json!({
-            "delivery_id": delivery.id,
-            "run_id": live_run_id,
-            "from_worker_id": delivery.from_worker_id,
-            "priority": delivery.priority.as_str(),
-        }),
-        &now_text,
-    )?;
-    let content_value = serde_json::from_str::<Value>(&content)
-        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
-    Ok(DeliveryTick {
-        events: vec![event],
-        steers: vec![DeliverySteer {
-            session_id: session_id.to_string(),
-            pending_id,
-            content: content_value,
-        }],
-    })
 }
 
 fn wake_recipient_lane(
@@ -361,17 +297,6 @@ fn wake_recipient_lane(
         return Ok(empty_tick());
     }
 
-    let workspace = session
-        .working_dir
-        .as_deref()
-        .or(session.project_dir.as_deref())
-        .map(str::trim)
-        .filter(|path| !path.is_empty() && std::path::Path::new(path).is_absolute());
-    let Some(working_dir) = workspace else {
-        fail_attempt_with_conn(tx, &delivery.id, "the recipient DM has no workspace", now)
-            .map_err(RuntimeStoreError::Internal)?;
-        return Ok(empty_tick());
-    };
     let model = recipient
         .model
         .clone()
@@ -389,105 +314,118 @@ fn wake_recipient_lane(
         return Ok(empty_tick());
     };
 
-    insert_canonical_user_message(tx, &session.id, inbound, &now_text)?;
-    let resumed = resume_single_waiting_run(tx, controller, &now_text)?;
-    let (backref, queued_new) = if let Some(run_id) = resumed {
-        (run_id, false)
-    } else {
-        let objective = bound_excerpt(inbound);
-        let model_key = recipient
-            .model_key
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| RuntimeStoreError::Internal(error.into()))?
-            .or_else(|| {
-                session
-                    .model_key
-                    .as_ref()
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .ok()
-                    .flatten()
-            });
-        let config = json!({
-            "working_dir": working_dir,
-            "project_dir": session.project_dir,
-            "model": model,
-            "model_key": model_key,
-            "model_catalog_revision": recipient
-                .model_catalog_revision
-                .clone()
-                .or_else(|| session.model_catalog_revision.clone()),
-            "permission_mode": recipient.permission_mode.as_str(),
-            "retry": RetryPolicy::default(),
-            "delivery_id": delivery.id,
+    // A Worker delivery is a platform event, never a user-authored message.
+    // Give it its own deterministic run even when an older run is sleeping or
+    // awaiting real user input. The runner injects this run's objective as a
+    // typed, ephemeral Worker-message trigger, so delivery replay cannot
+    // contaminate canonical chat history or learning evidence.
+    let objective = bound_excerpt(inbound);
+    let model_key = recipient
+        .model_key
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+        .or_else(|| {
+            session
+                .model_key
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .ok()
+                .flatten()
         });
-        let priority = if delivery.priority == HiveDeliveryPriority::High {
-            50
-        } else {
-            0
-        };
-        tx.execute(
-            "INSERT INTO hive_runs (
-                id, controller_id, session_id, schedule_id, occurrence_id, kind,
-                objective, config_json, status, priority, concurrency_key,
-                scheduled_for, available_at, wake_at, attempt_count, max_attempts,
-                lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
-                last_stop_reason, last_error, outcome_json, created_at, started_at,
-                finished_at, updated_at, worker_id
-             ) VALUES (
-                ?1, ?2, ?3, NULL, NULL, 'worker_message',
-                ?4, ?5, 'queued', ?6, NULL,
-                ?7, ?7, NULL, 0, ?8, NULL, NULL, NULL, NULL, NULL,
-                NULL, NULL, NULL, ?7, NULL, NULL, ?7, ?9
-             )
-             ON CONFLICT(id) DO NOTHING",
-            params![
-                run_id,
-                controller.id,
-                session.id,
-                objective,
-                serde_json::to_string(&config)
-                    .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
-                priority,
-                now_text,
-                WORKER_MESSAGE_MAX_ATTEMPTS,
-                recipient.id,
-            ],
-        )?;
-        let runtime_status = if controller.status == "paused" {
-            "paused"
-        } else {
-            "idle"
-        };
-        tx.execute(
-            "INSERT INTO hive_runtime_state (session_id, status, current_run_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(session_id) DO UPDATE SET current_run_id = excluded.current_run_id,
-                 status = CASE WHEN hive_runtime_state.status = 'paused' THEN 'paused' ELSE excluded.status END,
-                 updated_at = excluded.updated_at",
-            params![session.id, runtime_status, run_id, now_text],
-        )?;
-        (run_id, true)
+    let execution = super::worker_context::resolve_worker_conversation_execution_binding(
+        tx,
+        &session.id,
+        &recipient.id,
+        recipient.revision,
+        WorkerConversationLane::DirectMessage,
+    )
+    .map_err(RuntimeStoreError::Internal)?;
+    let execution_context = execution.context;
+    let governor_lane_key = execution_context
+        .lane()
+        .canonical_lane_key()
+        .map_err(RuntimeStoreError::Internal)?;
+    let config = json!({
+        "model": model,
+        "model_key": model_key,
+        "model_catalog_revision": recipient
+            .model_catalog_revision
+            .clone()
+            .or_else(|| session.model_catalog_revision.clone()),
+        "permission_mode": recipient.permission_mode.as_str(),
+        "retry": RetryPolicy::default(),
+        "delivery_id": delivery.id,
+        "worker_id": recipient.id,
+        "working_dir": execution.working_dir,
+        "project_dir": execution.project_dir,
+    });
+    let priority = if delivery.priority == HiveDeliveryPriority::High {
+        50
+    } else {
+        0
     };
+    tx.execute(
+        "INSERT INTO hive_runs (
+            id, controller_id, session_id, schedule_id, occurrence_id, kind,
+            objective, config_json, status, priority, concurrency_key,
+            scheduled_for, available_at, wake_at, attempt_count, max_attempts,
+            lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
+            last_stop_reason, last_error, outcome_json, created_at, started_at,
+            finished_at, updated_at, worker_id, governor_origin,
+            governor_lane_key, execution_context_json
+         ) VALUES (
+            ?1, ?2, ?3, NULL, NULL, 'worker_message',
+            ?4, ?5, 'queued', ?6, NULL,
+            ?7, ?7, NULL, 0, ?8, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, ?7, NULL, NULL, ?7, ?9, ?10, ?11, ?12
+         )
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            run_id,
+            controller.id,
+            session.id,
+            objective,
+            serde_json::to_string(&config)
+                .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
+            priority,
+            now_text,
+            WORKER_MESSAGE_MAX_ATTEMPTS,
+            recipient.id,
+            WorkerRunOrigin::WorkerPeer.as_str(),
+            governor_lane_key,
+            serde_json::to_string(&execution_context)
+                .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
+        ],
+    )?;
+    let runtime_status = if controller.status == "paused" {
+        "paused"
+    } else {
+        "idle"
+    };
+    tx.execute(
+        "INSERT INTO hive_runtime_state (session_id, status, current_run_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET current_run_id = excluded.current_run_id,
+             status = CASE WHEN hive_runtime_state.status = 'paused' THEN 'paused' ELSE excluded.status END,
+             updated_at = excluded.updated_at",
+        params![session.id, runtime_status, run_id, now_text],
+    )?;
 
-    mark_delivered_with_conn(tx, &delivery.id, Some(&backref), false, now)
+    mark_delivered_with_conn(tx, &delivery.id, Some(&run_id), false, now)
         .map_err(RuntimeStoreError::Internal)?;
     let event = append_event(
         tx,
         controller,
-        if queued_new {
-            "run_queued"
-        } else {
-            "worker_message_delivered"
-        },
-        Some(&backref),
+        "run_queued",
+        Some(&run_id),
         None,
         Some(&format!("delivery:{}:delivered", delivery.id)),
         json!({
             "delivery_id": delivery.id,
-            "run_id": backref,
+            "run_id": run_id,
             "from_worker_id": delivery.from_worker_id,
             "kind": "worker_message",
         }),
@@ -495,41 +433,7 @@ fn wake_recipient_lane(
     )?;
     Ok(DeliveryTick {
         events: vec![event],
-        steers: Vec::new(),
     })
-}
-
-fn resume_single_waiting_run(
-    tx: &Transaction<'_>,
-    controller: &ControllerRecord,
-    now: &str,
-) -> Result<Option<String>, RuntimeStoreError> {
-    let waiting = {
-        let mut statement = tx.prepare(
-            "SELECT id FROM hive_runs
-             WHERE controller_id = ?1 AND status IN ('sleeping', 'awaiting_input')
-             ORDER BY updated_at DESC, created_at DESC LIMIT 2",
-        )?;
-        let waiting = statement
-            .query_map([&controller.id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        waiting
-    };
-    if waiting.len() != 1 {
-        return Ok(None);
-    }
-    let run_id = waiting.into_iter().next().expect("len == 1");
-    let changed = tx.execute(
-        "UPDATE hive_runs
-         SET status = 'queued', available_at = ?2, wake_at = NULL,
-             last_stop_reason = NULL, updated_at = ?2
-         WHERE id = ?1 AND status IN ('sleeping', 'awaiting_input')",
-        params![run_id, now],
-    )?;
-    if changed != 1 {
-        return Ok(None);
-    }
-    Ok(Some(run_id))
 }
 
 fn existing_run_id(
@@ -588,10 +492,7 @@ fn deterministic_delivery_run_id(delivery_id: &str) -> String {
 }
 
 fn empty_tick() -> DeliveryTick {
-    DeliveryTick {
-        events: Vec::new(),
-        steers: Vec::new(),
-    }
+    DeliveryTick { events: Vec::new() }
 }
 
 #[cfg(test)]
@@ -623,10 +524,10 @@ mod tests {
             .execute_batch(&format!(
                 "INSERT INTO sessions (
                     id, title, created_at, updated_at, session_type,
-                    working_dir, model, permission_mode
+                    model, permission_mode
                  ) VALUES (
                     'dm-recipient', 'Recipient DM', '{now}', '{now}', 'hive',
-                    '/tmp/recipient-workspace', 'test-model', 'autonomous'
+                    'test-model', 'autonomous'
                  );"
             ))
             .unwrap();
@@ -694,7 +595,7 @@ mod tests {
 
         apply(&world, &id);
         apply(&world, &id);
-        assert_eq!(user_message_count(&world), 1);
+        assert_eq!(user_message_count(&world), 0);
 
         let delivery = HiveDeliveryStore::new(Database::new(&world.db_path).unwrap())
             .get(&id)
@@ -735,7 +636,7 @@ mod tests {
         let reclaimed = claim_one(&world);
         assert_eq!(reclaimed, id);
         apply(&world, &id);
-        assert_eq!(user_message_count(&world), 1);
+        assert_eq!(user_message_count(&world), 0);
         let delivery = load_delivery(Database::new(&world.db_path).unwrap().conn(), &id)
             .unwrap()
             .unwrap();
@@ -744,7 +645,79 @@ mod tests {
     }
 
     #[test]
-    fn high_priority_steers_a_live_run() {
+    fn waiting_run_is_not_rewritten_as_a_worker_message_or_fake_user_turn() {
+        let world = world();
+        let now = canonical_timestamp(Utc::now());
+        let db = Database::new(&world.db_path).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO hive_controllers (
+                    id, scope_key, user_id, session_id, status, timezone,
+                    max_concurrent_runs, created_at, updated_at
+                 ) VALUES ('controller-waiting', 'session:dm-recipient', NULL, 'dm-recipient',
+                           'active', 'UTC', 1, ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO hive_runs (
+                    id, controller_id, session_id, schedule_id, occurrence_id, kind,
+                    objective, config_json, status, priority, concurrency_key,
+                    scheduled_for, available_at, wake_at, attempt_count, max_attempts,
+                    lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at,
+                    last_stop_reason, last_error, outcome_json, created_at, started_at,
+                    finished_at, updated_at
+                 ) VALUES (
+                    'run-waiting', 'controller-waiting', 'dm-recipient', NULL, NULL, 'dispatch',
+                    'wait for the actual user', '{}', 'awaiting_input', 0, NULL,
+                    ?1, ?1, NULL, 1, 5, NULL, NULL, NULL, NULL, NULL,
+                    'awaiting_input', NULL, NULL, ?1, ?1, NULL, ?1
+                 )",
+                [&now],
+            )
+            .unwrap();
+
+        // High priority may bypass a waiting lane, but it must do so as its
+        // own typed Worker-message run rather than impersonating the user in
+        // the older run's canonical transcript.
+        let id = enqueue(&world, HiveDeliveryPriority::High);
+        let claimed = claim_one(&world);
+        apply(&world, &claimed);
+
+        let waiting_status: String = db
+            .conn()
+            .query_row(
+                "SELECT status FROM hive_runs WHERE id = 'run-waiting'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(waiting_status, "awaiting_input");
+
+        let run_id = deterministic_delivery_run_id(&id);
+        let (kind, status, objective): (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT kind, status, objective FROM hive_runs WHERE id = ?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "worker_message");
+        assert_eq!(status, "queued");
+        assert!(objective.contains("message from Worker"));
+        assert_eq!(user_message_count(&world), 0);
+
+        let delivery = HiveDeliveryStore::new(Database::new(&world.db_path).unwrap())
+            .get(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.run_id.as_deref(), Some(run_id.as_str()));
+    }
+
+    #[test]
+    fn high_priority_enqueues_a_typed_run_without_steering_the_live_run() {
         let world = world();
         let now = canonical_timestamp(Utc::now());
         let db = Database::new(&world.db_path).unwrap();
@@ -781,8 +754,19 @@ mod tests {
             .get(&id)
             .unwrap()
             .unwrap();
-        assert_eq!(delivery.status, HiveDeliveryStatus::Acked);
-        assert_eq!(delivery.run_id.as_deref(), Some("run-live"));
+        assert_eq!(delivery.status, HiveDeliveryStatus::Delivered);
+        let run_id = deterministic_delivery_run_id(&id);
+        assert_eq!(delivery.run_id.as_deref(), Some(run_id.as_str()));
+        let (kind, priority): (String, i64) = db
+            .conn()
+            .query_row(
+                "SELECT kind, priority FROM hive_runs WHERE id = ?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "worker_message");
+        assert_eq!(priority, 50);
         let pending: i64 = Database::new(&world.db_path)
             .unwrap()
             .conn()
@@ -793,7 +777,43 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(pending, 1);
+        assert_eq!(pending, 0);
         assert_eq!(user_message_count(&world), 0);
+    }
+
+    #[test]
+    fn recipient_introduction_defers_delivery_without_consuming_an_attempt() {
+        let world = world();
+        let db = Database::new(&world.db_path).unwrap();
+        let now = canonical_timestamp(Utc::now());
+        db.conn()
+            .execute(
+                "INSERT INTO hive_worker_introductions (
+                     worker_id, run_id, status, prompt_version, created_at, updated_at
+                 ) VALUES (?1, NULL, 'awaiting_context', 1, ?2, ?2)",
+                params![world.recipient_id, now],
+            )
+            .unwrap();
+        let id = enqueue(&world, HiveDeliveryPriority::High);
+        let claimed = claim_one(&world);
+        apply(&world, &claimed);
+
+        let delivery = HiveDeliveryStore::new(Database::new(&world.db_path).unwrap())
+            .get(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.status, HiveDeliveryStatus::Pending);
+        assert_eq!(delivery.attempt_count, 0);
+        assert!(delivery.run_id.is_none());
+        assert_eq!(user_message_count(&world), 0);
+        let runs: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM hive_runs WHERE worker_id = ?1",
+                [&world.recipient_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(runs, 0);
     }
 }
