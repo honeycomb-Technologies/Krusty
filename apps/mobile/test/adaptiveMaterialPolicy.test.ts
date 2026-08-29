@@ -156,6 +156,15 @@ Deno.test("liquid glass preserves tone, lifecycle, and FAB interaction policy", 
       "FAB glass must be able to use the iOS interactive press/glint",
     );
   }
+  if (
+    !material.includes("liquidGlassOnly = false") ||
+    !material.includes("respectMotionGate = false") ||
+    !material.includes("const glassMotionSafe = !respectMotionGate || motionSafe")
+  ) {
+    throw new Error(
+      "motion gating and solid fallbacks must be explicit opt-ins for new endpoints",
+    );
+  }
 });
 
 Deno.test("liquid glass stays lightly tinted per tone", () => {

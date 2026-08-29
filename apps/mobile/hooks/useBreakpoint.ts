@@ -1,4 +1,4 @@
-import { useWindowDimensions } from 'react-native';
+import { Platform, useWindowDimensions } from 'react-native';
 
 export type Breakpoint = 'mobile' | 'tablet' | 'desktop';
 
@@ -14,8 +14,11 @@ export function useBreakpoint(): {
 } {
   const { width } = useWindowDimensions();
 
+  // Native iOS/Android windows remain touch-first even when a tablet,
+  // Waydroid, DeX, or Stage Manager reports a desktop-sized viewport. The
+  // desktop shell is the web/Tauri surface, where hover and split panes exist.
   const breakpoint: Breakpoint =
-    width >= DESKTOP_MIN ? 'desktop' :
+    Platform.OS === 'web' && width >= DESKTOP_MIN ? 'desktop' :
     width >= TABLET_MIN ? 'tablet' :
     'mobile';
 

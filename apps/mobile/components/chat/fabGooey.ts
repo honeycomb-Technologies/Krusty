@@ -12,7 +12,14 @@ export const FAB_POUR_OPEN_SPRING = {
   stiffness: 198,
   mass: 0.96,
 } as const;
+/** Shared beat between successive surfaces in every FAB pour branch. */
+export const FAB_POUR_OPEN_STAGGER_MS = 58;
 export const FAB_POUR_CLOSE_MS = 160;
+/** Opaque graphite yields only after fixed native glass has committed. */
+export const FAB_MATERIAL_CROSSFADE_MS = 120;
+/** Shared content reveal inside a traveling FAB surface. */
+export const FAB_POUR_GLYPH_REVEAL_END = 0.42;
+export const FAB_POUR_GLYPH_SETTLE_Y = 10;
 /** Silhouette only — never a GlassView. Keep true; the native layer still defers Core import. */
 export const FAB_GOOEY_ENABLED = true;
 export type GooeyOrientation = 'vertical' | 'horizontal';

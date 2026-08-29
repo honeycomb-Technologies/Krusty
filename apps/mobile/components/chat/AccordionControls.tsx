@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   View,
   Pressable,
+  Platform,
   ScrollView,
   StyleSheet,
   type GestureResponderEvent,
@@ -9,12 +17,20 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native';
+import {
+  AdaptiveMaterial,
+  useAdaptiveMaterialMotionSafe,
+} from '../ui/AdaptiveMaterial';
 import { FabGooeyLayer } from './FabGooeyLayer';
 import {
   FAB_GAP,
+  FAB_MATERIAL_CROSSFADE_MS,
   FAB_PILL,
   FAB_POUR_CLOSE_MS,
+  FAB_POUR_GLYPH_REVEAL_END,
+  FAB_POUR_GLYPH_SETTLE_Y,
   FAB_POUR_OPEN_SPRING,
+  FAB_POUR_OPEN_STAGGER_MS,
   FAB_STEP,
   GOOEY_PAD,
   MAX_GOOEY_PILLS,
@@ -77,6 +93,9 @@ interface AccordionControlsProps {
   onPickFile: () => void;
   onModelSelect: () => void;
   modelPickerOpen: boolean;
+  modelPopoverProgress: SharedValue<number>;
+  modelPopoverCoverOpacity: SharedValue<number>;
+  onModelPopoverMaterialActiveChange: (active: boolean) => void;
   providerFilters: ProviderFilterAction[];
   selectedProviderFilter: string | null;
   onProviderFilterToggle: (providerId: string) => void;
@@ -111,17 +130,14 @@ const THINKING_ICON_ALPHA: Record<ThinkingLevel, string> = {
   ultra: '',
 };
 
-/** Shared surface/glyph spring. Native glass is intentionally absent here. */
+/** Shared surface/glyph spring. Native glass exists only in fixed endpoints. */
 const MAX_PILL_INDEX = 5;
 /** Readable cascade — 20ms read as one pop. */
-const OPEN_STAGGER_MS = 58;
+const OPEN_STAGGER_MS = FAB_POUR_OPEN_STAGGER_MS;
 const CLOSE_STAGGER_MS = 46;
 /** Keep the scroll rail still until the last opening spring has visibly settled. */
 const PILL_OPEN_SETTLE_MS = 440;
 /** Glyph fade-out before that traveling pill unmounts. */
-/** Hide glyphs before the traveling tile rejoins the source surface. */
-const GLYPH_FADE_START = 0.42;
-const GLYPH_SETTLE_Y = 10;
 const ATTACH_ACTION_COUNT = 3;
 const DOCK_FADE_WIDTH = 34;
 const MODEL_BUTTON_GAP = 10;
@@ -137,10 +153,12 @@ const PROVIDER_AUTO_SCROLL_EDGE_WIDTH = 52;
 const PROVIDER_AUTO_SCROLL_MAX_STEP = 18;
 const PROVIDER_REORDER_SPRING_CONFIG = { damping: 24, stiffness: 420, mass: 0.55 };
 const PROVIDER_REORDER_LONG_PRESS_MS = 460;
+const NATIVE_MATERIAL_COMMIT_MS = Platform.OS === 'ios' ? 20 : 0;
+const usePourMotionEffect = Platform.OS === 'ios' ? useLayoutEffect : useEffect;
 
 export function pourCloseDurationMs(itemCount: number): number {
   const lastStagger = Math.max(0, itemCount - 1) * CLOSE_STAGGER_MS;
-  return lastStagger + FAB_POUR_CLOSE_MS;
+  return lastStagger + FAB_POUR_CLOSE_MS + NATIVE_MATERIAL_COMMIT_MS;
 }
 
 function pourOpenDurationMs(itemCount: number): number {
@@ -175,9 +193,10 @@ function useGooeyProgresses(): GooeyProgresses {
 }
 
 /**
- * Staggered presence for every branch of the FAB. The surface itself is the
- * transform-safe Skia silhouette, so vertical and horizontal controls keep
- * one color and one motion instead of swapping to a second material at rest.
+ * Staggered presence for every branch of the FAB. The moving surface is always
+ * the transform-safe graphite/Skia silhouette. Native glass mounts only in a
+ * fixed destination sibling after the spring settles; an opaque graphite
+ * cover then yields without ever animating the GlassView itself.
  */
 function usePourMotion({
   isOpen,
@@ -185,57 +204,146 @@ function usePourMotion({
   closeDelayMs,
   onCloseSettled,
   progress: progressProp,
+  coverOpacity: coverOpacityProp,
+  materialAllowed = true,
+  onMaterialActiveChange,
 }: {
   isOpen: boolean;
   openDelayMs: number;
   closeDelayMs: number;
   onCloseSettled?: () => void;
   progress?: SharedValue<number>;
-}): SharedValue<number> {
+  coverOpacity?: SharedValue<number>;
+  materialAllowed?: boolean;
+  onMaterialActiveChange?: (active: boolean) => void;
+}): {
+  progress: SharedValue<number>;
+  materialActive: boolean;
+  coverStyle: ReturnType<typeof useAnimatedStyle>;
+} {
   const fallbackProgress = useSharedValue(0);
+  const fallbackCoverOpacity = useSharedValue(1);
   const progress = progressProp ?? fallbackProgress;
+  const coverOpacity = coverOpacityProp ?? fallbackCoverOpacity;
+  const [materialActive, setMaterialActive] = useState(false);
+  const materialActiveRef = useRef(false);
   const generationRef = useRef(0);
   const onCloseSettledRef = useRef(onCloseSettled);
+  const onMaterialActiveChangeRef = useRef(onMaterialActiveChange);
+  const isOpenRef = useRef(isOpen);
+  const materialAllowedRef = useRef(materialAllowed);
   onCloseSettledRef.current = onCloseSettled;
+  onMaterialActiveChangeRef.current = onMaterialActiveChange;
+  isOpenRef.current = isOpen;
+  materialAllowedRef.current = materialAllowed;
+  materialActiveRef.current = materialActive;
+
+  const activateMaterial = useCallback((generation: number) => {
+    if (generation !== generationRef.current) return;
+    if (!isOpenRef.current || !materialAllowedRef.current) return;
+    setMaterialActive(true);
+  }, []);
 
   const finishClose = useCallback((generation: number) => {
     if (generation !== generationRef.current) return;
     onCloseSettledRef.current?.();
   }, []);
 
-  useEffect(() => {
+  usePourMotionEffect(() => {
     const generation = ++generationRef.current;
+    coverOpacity.value = 1;
+    setMaterialActive(false);
 
     if (isOpen) {
       const appearTimer = setTimeout(() => {
         if (generation !== generationRef.current) return;
-        progress.value = withSpring(1, FAB_POUR_OPEN_SPRING);
+        progress.value = withSpring(1, FAB_POUR_OPEN_SPRING, (finished) => {
+          if (!finished) return;
+          runOnJS(activateMaterial)(generation);
+        });
       }, openDelayMs);
       return () => {
         clearTimeout(appearTimer);
       };
     }
 
-    const retractTimer = setTimeout(() => {
-      if (generation !== generationRef.current) return;
-      progress.value = withTiming(0, { duration: FAB_POUR_CLOSE_MS }, (finished) => {
-        if (!finished) return;
-        runOnJS(finishClose)(generation);
-      });
-    }, closeDelayMs);
+    let retractTimer: ReturnType<typeof setTimeout> | null = null;
+    let materialCommitFrame = 0;
+    const beginRetraction = () => {
+      retractTimer = setTimeout(() => {
+        if (generation !== generationRef.current) return;
+        progress.value = withTiming(0, { duration: FAB_POUR_CLOSE_MS }, (finished) => {
+          if (!finished) return;
+          runOnJS(finishClose)(generation);
+        });
+      }, closeDelayMs);
+    };
+
+    if (materialActiveRef.current) {
+      // `isOpen` already rendered false, so the fixed GlassView is gone. Wait
+      // one committed frame with graphite restored before moving the traveler.
+      materialCommitFrame = requestAnimationFrame(beginRetraction);
+    } else {
+      beginRetraction();
+    }
 
     return () => {
-      clearTimeout(retractTimer);
+      if (retractTimer) clearTimeout(retractTimer);
+      if (materialCommitFrame) cancelAnimationFrame(materialCommitFrame);
     };
   }, [
     closeDelayMs,
+    coverOpacity,
     finishClose,
     isOpen,
     openDelayMs,
     progress,
+    activateMaterial,
   ]);
 
-  return progress;
+  useEffect(() => {
+    if (!isOpen || !materialAllowed) {
+      coverOpacity.value = 1;
+      setMaterialActive(false);
+      return;
+    }
+
+    // If the startup motion gate clears after this spring has already landed,
+    // promote the fixed endpoint without replaying the pour.
+    if (progress.value >= 0.999) setMaterialActive(true);
+  }, [coverOpacity, isOpen, materialAllowed, progress]);
+
+  usePourMotionEffect(() => {
+    onMaterialActiveChangeRef.current?.(
+      isOpen && materialAllowed && materialActive,
+    );
+  }, [isOpen, materialActive, materialAllowed]);
+
+  useEffect(() => {
+    if (!isOpen || !materialAllowed || !materialActive) return;
+
+    // Two committed paints guarantee the fixed sibling (and, for the model
+    // panel, its parent state handoff) exists before graphite starts yielding.
+    let fadeFrame = 0;
+    const commitFrame = requestAnimationFrame(() => {
+      fadeFrame = requestAnimationFrame(() => {
+        coverOpacity.value = withTiming(0, {
+          duration: FAB_MATERIAL_CROSSFADE_MS,
+        });
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(commitFrame);
+      if (fadeFrame) cancelAnimationFrame(fadeFrame);
+    };
+  }, [coverOpacity, isOpen, materialActive, materialAllowed]);
+
+  const coverStyle = useAnimatedStyle(() => ({
+    opacity: coverOpacity.value,
+  }));
+
+  return { progress, materialActive, coverStyle };
 }
 
 function FabGlyph({
@@ -248,13 +356,17 @@ function FabGlyph({
   const glyphStyle = useAnimatedStyle(() => ({
     opacity: interpolate(
       progress.value,
-      [0, GLYPH_FADE_START, 1],
+      [0, FAB_POUR_GLYPH_REVEAL_END, 1],
       [0, 1, 1],
       Extrapolation.CLAMP,
     ),
     transform: [
       {
-        translateY: interpolate(progress.value, [0, 1], [GLYPH_SETTLE_Y, 0]),
+        translateY: interpolate(
+          progress.value,
+          [0, 1],
+          [FAB_POUR_GLYPH_SETTLE_Y, 0],
+        ),
       },
     ],
   }));
@@ -287,11 +399,13 @@ function DesktopFilterPill({
   progress?: SharedValue<number>;
 }) {
   const { theme } = useThemeContext();
-  const progress = usePourMotion({
+  const materialMotionSafe = useAdaptiveMaterialMotionSafe();
+  const { progress, materialActive, coverStyle } = usePourMotion({
     isOpen,
     openDelayMs: index * OPEN_STAGGER_MS,
     closeDelayMs: Math.max(0, itemCount - index - 1) * CLOSE_STAGGER_MS,
     progress: progressProp,
+    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
   });
 
   const travelStyle = useAnimatedStyle(() => ({
@@ -308,6 +422,14 @@ function DesktopFilterPill({
 
   return (
     <View style={styles.desktopFilterHit}>
+      <AdaptiveMaterial
+        active={isOpen && materialActive}
+        borderRadius={18}
+        tone="regular"
+        fallbackColor={gooeyFill(theme.scheme)}
+        liquidGlassOnly
+        respectMotionGate
+      />
       <Animated.View style={[styles.desktopFilterHit, travelStyle]}>
         <Pressable
           accessibilityRole="button"
@@ -323,7 +445,9 @@ function DesktopFilterPill({
               styles.providerDockPill,
               styles.fabSurface,
               {
-                backgroundColor: gooeyFill(theme.scheme),
+                backgroundColor: Platform.OS === 'ios'
+                  ? 'transparent'
+                  : gooeyFill(theme.scheme),
                 borderColor: active
                   ? theme.colors.thinking + '80'
                   : g.borderLight,
@@ -332,6 +456,16 @@ function DesktopFilterPill({
               },
             ]}
           >
+            {Platform.OS === 'ios' ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.graphiteCover,
+                  { borderRadius: 18, backgroundColor: gooeyFill(theme.scheme) },
+                  coverStyle,
+                ]}
+              />
+            ) : null}
             <FabGlyph progress={progress}>{children}</FabGlyph>
           </View>
         </Pressable>
@@ -371,12 +505,14 @@ function AccordionPill({
   progress?: SharedValue<number>;
 }) {
   const { theme } = useThemeContext();
-  const progress = usePourMotion({
+  const materialMotionSafe = useAdaptiveMaterialMotionSafe();
+  const { progress, materialActive, coverStyle } = usePourMotion({
     isOpen,
     openDelayMs: index * OPEN_STAGGER_MS,
     closeDelayMs: Math.max(0, maxIndex - index) * CLOSE_STAGGER_MS,
     onCloseSettled,
     progress: progressProp,
+    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
   });
 
   const travelStyle = useAnimatedStyle(() => ({
@@ -401,6 +537,14 @@ function AccordionPill({
       ]}
     >
       {sideContent}
+      <AdaptiveMaterial
+        active={isOpen && materialActive}
+        borderRadius={18}
+        tone="regular"
+        fallbackColor={gooeyFill(theme.scheme)}
+        liquidGlassOnly
+        respectMotionGate
+      />
       <Animated.View pointerEvents="box-none" style={[styles.pillTraveler, travelStyle]}>
         <Pressable
           accessibilityRole="button"
@@ -415,11 +559,23 @@ function AccordionPill({
             style={[
               styles.pillFace,
               {
-                backgroundColor: gooeyFill(theme.scheme),
+                backgroundColor: Platform.OS === 'ios'
+                  ? 'transparent'
+                  : gooeyFill(theme.scheme),
                 borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
               },
             ]}
           >
+            {Platform.OS === 'ios' ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.graphiteCover,
+                  { borderRadius: 18, backgroundColor: gooeyFill(theme.scheme) },
+                  coverStyle,
+                ]}
+              />
+            ) : null}
             <FabGlyph progress={progress}>{children}</FabGlyph>
           </View>
         </Pressable>
@@ -452,11 +608,13 @@ function InlineActionPill({
   progress?: SharedValue<number>;
 }) {
   const { theme } = useThemeContext();
-  const progress = usePourMotion({
+  const materialMotionSafe = useAdaptiveMaterialMotionSafe();
+  const { progress, materialActive, coverStyle } = usePourMotion({
     isOpen,
     openDelayMs: index * OPEN_STAGGER_MS,
     closeDelayMs: Math.max(0, itemCount - index - 1) * closeStaggerMs,
     progress: progressProp,
+    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
   });
 
   const travelStyle = useAnimatedStyle(() => ({
@@ -479,6 +637,14 @@ function InlineActionPill({
         { width: size, height: size },
       ]}
     >
+      <AdaptiveMaterial
+        active={isOpen && materialActive}
+        borderRadius={size >= 56 ? 18 : 14}
+        tone="regular"
+        fallbackColor={gooeyFill(theme.scheme)}
+        liquidGlassOnly
+        respectMotionGate
+      />
       <Animated.View style={travelStyle}>
         <Pressable
           accessibilityRole="button"
@@ -497,11 +663,26 @@ function InlineActionPill({
                 width: size,
                 height: size,
                 borderRadius: size >= 56 ? 18 : 14,
-                backgroundColor: gooeyFill(theme.scheme),
+                backgroundColor: Platform.OS === 'ios'
+                  ? 'transparent'
+                  : gooeyFill(theme.scheme),
                 borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
               },
             ]}
           >
+            {Platform.OS === 'ios' ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.graphiteCover,
+                  {
+                    borderRadius: size >= 56 ? 18 : 14,
+                    backgroundColor: gooeyFill(theme.scheme),
+                  },
+                  coverStyle,
+                ]}
+              />
+            ) : null}
             <FabGlyph progress={progress}>{children}</FabGlyph>
           </View>
         </Pressable>
@@ -555,11 +736,14 @@ function ProviderDockPill({
 }) {
   const { theme } = useThemeContext();
   const animationIndex = Math.max(0, itemCount - index - 1);
-  const revealProgress = usePourMotion({
+  const { progress: revealProgress } = usePourMotion({
     isOpen,
     openDelayMs: animationIndex * OPEN_STAGGER_MS,
     closeDelayMs: index * CLOSE_STAGGER_MS,
     progress: progressProp,
+    // These pills live in a horizontally scrolling/reorderable rail, so there
+    // is no truly fixed native destination. Keep them graphite at all times.
+    materialAllowed: false,
   });
   const editProgress = useSharedValue(0);
   const reorderX = useSharedValue(0);
@@ -796,6 +980,9 @@ export function AccordionControls({
   onPickFile,
   onModelSelect,
   modelPickerOpen,
+  modelPopoverProgress,
+  modelPopoverCoverOpacity,
+  onModelPopoverMaterialActiveChange,
   providerFilters,
   selectedProviderFilter,
   onProviderFilterToggle,
@@ -811,6 +998,7 @@ export function AccordionControls({
 }: AccordionControlsProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
+  const materialMotionSafe = useAdaptiveMaterialMotionSafe();
   const pillProgresses = useGooeyProgresses();
   const providerProgresses = useGooeyProgresses();
   const attachProgresses = useGooeyProgresses();
@@ -1022,6 +1210,19 @@ export function AccordionControls({
     ? `${fabAccent}${THINKING_ICON_ALPHA.off}`
     : `${fabAccent}${THINKING_ICON_ALPHA[thinkingLevel]}`;
   const providerDockOpen = !modelManagedByHive && modelPickerOpen && isOpen;
+
+  // The large list begins on the nearest provider beat. Its fixed shell and
+  // content use the same spring/reveal language without waiting behind the
+  // complete provider cascade or growing from a disconnected dark seed.
+  usePourMotion({
+    isOpen: providerPourOpen,
+    openDelayMs: 0,
+    closeDelayMs: 0,
+    progress: modelPopoverProgress,
+    coverOpacity: modelPopoverCoverOpacity,
+    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
+    onMaterialActiveChange: onModelPopoverMaterialActiveChange,
+  });
 
   useEffect(() => {
     clearProviderPourSchedule();
@@ -1622,6 +1823,13 @@ const styles = StyleSheet.create({
   },
   fabSurface: {
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  graphiteCover: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
   },
   pillTraveler: {
     width: 56,

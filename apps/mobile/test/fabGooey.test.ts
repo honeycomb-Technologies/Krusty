@@ -48,12 +48,15 @@ Deno.test("Agent and secondary FAB branches share one stable Skia surface", asyn
       && accordion.includes("scrollEnabled={providerDockOpen && providerPourSettled && !providerDragging}")
       && accordion.includes("canReorder={enableProviderReorder && providerPourSettled}")
       && accordion.includes("providerDockMounted = useDeferredPresence(\n    providerDockOpen,")
-      && !accordion.includes("AdaptiveMaterial")
+      && accordion.includes("AdaptiveMaterial")
+      && accordion.includes("liquidGlassOnly")
+      && accordion.includes("styles.graphiteCover")
+      && accordion.includes("materialAllowed: false")
       && !accordion.includes("crystallizeOnSettle")
       && !accordion.includes("GlassMergeCluster")
       && !accordion.includes("<GlassContainer")
       && !accordion.includes("from \"expo-glass-effect\""),
-    "main, provider, and attachment controls must share one aligned Skia pour surface",
+    "main, provider, and attachment controls must keep one aligned graphite/Skia traveler",
   );
   assert(
     composer.includes("agent={")
@@ -74,9 +77,13 @@ Deno.test("Agent and secondary FAB branches share one stable Skia surface", asyn
     accordionPill.includes("<FabGlyph progress={progress}>")
       && accordionPill.includes("pillTravelY(index)")
       && accordionPill.includes("backgroundColor: gooeyFill(theme.scheme)")
-      && !accordionPill.includes("AdaptiveMaterial")
+      && accordionPill.includes("<AdaptiveMaterial")
+      && accordionPill.indexOf("<AdaptiveMaterial") <
+        accordionPill.indexOf("<Animated.View pointerEvents=\"box-none\"")
+      && accordionPill.includes("styles.graphiteCover")
+      && accordionPill.includes("active={isOpen && materialActive}")
       && !accordionPill.includes("DROPLET_STRETCH"),
-    "the complete FAB tile must travel on the same surface without a material swap",
+    "the complete FAB tile must travel as graphite while fixed glass waits behind its endpoint",
   );
   assert(
     policy.includes("export const FAB_GOOEY_ENABLED = true")
@@ -131,4 +138,30 @@ Deno.test("horizontal FAB branches collapse into their trigger", () => {
       `branch pill ${index} must settle one step farther left`,
     );
   }
+});
+
+Deno.test("native wide windows keep touch layout and the full model panel pours", async () => {
+  const breakpoint = await Deno.readTextFile(
+    new URL("../hooks/useBreakpoint.ts", import.meta.url),
+  );
+  const composer = await Deno.readTextFile(
+    new URL("../components/chat/ChatBar.tsx", import.meta.url),
+  );
+
+  assert(
+    breakpoint.includes("Platform.OS === 'web' && width >= DESKTOP_MIN")
+      && breakpoint.includes("width >= TABLET_MIN ? 'tablet'"),
+    "iOS and Android must keep the touch shell even at desktop-sized window widths",
+  );
+  assert(
+    composer.includes("const modelPopoverTravelDistance = isDesktop")
+      && composer.includes("modelPopoverTravelDistance + MODEL_POPOVER_HIDE_OVERSCAN")
+      && composer.includes("modelPopoverContentStyle")
+      && composer.includes("const providerBranchClosing = modelRailOpen")
+      && composer.includes("const attachmentBranchClosing = attachPickerOpen")
+      && composer.includes("providerBranchCloseDeadlineRef.current")
+      && composer.includes("attachmentBranchCloseDeadlineRef.current")
+      && composer.includes("const remainingBranchCloseMs = Math.max"),
+    "the full model panel must leave its trigger and every side branch must return before the vertical stack",
+  );
 });

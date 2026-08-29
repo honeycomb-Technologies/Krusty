@@ -1,9 +1,17 @@
 import { type ComponentProps, memo } from "react";
-import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  FlatList,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import Animated from "react-native-reanimated";
 import * as Haptics from "../../platform/haptics";
 import type { ModelInfo } from "@mitsuro/api";
 import { modelKeysEqual } from "@mitsuro/state";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 
 const PILL = 56;
 const RADIUS = 18;
@@ -19,17 +27,20 @@ const MODEL_POPOVER_Z_INDEX = 45;
 
 export interface ChatBarModelPopoverProps {
   isDesktop: boolean;
+  interactive: boolean;
   modelPopoverWidth?: number;
   desktopModelListBottom: number;
   modelPopoverHeight: number;
   dockRightInset: number;
   overlayBottom: number;
   modelPopoverStyle: ComponentProps<typeof Animated.View>["style"];
+  modelPopoverContentStyle: ComponentProps<typeof Animated.View>["style"];
+  modelPopoverCoverStyle: ComponentProps<typeof Animated.View>["style"];
+  materialActive: boolean;
   borderColor: string;
   foreground: string;
   mutedForeground: string;
   thinking: string;
-  backgroundElevated: string;
   backgroundPressed: string;
   surfaceColor: string;
   filteredModels: ModelInfo[];
@@ -55,17 +66,20 @@ function isSelectedModel(item: ModelInfo, selected: ModelInfo | null): boolean {
 
 function ChatBarModelPopoverComponent({
   isDesktop,
+  interactive,
   modelPopoverWidth,
   desktopModelListBottom,
   modelPopoverHeight,
   dockRightInset,
   overlayBottom,
   modelPopoverStyle,
+  modelPopoverContentStyle,
+  modelPopoverCoverStyle,
+  materialActive,
   borderColor,
   foreground,
   mutedForeground,
   thinking,
-  backgroundElevated,
   backgroundPressed,
   surfaceColor,
   filteredModels,
@@ -76,6 +90,7 @@ function ChatBarModelPopoverComponent({
 
   return (
     <View
+      pointerEvents={interactive ? "box-none" : "none"}
       style={isDesktop && modelPopoverWidth != null
         ? {
           position: "absolute" as const,
@@ -97,61 +112,88 @@ function ChatBarModelPopoverComponent({
           },
         ]}
     >
+      <AdaptiveMaterial
+        active={materialActive}
+        borderRadius={RADIUS}
+        tone="elevated"
+        fallbackColor={surfaceColor}
+        liquidGlassOnly
+        respectMotionGate
+      />
       <Animated.View
         style={[
           styles.modelPopover,
           modelPopoverStyle,
-          { borderColor, backgroundColor: surfaceColor },
+          {
+            borderColor,
+            backgroundColor: Platform.OS === "ios" ? "transparent" : surfaceColor,
+          },
         ]}
       >
-        <FlatList
-          data={filteredModels}
-          keyExtractor={modelRowKey}
-          style={styles.modelList}
-          contentContainerStyle={styles.modelListContent}
-          extraData={selectedModel}
-          nestedScrollEnabled
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="none"
-          showsVerticalScrollIndicator={false}
-          renderItem={({ item }: { item: ModelInfo }) => {
-            const selected = isSelectedModel(item, selectedModel);
-            return (
-              <Pressable
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  onSelectModel(item);
-                }}
-                style={({ pressed }) => [
-                  styles.modelItem,
-                  selected && { backgroundColor: backgroundElevated },
-                  pressed && { backgroundColor: backgroundPressed },
-                ]}
-              >
-                <View style={styles.modelRow}>
-                  <View style={styles.modelInfo}>
-                    <Text
-                      style={[styles.modelName, { color: foreground }]}
-                      numberOfLines={1}
-                    >
-                      {item.display_name}
-                    </Text>
-                    <Text
-                      style={[styles.modelMeta, { color: mutedForeground }]}
-                    >
-                      {item.provider}
-                    </Text>
+        {Platform.OS === "ios" ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              StyleSheet.absoluteFill,
+              { borderRadius: RADIUS, backgroundColor: surfaceColor },
+              modelPopoverCoverStyle,
+            ]}
+          />
+        ) : null}
+        <Animated.View
+          style={[{ height: modelPopoverHeight }, modelPopoverContentStyle]}
+        >
+          <FlatList
+            data={filteredModels}
+            keyExtractor={modelRowKey}
+            style={styles.modelList}
+            contentContainerStyle={styles.modelListContent}
+            extraData={selectedModel}
+            nestedScrollEnabled
+            removeClippedSubviews={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="none"
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item }: { item: ModelInfo }) => {
+              const selected = isSelectedModel(item, selectedModel);
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    onSelectModel(item);
+                  }}
+                  style={({ pressed }) => [
+                    styles.modelItem,
+                    pressed && { backgroundColor: backgroundPressed },
+                  ]}
+                >
+                  <View style={styles.modelRow}>
+                    <View style={styles.modelInfo}>
+                      <Text
+                        style={[styles.modelName, { color: foreground }]}
+                        numberOfLines={1}
+                      >
+                        {item.display_name}
+                      </Text>
+                      <Text
+                        style={[styles.modelMeta, { color: mutedForeground }]}
+                      >
+                        {item.provider}
+                      </Text>
+                    </View>
+                    {selected && (
+                      <Text style={[styles.modelCheck, { color: thinking }]}>
+                        ✓
+                      </Text>
+                    )}
                   </View>
-                  {selected && (
-                    <Text style={[styles.modelCheck, { color: thinking }]}>
-                      ✓
-                    </Text>
-                  )}
-                </View>
-              </Pressable>
-            );
-          }}
-        />
+                </Pressable>
+              );
+            }}
+          />
+        </Animated.View>
       </Animated.View>
     </View>
   );
@@ -179,9 +221,6 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    // CSS-form shadow: shadow* props are clipped by overflow:'hidden' on iOS,
-    // RN's native boxShadow is not.
-    boxShadow: "0 10px 20px rgba(0,0,0,0.28)",
   },
   modelList: {
     flex: 1,

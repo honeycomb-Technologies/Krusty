@@ -4,7 +4,15 @@ import {
   isGlassEffectAPIAvailable,
   isLiquidGlassAvailable,
 } from "expo-glass-effect";
-import { type ComponentType, memo, useEffect, useState } from "react";
+import {
+  type ComponentType,
+  createContext,
+  memo,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import {
   Platform,
   type StyleProp,
@@ -38,6 +46,26 @@ const NativeGlassView = GlassView as ComponentType<
 
 export type { AdaptiveMaterialTone } from "./adaptiveMaterialPolicy";
 
+const AdaptiveMaterialMotionSafeContext = createContext(true);
+
+export function AdaptiveMaterialMotionGate({
+  safe,
+  children,
+}: {
+  safe: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <AdaptiveMaterialMotionSafeContext.Provider value={safe}>
+      {children}
+    </AdaptiveMaterialMotionSafeContext.Provider>
+  );
+}
+
+export function useAdaptiveMaterialMotionSafe(): boolean {
+  return useContext(AdaptiveMaterialMotionSafeContext);
+}
+
 interface AdaptiveMaterialProps {
   style?: StyleProp<ViewStyle>;
   tone?: AdaptiveMaterialTone;
@@ -52,6 +80,13 @@ interface AdaptiveMaterialProps {
   active?: boolean;
   /** iOS 26 press/glint. FABs only — do not put this on large chrome. */
   interactive?: boolean;
+  /**
+   * Use native Liquid Glass when it is available, but preserve the supplied
+   * solid fallback everywhere else. This keeps Android and web pixel-stable.
+   */
+  liquidGlassOnly?: boolean;
+  /** Opt in when this endpoint can inherit a bounded ancestor transform. */
+  respectMotionGate?: boolean;
 }
 
 /**
@@ -69,9 +104,12 @@ function AdaptiveMaterialComponent({
   testID,
   active = true,
   interactive = false,
+  liquidGlassOnly = false,
+  respectMotionGate = false,
 }: AdaptiveMaterialProps) {
   const { theme } = useThemeContext();
   const reduceTransparency = useReduceTransparency();
+  const motionSafe = useAdaptiveMaterialMotionSafe();
   const [webBlurReady, setWebBlurReady] = useState(platform !== "web");
   const t = theme.colors;
   const materialMode = resolveAdaptiveMaterialMode({
@@ -80,6 +118,16 @@ function AdaptiveMaterialComponent({
     glassApiAvailable,
     liquidGlassAvailable,
   });
+  // A native GlassView must never be sampled through an actively transformed
+  // ancestor. During those bounded transitions, keep an identical solid
+  // endpoint in its place; the gate promotes it only after transforms leave.
+  const glassMotionSafe = !respectMotionGate || motionSafe;
+  const resolvedMaterialMode =
+    materialMode === "liquid-glass" && glassMotionSafe
+      ? materialMode
+      : liquidGlassOnly || materialMode === "liquid-glass"
+      ? "solid"
+      : materialMode;
   const materialSurfaces = {
     glassBackground: t.glass.background,
     glassBackgroundElevated: t.glass.backgroundElevated,
@@ -92,7 +140,7 @@ function AdaptiveMaterialComponent({
       theme.colors.glassBlurIntense,
     );
   const overlayColor = resolveAdaptiveMaterialOverlayColor(
-    materialMode,
+    resolvedMaterialMode,
     tone,
     materialSurfaces,
   );
@@ -130,7 +178,7 @@ function AdaptiveMaterialComponent({
 
   if (!active) return null;
 
-  if (materialMode === "liquid-glass") {
+  if (resolvedMaterialMode === "liquid-glass") {
     // The GlassView is the surface. Never stack a scrim over the native
     // effect; the tone tint is the only readability layer it needs.
     return (
@@ -146,7 +194,7 @@ function AdaptiveMaterialComponent({
     );
   }
 
-  if (materialMode === "blur") {
+  if (resolvedMaterialMode === "blur") {
     return (
       <View testID={testID} style={materialStyle}>
         <BlurView
