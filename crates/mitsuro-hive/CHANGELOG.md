@@ -1,5 +1,15 @@
 # mitsuro-hive
 
+## 0.2.0 — 2026-08-29
+
+### Added
+
+- [bb513109](https://github.com/honeycomb-Technologies/Mitsuro/commit/bb51310970cdd409e4ec6c789dfeea3834ddeabd) Adds governed Hive Worker Introductions and Workflow Goals, and strengthens DM, Workbench, and Roundtable collaboration through Honey's versioned Hive daemon protocol and mobile controls. — Thanks @BurgessTG!
+
+### Patch changes
+
+- Updated dependencies: mitsuro-core@0.10.0, mitsuro-hive-protocol@0.2.0, mitsuro-server@0.10.0
+
 ## 0.1.1 — 2026-08-17
 
 ### Added
