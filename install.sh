@@ -843,6 +843,139 @@ managed_systemd_marker_valid() {
         grep -Fqx "managed by $CURRENT_LINK" "$SYSTEMD_MARKER"
 }
 
+file_uid() {
+    uid_path=$1
+    if uid_value=$(stat -c '%u' "$uid_path" 2>/dev/null); then
+        printf '%s\n' "$uid_value"
+    else
+        stat -f '%u' "$uid_path" 2>/dev/null
+    fi
+}
+
+file_gid() {
+    gid_path=$1
+    if gid_value=$(stat -c '%g' "$gid_path" 2>/dev/null); then
+        printf '%s\n' "$gid_value"
+    else
+        stat -f '%g' "$gid_path" 2>/dev/null
+    fi
+}
+
+file_nlink() {
+    nlink_path=$1
+    if nlink_value=$(stat -c '%h' "$nlink_path" 2>/dev/null); then
+        printf '%s\n' "$nlink_value"
+    else
+        stat -f '%l' "$nlink_path" 2>/dev/null
+    fi
+}
+
+regular_current_user_file() {
+    current_user_path=$1
+    current_user_mode=$2
+    regular_file_with_mode "$current_user_path" "$current_user_mode" && \
+        [ "$(file_uid "$current_user_path")" = "$(id -u)" ] && \
+        [ "$(file_gid "$current_user_path")" = "$(id -g)" ] && \
+        [ "$(file_nlink "$current_user_path")" = 1 ]
+}
+
+exact_unit_line_count() {
+    exact_unit_path=$1
+    exact_unit_line=$2
+    grep -F -x "$exact_unit_line" "$exact_unit_path" 2>/dev/null | \
+        wc -l | tr -d '[:space:]'
+}
+
+normalize_adoptable_serve_unit() {
+    adoptable_unit_input=$1
+    adoptable_unit_output=$2
+    adoptable_unit_kind=$3
+    : > "$adoptable_unit_output" || return 1
+    while IFS= read -r adoptable_unit_line || [ -n "$adoptable_unit_line" ]; do
+        if [ "$adoptable_unit_line" = \
+            "ExecStart=$INSTALL_DIR/.mitsuro-current/$BINARY serve --port 3000" ] || \
+            [ "$adoptable_unit_line" = \
+            "ExecStart=%h/.local/bin/.mitsuro-current/$BINARY serve --port 3000" ]; then
+            printf '%s\n' 'ExecStart=@mitsuro-current@/mitsuro serve --port 3000'
+        elif [ "$adoptable_unit_kind" = candidate ] && \
+            [ "$adoptable_unit_line" = \
+            'Environment=MITSURO_AGENT_BROWSER_PATH=%h/.local/bin/.mitsuro-current/agent-browser' ]; then
+            # The Atlas sidecar path was added after the first canonical user
+            # unit was installed. Only the candidate may drop this one line
+            # for the predecessor comparison.
+            :
+        else
+            printf '%s\n' "$adoptable_unit_line"
+        fi
+    done < "$adoptable_unit_input" > "$adoptable_unit_output"
+}
+
+legacy_serve_unit_matches_candidate() {
+    legacy_serve_existing=$1
+    legacy_serve_candidate=$2
+    [ "$INSTALL_DIR" = "$DEFAULT_INSTALL_DIR" ] || return 1
+    legacy_absolute_exec="ExecStart=$INSTALL_DIR/.mitsuro-current/$BINARY serve --port 3000"
+    legacy_home_exec="ExecStart=%h/.local/bin/.mitsuro-current/$BINARY serve --port 3000"
+    candidate_atlas='Environment=MITSURO_AGENT_BROWSER_PATH=%h/.local/bin/.mitsuro-current/agent-browser'
+    legacy_exec_count=$((
+        $(exact_unit_line_count "$legacy_serve_existing" "$legacy_absolute_exec") +
+        $(exact_unit_line_count "$legacy_serve_existing" "$legacy_home_exec")
+    ))
+    [ "$legacy_exec_count" = 1 ] || return 1
+    [ "$(exact_unit_line_count "$legacy_serve_existing" "$candidate_atlas")" = 0 ] || return 1
+    [ "$(exact_unit_line_count "$legacy_serve_candidate" "$legacy_home_exec")" = 1 ] || return 1
+    [ "$(exact_unit_line_count "$legacy_serve_candidate" "$candidate_atlas")" = 1 ] || return 1
+    legacy_serve_existing_normalized="$ACTIVATION_BACKUP/adopt-existing-serve"
+    legacy_serve_candidate_normalized="$ACTIVATION_BACKUP/adopt-candidate-serve"
+    normalize_adoptable_serve_unit \
+        "$legacy_serve_existing" "$legacy_serve_existing_normalized" existing || return 1
+    normalize_adoptable_serve_unit \
+        "$legacy_serve_candidate" "$legacy_serve_candidate_normalized" candidate || return 1
+    cmp -s "$legacy_serve_existing_normalized" "$legacy_serve_candidate_normalized"
+}
+
+unmarked_canonical_units_adoptable() {
+    [ -n "$PREVIOUS_TARGET" ] || return 1
+    [ "$INSTALL_DIR" = "$DEFAULT_INSTALL_DIR" ] || return 1
+    [ ! -e "$SYSTEMD_MARKER" ] && [ ! -L "$SYSTEMD_MARKER" ] || return 1
+    for adoptable_unit in $SYSTEMD_UNITS; do
+        adoptable_existing="$SYSTEMD_USER_DIR/$adoptable_unit"
+        adoptable_candidate="$RELEASE_DIR/systemd/$adoptable_unit"
+        regular_current_user_file "$adoptable_existing" 644 || return 1
+        regular_file_with_mode "$adoptable_candidate" 444 || return 1
+        if cmp -s "$adoptable_existing" "$adoptable_candidate"; then
+            continue
+        fi
+        [ "$adoptable_unit" = mitsuro-serve.service ] || return 1
+        legacy_serve_unit_matches_candidate \
+            "$adoptable_existing" "$adoptable_candidate" || return 1
+    done
+}
+
+canonical_unit_unchanged_since_snapshot() {
+    unchanged_unit=$1
+    case "$unchanged_unit" in
+        mitsuro-hive.socket) unchanged_key=hive-socket ;;
+        mitsuro-hive.service) unchanged_key=hive-service ;;
+        mitsuro-serve.service) unchanged_key=serve-service ;;
+        *) return 1 ;;
+    esac
+    unchanged_path="$SYSTEMD_USER_DIR/$unchanged_unit"
+    regular_current_user_file "$unchanged_path" 644 && \
+        [ "$(sed -n '1p' "$ACTIVATION_BACKUP/$unchanged_key.state")" = file ] && \
+        cmp -s "$unchanged_path" "$ACTIVATION_BACKUP/$unchanged_key.file"
+}
+
+canonical_regular_systemd_unit_present() {
+    for canonical_regular_unit in $SYSTEMD_UNITS; do
+        if [ -f "$SYSTEMD_USER_DIR/$canonical_regular_unit" ] && \
+            [ ! -L "$SYSTEMD_USER_DIR/$canonical_regular_unit" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 previous_managed_unit_target() {
     previous_managed_unit=$1
     [ -n "$PREVIOUS_TARGET" ] || return 1
@@ -2069,6 +2202,7 @@ activate_unix_release() {
     SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
     SYSTEMD_MARKER="$INSTALL_DIR/.mitsuro-systemd-managed"
     MIGRATING_LEGACY=false
+    ADOPTING_CANONICAL_SYSTEMD_UNITS=false
     LEGACY_HAS_SYSTEMD_DIR=false
     SYSTEMD_TRANSITION_STARTED=false
 
@@ -2156,6 +2290,14 @@ activate_unix_release() {
     if [ -z "$PREVIOUS_TARGET" ]; then
         MIGRATING_LEGACY=true
         create_legacy_release "$MANAGE_SYSTEMD" || { fail_activation "legacy release capture failed"; return 1; }
+    elif [ "$MANAGE_SYSTEMD" = true ] && \
+        [ ! -e "$SYSTEMD_MARKER" ] && [ ! -L "$SYSTEMD_MARKER" ] && \
+        canonical_regular_systemd_unit_present; then
+        if ! unmarked_canonical_units_adoptable; then
+            fail_activation "unmarked canonical systemd unit ownership could not be proven"
+            return 1
+        fi
+        ADOPTING_CANONICAL_SYSTEMD_UNITS=true
     fi
 
     install_managed_link ".mitsuro-current/$BINARY" "$INSTALL_DIR/$BINARY" "$MIGRATING_LEGACY" || \
@@ -2200,8 +2342,16 @@ activate_unix_release() {
         for managed_unit in $SYSTEMD_UNITS; do
             previous_unit_target=""
             previous_unit_target=$(previous_managed_unit_target "$managed_unit") || previous_unit_target=""
+            allow_regular_managed_unit=$MIGRATING_LEGACY
+            if [ "$ADOPTING_CANONICAL_SYSTEMD_UNITS" = true ]; then
+                [ ! -e "$SYSTEMD_MARKER" ] && [ ! -L "$SYSTEMD_MARKER" ] || \
+                    { fail_activation "systemd marker changed during canonical unit adoption"; return 1; }
+                canonical_unit_unchanged_since_snapshot "$managed_unit" || \
+                    { fail_activation "$managed_unit changed during canonical unit adoption"; return 1; }
+                allow_regular_managed_unit=true
+            fi
             install_managed_link "$CURRENT_LINK/systemd/$managed_unit" "$SYSTEMD_USER_DIR/$managed_unit" \
-                "$MIGRATING_LEGACY" "$previous_unit_target" || \
+                "$allow_regular_managed_unit" "$previous_unit_target" || \
                 { fail_activation "$managed_unit link publication failed"; return 1; }
             activation_checkpoint "after-$managed_unit-link" || \
                 { fail_activation "fixture after $managed_unit link"; return 1; }
@@ -2779,7 +2929,21 @@ run_self_test() (
                 "$DAEMON_BINARY" > "$self_payload/$COMPAT_DAEMON_BINARY"
             chmod 0755 "$self_payload/$COMPAT_DAEMON_BINARY"
             for self_unit in $SYSTEMD_UNITS; do
-                printf '# fixture %s %s\n' "$self_unit" "$self_value" > "$self_payload/systemd/$self_unit"
+                if [ "$self_unit" = mitsuro-serve.service ]; then
+                    cat > "$self_payload/systemd/$self_unit" <<EOF
+[Unit]
+Description=Mitsuro server fixture $self_value
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/.mitsuro-current/mitsuro serve --port 3000
+Environment=RUST_LOG=info
+Environment=MITSURO_AGENT_BROWSER_PATH=%h/.local/bin/.mitsuro-current/agent-browser
+EOF
+                else
+                    printf '# fixture %s %s\n' "$self_unit" "$self_value" > "$self_payload/systemd/$self_unit"
+                fi
             done
         fi
     }
@@ -3103,6 +3267,95 @@ run_self_test() (
         fi
     done
     [ "$serve_only_legacy" = true ]
+
+    # Canonical installs created before the ownership marker shipped left the
+    # exact Mitsuro unit set as regular files beside an already-managed release
+    # pointer. Adopt only that complete, known set. The historical serve unit
+    # may use an expanded home path and predate the Atlas sidecar environment.
+    rm -f "$INSTALL_DIR/.mitsuro-systemd-managed"
+    for adopt_fixture_unit in $SYSTEMD_UNITS; do
+        rm -f "$SYSTEMD_USER_DIR/$adopt_fixture_unit"
+        if [ "$adopt_fixture_unit" = mitsuro-serve.service ]; then
+            sed \
+                -e "s|^ExecStart=%h/.local/bin/.mitsuro-current/mitsuro|ExecStart=$INSTALL_DIR/.mitsuro-current/mitsuro|" \
+                -e '/^Environment=MITSURO_AGENT_BROWSER_PATH=%h\/\.local\/bin\/\.mitsuro-current\/agent-browser$/d' \
+                "$v1_release_dir/systemd/$adopt_fixture_unit" > \
+                "$SYSTEMD_USER_DIR/$adopt_fixture_unit"
+        else
+            cp "$v1_release_dir/systemd/$adopt_fixture_unit" \
+                "$SYSTEMD_USER_DIR/$adopt_fixture_unit"
+        fi
+        chmod 0644 "$SYSTEMD_USER_DIR/$adopt_fixture_unit"
+        cp "$SYSTEMD_USER_DIR/$adopt_fixture_unit" \
+            "$self_root/adopt-$adopt_fixture_unit.expected"
+    done
+    SELF_TEST_FAIL_POINT=after-mitsuro-hive.socket-link
+    reset_self_systemd
+    if activate_unix_release; then
+        fail "Self-test expected canonical unit adoption rollback."
+        exit 1
+    fi
+    SELF_TEST_FAIL_POINT=""
+    [ -z "$SELF_LOG" ]
+    [ ! -e "$INSTALL_DIR/.mitsuro-systemd-managed" ] && \
+        [ ! -L "$INSTALL_DIR/.mitsuro-systemd-managed" ]
+    for rolled_back_adopt_unit in $SYSTEMD_UNITS; do
+        [ -f "$SYSTEMD_USER_DIR/$rolled_back_adopt_unit" ] && \
+            [ ! -L "$SYSTEMD_USER_DIR/$rolled_back_adopt_unit" ]
+        cmp -s "$self_root/adopt-$rolled_back_adopt_unit.expected" \
+            "$SYSTEMD_USER_DIR/$rolled_back_adopt_unit"
+    done
+    [ "$(readlink "$INSTALL_DIR/.mitsuro-current")" = ".mitsuro-releases/$v1_release_id" ]
+    assert_no_activation_residue
+
+    reset_self_systemd
+    activate_unix_release
+    for adopted_fixture_unit in $SYSTEMD_UNITS; do
+        [ "$(readlink "$SYSTEMD_USER_DIR/$adopted_fixture_unit")" = \
+            "$INSTALL_DIR/.mitsuro-current/systemd/$adopted_fixture_unit" ]
+        rm -f "$self_root/adopt-$adopted_fixture_unit.expected"
+    done
+    regular_file_with_mode "$INSTALL_DIR/.mitsuro-systemd-managed" 600
+    assert_no_activation_residue
+
+    # A locally changed unit is not installer-owned. Refuse it before any
+    # systemd transition and restore the complete byte-for-byte snapshot.
+    rm -f "$INSTALL_DIR/.mitsuro-systemd-managed"
+    for rejected_fixture_unit in $SYSTEMD_UNITS; do
+        rm -f "$SYSTEMD_USER_DIR/$rejected_fixture_unit"
+        cp "$v1_release_dir/systemd/$rejected_fixture_unit" \
+            "$SYSTEMD_USER_DIR/$rejected_fixture_unit"
+        chmod 0644 "$SYSTEMD_USER_DIR/$rejected_fixture_unit"
+    done
+    printf '%s\n' '# local customization' >> \
+        "$SYSTEMD_USER_DIR/mitsuro-hive.service"
+    cp "$SYSTEMD_USER_DIR/mitsuro-hive.service" \
+        "$self_root/rejected-canonical-unit.expected"
+    reset_self_systemd
+    if activate_unix_release; then
+        fail "Self-test accepted a customized unmarked canonical unit."
+        exit 1
+    fi
+    [ -z "$SELF_LOG" ]
+    [ ! -e "$INSTALL_DIR/.mitsuro-systemd-managed" ] && \
+        [ ! -L "$INSTALL_DIR/.mitsuro-systemd-managed" ]
+    for rejected_fixture_unit in $SYSTEMD_UNITS; do
+        [ -f "$SYSTEMD_USER_DIR/$rejected_fixture_unit" ] && \
+            [ ! -L "$SYSTEMD_USER_DIR/$rejected_fixture_unit" ]
+    done
+    cmp -s "$self_root/rejected-canonical-unit.expected" \
+        "$SYSTEMD_USER_DIR/mitsuro-hive.service"
+    [ "$(readlink "$INSTALL_DIR/.mitsuro-current")" = ".mitsuro-releases/$v1_release_id" ]
+    assert_no_activation_residue
+    rm -f "$self_root/rejected-canonical-unit.expected"
+    for restored_fixture_unit in $SYSTEMD_UNITS; do
+        cp "$v1_release_dir/systemd/$restored_fixture_unit" \
+            "$SYSTEMD_USER_DIR/$restored_fixture_unit"
+        chmod 0644 "$SYSTEMD_USER_DIR/$restored_fixture_unit"
+    done
+    reset_self_systemd
+    activate_unix_release
+    assert_no_activation_residue
 
     # Older supervised installs linked units directly into the selected
     # immutable release. A valid ownership marker plus an exact match to the
