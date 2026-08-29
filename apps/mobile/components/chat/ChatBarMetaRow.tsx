@@ -39,53 +39,57 @@ function ChatBarMetaRowComponent({
       pointerEvents="none"
       style={[styles.metaRow, !isDesktop && styles.metaRowMobile]}
     >
-      <View style={styles.metaLeft}>
-        <View style={styles.gaugeRing}>
-          <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
-            <Circle
-              cx={GAUGE_SIZE / 2}
-              cy={GAUGE_SIZE / 2}
-              r={gaugeRadius}
-              stroke={`${mutedForeground}26`}
-              strokeWidth={gaugeStroke}
-              fill="none"
-            />
-            <Circle
-              cx={GAUGE_SIZE / 2}
-              cy={GAUGE_SIZE / 2}
-              r={gaugeRadius}
-              stroke={gaugeColor}
-              strokeWidth={gaugeStroke}
-              fill="none"
-              strokeDasharray={`${gaugeCircumference}`}
-              strokeDashoffset={gaugeOffset}
-              strokeLinecap="round"
-              rotation={-90}
-              origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
-            />
-          </Svg>
-          <Text style={[styles.gaugeLabel, { color: mutedForeground }]}>
-            {gaugeTokens >= 1000
-              ? `${(gaugeTokens / 1000).toFixed(0)}k`
-              : gaugeTokens}
-          </Text>
+      {isDesktop || workspaceContext ? (
+        <View style={styles.metaLeft}>
+          {isDesktop ? (
+            <View style={styles.gaugeRing}>
+              <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
+                <Circle
+                  cx={GAUGE_SIZE / 2}
+                  cy={GAUGE_SIZE / 2}
+                  r={gaugeRadius}
+                  stroke={`${mutedForeground}26`}
+                  strokeWidth={gaugeStroke}
+                  fill="none"
+                />
+                <Circle
+                  cx={GAUGE_SIZE / 2}
+                  cy={GAUGE_SIZE / 2}
+                  r={gaugeRadius}
+                  stroke={gaugeColor}
+                  strokeWidth={gaugeStroke}
+                  fill="none"
+                  strokeDasharray={`${gaugeCircumference}`}
+                  strokeDashoffset={gaugeOffset}
+                  strokeLinecap="round"
+                  rotation={-90}
+                  origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
+                />
+              </Svg>
+              <Text style={[styles.gaugeLabel, { color: mutedForeground }]}>
+                {gaugeTokens >= 1000
+                  ? `${(gaugeTokens / 1000).toFixed(0)}k`
+                  : gaugeTokens}
+              </Text>
+            </View>
+          ) : null}
+          {workspaceContext ? (
+            <View style={styles.metaWorkspace}>
+              {workspaceContext.hasBranch ? (
+                <GitBranch size={12} color={mutedForeground} strokeWidth={1.8} />
+              ) : (
+                <Folder size={12} color={mutedForeground} strokeWidth={1.8} />
+              )}
+              <Text
+                style={[styles.metaWorkspaceText, { color: mutedForeground }]}
+                numberOfLines={1}
+              >
+                {workspaceContext.label}
+              </Text>
+            </View>
+          ) : null}
         </View>
-        {workspaceContext ? (
-          <View style={styles.metaWorkspace}>
-            {workspaceContext.hasBranch ? (
-              <GitBranch size={12} color={mutedForeground} strokeWidth={1.8} />
-            ) : (
-              <Folder size={12} color={mutedForeground} strokeWidth={1.8} />
-            )}
-            <Text
-              style={[styles.metaWorkspaceText, { color: mutedForeground }]}
-              numberOfLines={1}
-            >
-              {workspaceContext.label}
-            </Text>
-          </View>
-        ) : null}
-      </View>
+      ) : null}
       <View style={styles.metaRight}>
         <Text
           style={[styles.metaModel, { color: mutedForeground }]}

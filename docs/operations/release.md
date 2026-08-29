@@ -20,9 +20,10 @@ bumps, changelogs, and `v{version}` tags. **Release binaries** is what
    fails, fix the cause and re-run **Release binaries** with the same tag.
 6. Honey: `sh scripts/honey-upgrade.sh v0.9.23` only after
    `sh scripts/release-status.sh` says the linux archive is present.
-7. TestFlight is separate. It starts when a GitHub Release is published, or
-   from **Mobile → TestFlight** `workflow_dispatch`. It is not a side effect
-   of bumping `app.json`.
+7. TestFlight is separate. After publication, verify that **Mobile →
+   TestFlight** actually started; a Release created with `GITHUB_TOKEN` cannot
+   recursively start it. If absent, dispatch the workflow at the exact
+   protected release tag. It is not a side effect of bumping `app.json`.
 
 ```bash
 sh scripts/promote-staging.sh

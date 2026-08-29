@@ -14,31 +14,41 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   const composer = await Deno.readTextFile(
     new URL("../components/chat/ChatBar.tsx", import.meta.url),
   );
+  const modelPopover = await Deno.readTextFile(
+    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
+  );
   const material = await Deno.readTextFile(
     new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
   );
   const header = await Deno.readTextFile(
     new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url),
   );
-  const modelPopover = await Deno.readTextFile(
-    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
-  );
 
   assert(
     !accordion.includes("style={styles.fabMaterialLayer}")
       && !composer.includes("style={styles.fabMaterialLayer}"),
-    "FABs must use the centralized AdaptiveMaterial compositor layer",
+    "FABs must not reintroduce an extra compositor layer",
   );
   assert(
-    !accordion.includes("g.backgroundElevated")
-      && accordion.match(/: 'transparent'/g)?.length === 4,
-    "every idle accordion FAB must expose the shared material instead of stacking a private tint",
+    accordion.includes("AdaptiveMaterial")
+      && !accordion.includes("theme.colors.thinking + '18'")
+      && accordion.includes("backgroundColor: nativeGlassActive")
+      && accordion.includes("Platform.OS === 'ios' && !nativeGlassActive")
+      && accordion.includes("nativeProviderGlassActive ? null : (")
+      && !accordion.includes("selected && { backgroundColor"),
+    "native glass must replace moving graphite while the complete legacy fallback stays available",
   );
   assert(
-    accordion.match(/tone="regular"/g)?.length === 4
-      && (accordion.match(/interactive/g)?.length ?? 0) >= 4
-      && composer.match(/tone="regular"/g)?.length === 2,
-    "composer and FAB controls must use one floating material tone",
+    (composer.match(/<AdaptiveMaterial/g)?.length ?? 0) === 2
+      && (composer.match(/backgroundColor: gooeyFill\(theme\.scheme\)/g)?.length ?? 0) >= 2
+      && modelPopover.includes("backgroundColor: surfaceColor")
+      && modelPopover.includes("<AdaptiveMaterial")
+      && composer.includes("<FabLiquidGlassHost")
+      && composer.includes("isMitsuroLiquidGlassAvailable()")
+      && modelPopover.includes("nativeGlassActive ? null : (")
+      && composer.includes("liquidGlassOnly")
+      && modelPopover.includes("liquidGlassOnly"),
+    "composer, FAB, and model endpoints must retain identical fallbacks behind the optional native host",
   );
   assert(
     material.includes('const [webBlurReady, setWebBlurReady]')
@@ -55,12 +65,14 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
   assert(
     material.includes("export const AdaptiveMaterial = memo(AdaptiveMaterialComponent)")
+      && material.includes("liquidGlassOnly")
+      && material.includes("respectMotionGate")
       && !composer.includes("backgroundColor: t.glass.backgroundElevated,"),
     "composer and FABs must expose the shared material instead of private tints",
   );
   const liquidGlassBranch = material.slice(
-    material.indexOf('if (materialMode === "liquid-glass")'),
-    material.indexOf('if (materialMode === "blur")'),
+    material.indexOf('if (resolvedMaterialMode === "liquid-glass")'),
+    material.indexOf('if (resolvedMaterialMode === "blur")'),
   );
   assert(
     liquidGlassBranch.includes("<NativeGlassView")
@@ -73,23 +85,26 @@ Deno.test("FAB material strength is stable before and after interaction", async 
     "only the blur fallback may add a translucent glass-fill overlay",
   );
   assert(
-    accordion.match(/styles\.materialHost/g)?.length === 4
+    accordion.includes("styles.branchGooeyLayer")
+      && accordion.includes("styles.branchGooeyViewport")
       && accordion.includes("position: 'relative'")
       && (composer.match(/position: 'relative'/g)?.length ?? 0) >= 2,
-    "every composer and FAB material host must anchor its background layer",
+    "horizontal branches and composer surfaces must stay locally anchored",
   );
   assert(
     (header.match(/position: ["']relative["']/g)?.length ?? 0) >= 3
-      && /position: ["']relative["']/.test(modelPopover),
+      && modelPopover.includes('position: "absolute"')
+      && modelPopover.includes("styles.modelClip")
+      && modelPopover.includes("modelPopoverClipStyle"),
     "every non-absolute chat-chrome material host must bound its backdrop to the component",
   );
   assert(
     accordion.includes("styles.pillOuterCompact")
-      && accordion.includes("styles.pillSlot")
       && accordion.includes("styles.pillTraveler")
       && accordion.includes("<FabGlyph progress={progress}>")
+      && accordion.includes("orientation=\"horizontal\"")
       && !accordion.includes("styles.pointerBoxNone,\n        animatedStyle,"),
-    "accordion glass stays in its slot; icons travel on the gooey silhouette",
+    "main and secondary FAB controls must travel on the shared silhouette",
   );
   assert(
     composer.includes("if (Platform.OS === 'web') return;")
@@ -98,7 +113,7 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
 });
 
-Deno.test("glass chrome never sits under an animated opacity ancestor", async () => {
+Deno.test("endpoint glass never sits under an animated transform or opacity", async () => {
   const entrance = await Deno.readTextFile(
     new URL("../hooks/useEntranceAnimation.ts", import.meta.url),
   );
@@ -108,14 +123,30 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
   const composer = await Deno.readTextFile(
     new URL("../components/chat/ChatBar.tsx", import.meta.url),
   );
+  const modelPopover = await Deno.readTextFile(
+    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
+  );
+  const nativeHost = await Deno.readTextFile(
+    new URL("../components/chat/FabLiquidGlassHost.tsx", import.meta.url),
+  );
   const layout = await Deno.readTextFile(
     new URL("../app/_layout.tsx", import.meta.url),
+  );
+  const screen = await Deno.readTextFile(
+    new URL("../app/(tabs)/index.tsx", import.meta.url),
   );
 
   assert(
     !entrance.includes("opacity:")
-      && !entrance.includes("Opacity"),
-    "entrance wrappers must slide/scale only; ancestor alpha kills iOS liquid glass",
+      && !entrance.includes("Opacity")
+      && entrance.includes("runOnJS(markSettled)")
+      && entrance.includes("requestAnimationFrame(() => setMaterialSafe(true))")
+      && screen.includes("const continuousNativeGlass = isMitsuroLiquidGlassAvailable()")
+      && (screen.match(/entrance\.settled \|\| continuousNativeGlass/g)?.length ?? 0) === 3
+      && screen.includes(": entrance.bottomBarStyle")
+      && screen.includes(": entrance.contentStyle")
+      && screen.includes("safe={entrance.materialSafe}"),
+    "supported continuous glass must skip the composer transform while legacy endpoints retain their safe-frame gate",
   );
   assert(
     !accordion.includes("opacity: opacityProgress")
@@ -126,29 +157,39 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
   );
   assert(
     accordion.includes("function FabGlyph")
-      && accordion.includes("GLYPH_FADE_START")
-      && accordion.includes("GLYPH_SETTLE_Y")
+      && accordion.includes("FAB_POUR_GLYPH_REVEAL_END")
+      && accordion.includes("FAB_POUR_GLYPH_SETTLE_Y")
       && accordion.includes("<FabGlyph progress={revealProgress}>")
       && accordion.includes("<FabGlyph progress={progress}>"),
-    "provider dock glyphs may fade on their own layer; accordion icons appear with the glass tile",
+    "provider dock glyphs may fade on their own layer while the stable tile travels",
   );
   assert(
     accordion.includes("styles.mergeColumn")
       && accordion.includes("pillsMounted")
-      && accordion.includes("PILL_SETTLE_MS")
+      && accordion.includes("FAB_POUR_CLOSE_MS")
       && accordion.includes("<FabGooeyLayer")
+      && (accordion.match(/orientation="horizontal"/g)?.length ?? 0) === 2
       && accordion.includes("from './fabGooey'")
-      && accordion.includes("crystallizeOnSettle: true")
+      && !accordion.includes("crystallizeOnSettle")
+      && accordion.includes("AdaptiveMaterial")
+      && accordion.includes("styles.graphiteCover")
+      && accordion.includes("active={isOpen && materialActive}")
+      && accordion.includes("materialCommitFrame = requestAnimationFrame(beginRetraction)")
+      && accordion.includes("nativeGlassActive ? null : (")
+      && nativeHost.includes("Animated.createAnimatedComponent")
+      && nativeHost.includes("animatedProps={animatedProps}")
+      && nativeHost.includes("showComposer={false}")
       && !accordion.includes("GlassMergeCluster")
       && !accordion.includes("GlassContainer")
       && !accordion.includes("DROPLET_STRETCH")
       && !accordion.includes("DROPLET_SCALE")
       && !accordion.includes("[0.01, 1]")
       && !accordion.includes("[24 + index * 6, 0]"),
-    "GlassView must not move; the pour is a Skia silhouette under traveling icons",
+    "one native background host must own continuous glass while the prior fixed-endpoint fallback remains intact",
   );
   assert(
-    accordion.includes("const OPEN_STAGGER_MS = 58")
+    accordion.includes("const OPEN_STAGGER_MS = FAB_POUR_OPEN_STAGGER_MS")
+      && accordion.includes("FAB_POUR_OPEN_STAGGER_MS")
       && accordion.includes("const CLOSE_STAGGER_MS = 46"),
     "pour stagger must be a readable cascade, not a simultaneous pop",
   );
@@ -162,13 +203,74 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
       && !composer.includes("active={!accordionVisible}")
       && !composer.includes("640")
       && !composer.includes("<GlassContainer")
-      && !composer.includes("LiquidMaterialCluster"),
-    "the Agent mark lives in the pill column; ChatBar must not wrap chrome in GlassContainer",
+      && !composer.includes("LiquidMaterialCluster")
+      && composer.includes("fixedMaterial.coverStyle")
+      && composer.includes("active={nativeGlassActive || fixedMaterial.materialActive}")
+      && composer.includes("respectMotionGate={!nativeGlassActive}")
+      && composer.includes("nativeGlassActive={nativeGlassActive}")
+      && composer.includes("nativeProviderGlassActive={nativeProviderGlassActive}"),
+    "composer must retain its fixed endpoint while Agent and branches can be delegated to native glass",
   );
   assert(
     !composer.includes("modelPopoverOpacity")
-      && !composer.includes("opacity: modelPopoverOpacity"),
-    "the model popover must not fade its AdaptiveMaterial ancestor",
+      && !composer.includes("opacity: modelPopoverOpacity")
+      && composer.includes("surfaceColor={gooeyFill(theme.scheme)}")
+      && accordion.includes("modelPopoverProgress: SharedValue<number>")
+      && accordion.includes("isOpen: providerPourOpen")
+      && accordion.includes("openDelayMs: 0")
+      && accordion.includes("closeDelayMs: 0")
+      && accordion.includes("progress: modelPopoverProgress")
+      && composer.includes("modelPopoverProgress={modelPopoverScale}")
+      && composer.includes("modelPopoverCoverOpacity={modelPopoverCoverOpacity}")
+      && composer.includes("modelPopoverCoverStyle={modelPopoverCoverStyle}")
+      && composer.includes("materialActive={modelRailOpen && modelPopoverMaterialActive}")
+      && composer.includes("modelPopoverScale.value < 0.999")
+      && !composer.includes("modelPopoverScale.value = withSpring")
+      && !composer.includes("modelPopoverScale.value = withTiming")
+      && composer.includes("const modelPopoverClipStyle = useAnimatedStyle")
+      && composer.includes("const modelPopoverShellStyle = useAnimatedStyle")
+      && composer.includes("PILL + (modelPopoverWidth - PILL) * progress")
+      && composer.includes("PILL + (modelPopoverHeight - PILL) * progress")
+      && composer.includes("MODEL_CONTENT_REVEAL_START")
+      && composer.includes("MODEL_CONTENT_REVEAL_END")
+      && composer.includes("FAB_POUR_GLYPH_SETTLE_Y")
+      && composer.includes("modelPopoverClipStyle={modelPopoverClipStyle}")
+      && composer.includes("modelPopoverShellStyle={modelPopoverShellStyle}")
+      && composer.includes("modelPopoverContentStyle={modelPopoverContentStyle}")
+      && composer.includes("providerBranchCloseDeadlineRef")
+      && composer.includes("attachmentBranchCloseDeadlineRef")
+      && composer.includes("const remainingBranchCloseMs = Math.max")
+      && composer.includes("requestAccordionCloseRef.current = requestAccordionClose"),
+    "the complete model surface must pour from its trigger and side branches must return before the main stack closes",
+  );
+  const modelMaterialIndex = modelPopover.indexOf("<AdaptiveMaterial");
+  const translatedModelPanelIndex = modelPopover.indexOf(
+    "<Animated.View",
+    modelMaterialIndex + 1,
+  );
+  const translatedModelPanel = modelPopover.slice(translatedModelPanelIndex);
+  assert(
+    modelMaterialIndex >= 0
+      && translatedModelPanelIndex > modelMaterialIndex
+      && modelPopover.includes("active={materialActive}")
+      && modelPopover.includes("modelPopoverCoverStyle")
+      && modelPopover.includes("liquidGlassOnly")
+      && !translatedModelPanel.includes("<AdaptiveMaterial"),
+    "the model GlassView must be a fixed clip sibling, never a child of the translated panel",
+  );
+  assert(
+    !modelPopover.includes("backgroundElevated")
+      && !modelPopover.includes("selected && { backgroundColor")
+      && modelPopover.includes("pressed && { backgroundColor: backgroundPressed }")
+      && modelPopover.includes('accessibilityState={{ selected }}')
+      && modelPopover.includes('pointerEvents={interactive ? "box-none" : "none"}')
+      && modelPopover.includes("modelPopoverContentStyle")
+      && modelPopover.includes("height: modelPopoverHeight")
+      && modelPopover.includes("removeClippedSubviews={false}")
+      && !modelPopover.includes("boxShadow")
+      && composer.includes("interactive={modelRailOpen}")
+      && modelPopover.includes("{selected && ("),
+    "model selection must use only its checkmark and accessibility state, without a persistent row card",
   );
   assert(
     layout.includes("animation: 'none'"),
@@ -206,7 +308,7 @@ Deno.test("chat chrome icons stay on the thinking violet", async () => {
   );
 });
 
-Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
+Deno.test("React Native never transforms a GlassContainer around FAB content", async () => {
   const composer = await Deno.readTextFile(
     new URL("../components/chat/ChatBar.tsx", import.meta.url),
   );
@@ -228,7 +330,7 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && accordion.includes("{agent}")
       && !accordion.includes("AgentGlassMorphColumn")
       && !accordion.includes("glassEffectId"),
-    "UIKit GlassContainer and SwiftUI Host columns are out; pour uses a Skia silhouette",
+    "React Native controls must not own or transform a UIKit GlassContainer",
   );
   const columnStart = accordion.indexOf("style={styles.mergeColumn}");
   const columnEnd = accordion.indexOf("</GestureDetector>", columnStart);
@@ -248,7 +350,7 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && docks.includes("ProviderDockPill")
       && docks.includes("InlineActionPill")
       && docks.includes("DesktopFilterPill"),
-    "provider, attach, and desktop filter glass stay outside the Agent column",
+    "provider and attachment branches stay structurally separate from the Agent column",
   );
   assert(
     material.includes('blurMethod={platform === "android" ? "none" : undefined}'),
@@ -262,9 +364,12 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && accordion.includes("providerDockMounted")
       && accordion.includes("attachActionsMounted")
       && accordion.includes("desktopFiltersMounted")
-      && accordion.includes("active={materialActive}")
-      && !accordion.includes("function useFabMaterialActive"),
-    "glass must exist for the whole pour and must not exist for closed provider/attach docks",
+      && accordion.includes("providerProgresses")
+      && accordion.includes("attachProgresses")
+      && accordion.includes("materialActive")
+      && accordion.includes("AdaptiveMaterial")
+      && accordion.includes("materialAllowed: false"),
+    "secondary branches must retain deferred presence, fixed endpoints, and a graphite-only scroll rail",
   );
 });
 

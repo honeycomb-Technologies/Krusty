@@ -40,6 +40,7 @@ import {
 } from "../../components/hive/workerSessionSendFence";
 import { useHiveWorkers } from "../../components/hive/hooks/useHiveWorkers";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
+import { AdaptiveMaterialMotionGate } from "../../components/ui/AdaptiveMaterial";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { createLatestIntentScheduler } from "../../components/navigation/latestIntentScheduler";
@@ -48,6 +49,7 @@ import { isCurrentSessionNavigationIntent } from "../../components/navigation/se
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
+import { isMitsuroLiquidGlassAvailable } from "../../modules/mitsuro-liquid-glass";
 import { useMobileDiagnosticMode } from "../../diagnostics/MobileDiagnosticsProvider";
 import Animated, { runOnJS } from "react-native-reanimated";
 
@@ -128,6 +130,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { width: windowWidth } = useWindowDimensions();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
+  const continuousNativeGlass = isMitsuroLiquidGlassAvailable();
 
   const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
@@ -870,7 +873,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const topBar = isDesktop
     ? (
       <Animated.View
-        style={[styles.topBar, styles.topBarDesktop, entrance.topBarStyle]}
+        style={[
+          styles.topBar,
+          styles.topBarDesktop,
+          entrance.settled ? null : entrance.topBarStyle,
+        ]}
       >
         <Pressable
           onPress={handleRenameSession}
@@ -940,7 +947,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     )
     : (
       <Animated.View
-        style={[styles.mobileTopBarOverlay, entrance.topBarStyle]}
+        style={[
+          styles.mobileTopBarOverlay,
+          entrance.settled ? null : entrance.topBarStyle,
+        ]}
       >
         <MobileAppHeader
           mode={requestedMode}
@@ -965,7 +975,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const sharedComposer = (
     <Animated.View
       style={[
-        entrance.bottomBarStyle,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.bottomBarStyle,
         { overflow: "visible", zIndex: 300 },
       ]}
     >
@@ -1010,7 +1022,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // Messages and their primitive Worker-control projection are both owned by
   // ActiveConversationSurface; the outer shell never subscribes to messages.
   const chatTranscriptSurface = (
-    <Animated.View style={[styles.flex, entrance.contentStyle]}>
+    <Animated.View
+      style={[
+        styles.flex,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.contentStyle,
+      ]}
+    >
       <ActiveConversationSurface
         activeMode={activeMode}
         sessionType={activeMode}
@@ -1196,7 +1215,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // for non-thread management views; its thread stays in the single stable
   // transcript/composer surface below.
   const hiveContent = (
-    <Animated.View style={[styles.flex, entrance.contentStyle]}>
+    <Animated.View
+      style={[
+        styles.flex,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.contentStyle,
+      ]}
+    >
       <HiveScreen
         workspaceDirectory={workspaceDirectory}
         requestedTopLevel={hiveTopLevel}
@@ -1383,47 +1409,49 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       activeHiveView={hiveTopLevel}
       onSelectHiveView={handleSelectHiveView}
     >
-      <StreamSideEffectsCoordinator
-        activeMode={activeMode}
-        suppressCompletionRef={suppressCompletionRef}
-      />
-      {renameModal}
-      {isDesktop
-        ? (
-          activeTab === 2 ? hiveContent : chatContent
-        )
-        : showMobileHiveManagement
-        ? hiveContent
-        : showMobileHiveThreadTransition
-        ? mobileHiveThreadTransition
-        : mobileContent}
-
-      {!isDesktop && (
-        <SessionDrawer
-          isOpen={drawerOpen}
-          onClose={() => setDrawerOpen(false)}
-          sessions={sessions}
-          activeSessionId={sessionId}
-          onSelectSession={handleOpenSession}
-          onSelectHiveSession={handleOpenHiveWorkerDm}
-          activeHiveView={hiveTopLevel}
-          onSelectHiveView={handleSelectHiveView}
-          onNewSession={(type) => void handleNewSession(type)}
-          onNewHiveSession={handleNewHiveSession}
-          onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
-          onDeleteSession={handleDeleteSession}
-          onSetSessionPinned={handleSetSessionPinned}
-          onSetSessionArchived={handleSetSessionArchived}
-          onSetProjectPinned={handleSetProjectPinned}
-          onSetProjectArchived={handleSetProjectArchived}
-          onDeleteProjectSessions={handleDeleteProjectSessions}
-          onOpenSettings={() => {
-            setDrawerOpen(false);
-            router.navigate("/(tabs)/settings");
-          }}
+      <AdaptiveMaterialMotionGate safe={entrance.materialSafe}>
+        <StreamSideEffectsCoordinator
           activeMode={activeMode}
+          suppressCompletionRef={suppressCompletionRef}
         />
-      )}
+        {renameModal}
+        {isDesktop
+          ? (
+            activeTab === 2 ? hiveContent : chatContent
+          )
+          : showMobileHiveManagement
+          ? hiveContent
+          : showMobileHiveThreadTransition
+          ? mobileHiveThreadTransition
+          : mobileContent}
+
+        {!isDesktop && (
+          <SessionDrawer
+            isOpen={drawerOpen}
+            onClose={() => setDrawerOpen(false)}
+            sessions={sessions}
+            activeSessionId={sessionId}
+            onSelectSession={handleOpenSession}
+            onSelectHiveSession={handleOpenHiveWorkerDm}
+            activeHiveView={hiveTopLevel}
+            onSelectHiveView={handleSelectHiveView}
+            onNewSession={(type) => void handleNewSession(type)}
+            onNewHiveSession={handleNewHiveSession}
+            onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
+            onDeleteSession={handleDeleteSession}
+            onSetSessionPinned={handleSetSessionPinned}
+            onSetSessionArchived={handleSetSessionArchived}
+            onSetProjectPinned={handleSetProjectPinned}
+            onSetProjectArchived={handleSetProjectArchived}
+            onDeleteProjectSessions={handleDeleteProjectSessions}
+            onOpenSettings={() => {
+              setDrawerOpen(false);
+              router.navigate("/(tabs)/settings");
+            }}
+            activeMode={activeMode}
+          />
+        )}
+      </AdaptiveMaterialMotionGate>
     </DesktopShell>
   );
 }

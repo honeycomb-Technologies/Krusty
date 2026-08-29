@@ -235,10 +235,6 @@ Deno.test("accordion and model list share the input/Agent content band", async (
   const composer = await Deno.readTextFile(
     new URL("../components/chat/ChatBar.tsx", import.meta.url).pathname,
   );
-  const modelPopover = await Deno.readTextFile(
-    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url)
-      .pathname,
-  );
 
   assert(
     composer.includes("width: controlsLayerWidth") &&
@@ -247,8 +243,11 @@ Deno.test("accordion and model list share the input/Agent content band", async (
     "accordion stack must keep the original Agent-aligned right inset, not flush to the screen edge",
   );
   assert(
-    modelPopover.includes("left: ROOT_HORIZONTAL_PADDING") &&
-      modelPopover.includes("right: PILL + GAP + ROOT_HORIZONTAL_PADDING"),
+    composer.includes("const modelPopoverTargetLeft = isDesktop") &&
+      composer.includes(": ROOT_HORIZONTAL_PADDING;") &&
+      composer.includes(
+        "bandWidth - ROOT_HORIZONTAL_PADDING * 2 - PILL - GAP",
+      ),
     "model list must match the input bar: root padding on the left, Agent + gap on the right",
   );
 });
