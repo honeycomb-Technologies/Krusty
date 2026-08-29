@@ -154,9 +154,15 @@ Deno.test("native wide windows keep touch layout and the full model panel pours"
     "iOS and Android must keep the touch shell even at desktop-sized window widths",
   );
   assert(
-    composer.includes("const modelPopoverTravelDistance = isDesktop")
-      && composer.includes("modelPopoverTravelDistance + MODEL_POPOVER_HIDE_OVERSCAN")
+    composer.includes("const modelPopoverClipStyle = useAnimatedStyle")
+      && composer.includes("const modelPopoverShellStyle = useAnimatedStyle")
+      && composer.includes("modelPopoverSourceLeft")
+      && composer.includes("modelPopoverTargetLeft")
+      && composer.includes("PILL + (modelPopoverWidth - PILL) * progress")
+      && composer.includes("PILL + (modelPopoverHeight - PILL) * progress")
       && composer.includes("modelPopoverContentStyle")
+      && composer.includes("MODEL_CONTENT_REVEAL_START")
+      && composer.includes("MODEL_CONTENT_REVEAL_END")
       && composer.includes("const providerBranchClosing = modelRailOpen")
       && composer.includes("const attachmentBranchClosing = attachPickerOpen")
       && composer.includes("providerBranchCloseDeadlineRef.current")

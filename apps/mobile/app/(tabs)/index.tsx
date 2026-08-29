@@ -49,6 +49,7 @@ import { isCurrentSessionNavigationIntent } from "../../components/navigation/se
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
+import { isMitsuroLiquidGlassAvailable } from "../../modules/mitsuro-liquid-glass";
 import { useMobileDiagnosticMode } from "../../diagnostics/MobileDiagnosticsProvider";
 import Animated, { runOnJS } from "react-native-reanimated";
 
@@ -129,6 +130,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { width: windowWidth } = useWindowDimensions();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
+  const continuousNativeGlass = isMitsuroLiquidGlassAvailable();
 
   const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
@@ -973,7 +975,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const sharedComposer = (
     <Animated.View
       style={[
-        entrance.settled ? null : entrance.bottomBarStyle,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.bottomBarStyle,
         { overflow: "visible", zIndex: 300 },
       ]}
     >
@@ -1019,7 +1023,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // ActiveConversationSurface; the outer shell never subscribes to messages.
   const chatTranscriptSurface = (
     <Animated.View
-      style={[styles.flex, entrance.settled ? null : entrance.contentStyle]}
+      style={[
+        styles.flex,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.contentStyle,
+      ]}
     >
       <ActiveConversationSurface
         activeMode={activeMode}
@@ -1207,7 +1216,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // transcript/composer surface below.
   const hiveContent = (
     <Animated.View
-      style={[styles.flex, entrance.settled ? null : entrance.contentStyle]}
+      style={[
+        styles.flex,
+        entrance.settled || continuousNativeGlass
+          ? null
+          : entrance.contentStyle,
+      ]}
     >
       <HiveScreen
         workspaceDirectory={workspaceDirectory}

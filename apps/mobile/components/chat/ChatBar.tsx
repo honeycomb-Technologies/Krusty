@@ -44,9 +44,9 @@ import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls, pourCloseDurationMs } from './AccordionControls';
 import {
-  FAB_POUR_GLYPH_REVEAL_END,
   FAB_POUR_GLYPH_SETTLE_Y,
   FAB_MATERIAL_CROSSFADE_MS,
+  MAX_GOOEY_PILLS,
   gooeyFill,
 } from './fabGooey';
 import { ChatBarActionButton } from './ChatBarActionButton';
@@ -54,6 +54,9 @@ import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
 import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import { FabLiquidGlassHost } from './FabLiquidGlassHost';
+import { useFabGlassMotion } from './fabGlassMotion';
+import { isMitsuroLiquidGlassAvailable } from '../../modules/mitsuro-liquid-glass';
 import { shouldAnimateComposerPulse } from './composerPulsePolicy';
 import {
   COMPOSER_MAX_HEIGHT as SHARED_COMPOSER_MAX_HEIGHT,
@@ -156,8 +159,9 @@ const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
-/** Keep the moving surface and its border fully outside the clip at rest. */
-const MODEL_POPOVER_HIDE_OVERSCAN = 24;
+/** The native/solid genie surface leads; model rows settle into it near arrival. */
+const MODEL_CONTENT_REVEAL_START = 0.55;
+const MODEL_CONTENT_REVEAL_END = 0.9;
 /**
  * The accordion responder spans the full composer width so its provider dock
  * can extend left of the FAB column. Keep the model list above that responder:
@@ -584,6 +588,8 @@ function ChatBarComponent(props: ChatBarProps) {
 
   const { theme } = useThemeContext();
   const materialMotionSafe = useAdaptiveMaterialMotionSafe();
+  const nativeGlassAvailable =
+    Platform.OS === 'ios' && isMitsuroLiquidGlassAvailable();
   const { isDesktop } = useBreakpoint();
   const insets = useSafeAreaInsets();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
@@ -609,9 +615,10 @@ function ChatBarComponent(props: ChatBarProps) {
   const [inputFocused, setInputFocused] = useState(false);
   const modelPopoverScale = useSharedValue(0);
   const modelPopoverCoverOpacity = useSharedValue(1);
+  const fabGlassMotion = useFabGlassMotion();
   const [modelPopoverMaterialActive, setModelPopoverMaterialActive] = useState(false);
   const fixedMaterial = useFixedMaterialHandoff(
-    Platform.OS === 'ios' && materialMotionSafe,
+    Platform.OS === 'ios' && (materialMotionSafe || nativeGlassAvailable),
   );
   const transcriptRef = useRef('');
   const textRef = useRef(text);
@@ -906,6 +913,14 @@ function ChatBarComponent(props: ChatBarProps) {
     })),
     [t.thinking, visualProviderFilters],
   );
+  const nativeGlassActive =
+    showComposerChrome &&
+    nativeGlassAvailable;
+  const nativeProviderGlassActive =
+    nativeGlassActive &&
+    !isDesktop &&
+    providerFilterActions.length > 0 &&
+    providerFilterActions.length <= MAX_GOOEY_PILLS;
   const filteredModels = useMemo(
     () => selectedProviderFilter
       ? sortedModels.filter(modelInfo =>
@@ -1249,7 +1264,11 @@ function ChatBarComponent(props: ChatBarProps) {
   });
   const kActive = accordionOpen;
   const kColor = t.thinking;
-  const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
+  const kBorder = kActive
+    ? t.thinking + '40'
+    : nativeGlassActive
+      ? 'transparent'
+      : t.glass.borderLight;
 
   // The composer keeps one stable closed-screen inset. Keyboard lift moves
   // this mounted surface with `bottom` and never changes transcript padding.
@@ -1375,45 +1394,89 @@ function ChatBarComponent(props: ChatBarProps) {
   const providerCount = Math.max(1, visualProviderFilters.length);
   const providerDockWidth =
     providerCount * PILL + Math.max(0, providerCount - 1) * GAP;
-  const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
-  const modelPopoverTravelDistance = isDesktop
-    ? Math.max(PILL, providerDockWidth)
+  const dockRightInset = ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
+  const modelPopoverWidth = isDesktop
+    ? providerDockWidth
     : Math.max(
-        PILL,
-        (measuredRootWidth > 0
-          ? measuredRootWidth
-          : contentMaxWidth != null && contentMaxWidth > 0
-            ? contentMaxWidth
-            : viewportWidth)
-          - ROOT_HORIZONTAL_PADDING * 2
-          - PILL
-          - GAP,
+        0,
+        bandWidth - ROOT_HORIZONTAL_PADDING * 2 - PILL - GAP,
       );
-  const modelPopoverStyle = useAnimatedStyle(() => ({
-    transform: [{
-      translateX: (1 - modelPopoverScale.value)
-        * (modelPopoverTravelDistance + MODEL_POPOVER_HIDE_OVERSCAN),
-    }],
-  }), [modelPopoverTravelDistance]);
+  const modelPopoverTargetLeft = isDesktop
+    ? bandWidth - dockRightInset - modelPopoverWidth
+    : ROOT_HORIZONTAL_PADDING;
+  const modelPopoverTargetBottom = isDesktop
+    ? desktopModelListBottom
+    : overlayBottom;
+  const modelPopoverSourceLeft = bandWidth - ROOT_HORIZONTAL_PADDING - PILL;
+  const modelPopoverSourceBottom =
+    inputRowBottom + accordionPillCount * PROVIDER_PILL_STEP;
+  const modelPopoverClipStyle = useAnimatedStyle(() => {
+    const progress = Math.max(0, Math.min(1.25, modelPopoverScale.value));
+    return {
+      left: modelPopoverSourceLeft
+        + (modelPopoverTargetLeft - modelPopoverSourceLeft) * progress,
+      bottom: modelPopoverSourceBottom
+        + (modelPopoverTargetBottom - modelPopoverSourceBottom) * progress,
+      width: PILL + (modelPopoverWidth - PILL) * progress,
+      height: PILL + (modelPopoverHeight - PILL) * progress,
+      borderRadius: RADIUS,
+    };
+  }, [
+    modelPopoverHeight,
+    modelPopoverSourceBottom,
+    modelPopoverSourceLeft,
+    modelPopoverTargetBottom,
+    modelPopoverTargetLeft,
+    modelPopoverWidth,
+  ]);
+  const modelPopoverShellStyle = useAnimatedStyle(() => {
+    const progress = Math.max(0, Math.min(1.25, modelPopoverScale.value));
+    const currentLeft = modelPopoverSourceLeft
+      + (modelPopoverTargetLeft - modelPopoverSourceLeft) * progress;
+    const currentBottom = modelPopoverSourceBottom
+      + (modelPopoverTargetBottom - modelPopoverSourceBottom) * progress;
+    const currentHeight = PILL + (modelPopoverHeight - PILL) * progress;
+    return {
+      width: modelPopoverWidth,
+      height: modelPopoverHeight,
+      transform: [
+        { translateX: modelPopoverTargetLeft - currentLeft },
+        {
+          translateY:
+            currentBottom + currentHeight
+            - modelPopoverTargetBottom
+            - modelPopoverHeight,
+        },
+      ],
+    };
+  }, [
+    modelPopoverHeight,
+    modelPopoverSourceBottom,
+    modelPopoverSourceLeft,
+    modelPopoverTargetBottom,
+    modelPopoverTargetLeft,
+    modelPopoverWidth,
+  ]);
   const modelPopoverContentStyle = useAnimatedStyle(() => {
     const progress = Math.max(0, Math.min(1, modelPopoverScale.value));
+    const revealProgress = Math.max(
+      0,
+      Math.min(
+        1,
+        (progress - MODEL_CONTENT_REVEAL_START)
+          / (MODEL_CONTENT_REVEAL_END - MODEL_CONTENT_REVEAL_START),
+      ),
+    );
     return {
-      opacity: Math.min(1, progress / FAB_POUR_GLYPH_REVEAL_END),
+      opacity: revealProgress,
       transform: [{
-        translateY: (1 - progress) * FAB_POUR_GLYPH_SETTLE_Y,
+        translateY: (1 - revealProgress) * FAB_POUR_GLYPH_SETTLE_Y,
       }],
     };
   });
   const modelPopoverCoverStyle = useAnimatedStyle(() => ({
     opacity: modelPopoverCoverOpacity.value,
   }));
-  // Accordion and model list share the pre-plan composer band: root padding
-  // on the left, Agent FAB + gap on the right. That is the same right edge
-  // as the input bar.
-  const dockRightInset = isDesktop
-    ? ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP
-    : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
-
   return (
     <View
       style={[
@@ -1448,6 +1511,27 @@ function ChatBarComponent(props: ChatBarProps) {
         onHeightChange(reservedHeight);
       }}
     >
+      <FabLiquidGlassHost
+        active={nativeGlassActive}
+        motion={fabGlassMotion}
+        modelProgress={modelPopoverScale}
+        accordionOpen={accordionOpen}
+        verticalCount={accordionPillCount}
+        attachmentOpen={attachPickerOpen && accordionOpen}
+        attachmentSourceIndex={hasWorkMode ? 4 : 3}
+        providerOpen={modelRailOpen && accordionOpen}
+        providerCount={nativeProviderGlassActive ? providerFilterActions.length : 0}
+        providerSourceIndex={accordionPillCount - 1}
+        modelOpen={modelRailOpen}
+        bandWidth={bandWidth}
+        viewportHeight={viewportHeight}
+        inputRowBottom={inputRowBottom}
+        overlayBottom={overlayBottom}
+        modelPopoverHeight={modelPopoverHeight}
+        tintColor={t.glass.background}
+        colorScheme={theme.scheme}
+      />
+
       {/* Attachment previews */}
       {attachments.length > 0 && (
         <View style={styles.attachRow}>
@@ -1513,8 +1597,8 @@ function ChatBarComponent(props: ChatBarProps) {
       )}
 
       {/* L-shape: [input bar] + spacer. Agent lives in AccordionControls
-          with the compact pills. Skia bridges one stable graphite surface
-          through the fixed 56pt destinations. */}
+          with the compact pills. iOS 26 uses the fixed native host behind this
+          tree; unsupported platforms retain the Skia/graphite surface. */}
       <View style={styles.lRow}>
         {/* Input bar */}
         <View
@@ -1529,14 +1613,14 @@ function ChatBarComponent(props: ChatBarProps) {
           ]}
         >
           <AdaptiveMaterial
-            active={fixedMaterial.materialActive}
+            active={nativeGlassActive || fixedMaterial.materialActive}
             borderRadius={RADIUS}
             tone="regular"
             fallbackColor={gooeyFill(theme.scheme)}
             liquidGlassOnly
-            respectMotionGate
+            respectMotionGate={!nativeGlassActive}
           />
-          {Platform.OS === 'ios' ? (
+          {Platform.OS === 'ios' && !nativeGlassActive ? (
             <Animated.View
               pointerEvents="none"
               style={[
@@ -1548,7 +1632,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 fixedMaterial.coverStyle,
               ]}
             />
-          ) : (
+          ) : Platform.OS !== 'ios' ? (
             <View
               pointerEvents="none"
               style={[
@@ -1559,7 +1643,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 },
               ]}
             />
-          )}
+          ) : null}
           <View style={styles.barInner}>
             {!isRecording ? (
               <Pressable
@@ -1652,6 +1736,9 @@ function ChatBarComponent(props: ChatBarProps) {
           ]}
         >
           <AccordionControls
+            glassMotion={fabGlassMotion}
+            nativeGlassActive={nativeGlassActive}
+            nativeProviderGlassActive={nativeProviderGlassActive}
             agent={
               <Pressable
                 accessibilityRole="button"
@@ -1668,16 +1755,18 @@ function ChatBarComponent(props: ChatBarProps) {
                   },
                 ]}
               >
-                <AdaptiveMaterial
-                  active={fixedMaterial.materialActive}
-                  borderRadius={RADIUS}
-                  tone="regular"
-                  fallbackColor={gooeyFill(theme.scheme)}
-                  interactive
-                  liquidGlassOnly
-                  respectMotionGate
-                />
-                {Platform.OS === 'ios' ? (
+                {nativeGlassActive ? null : (
+                  <AdaptiveMaterial
+                    active={fixedMaterial.materialActive}
+                    borderRadius={RADIUS}
+                    tone="regular"
+                    fallbackColor={gooeyFill(theme.scheme)}
+                    interactive
+                    liquidGlassOnly
+                    respectMotionGate
+                  />
+                )}
+                {nativeGlassActive ? null : Platform.OS === 'ios' ? (
                   <Animated.View
                     pointerEvents="none"
                     style={[
@@ -1750,17 +1839,14 @@ function ChatBarComponent(props: ChatBarProps) {
       {/* Model popover — under the filter row, same width + right edge */}
       {showComposerChrome && !isHive && modelPickerOpen ? (
         <ChatBarModelPopover
-          isDesktop={isDesktop}
           interactive={modelRailOpen}
-          modelPopoverWidth={modelPopoverWidth}
-          desktopModelListBottom={desktopModelListBottom}
           modelPopoverHeight={modelPopoverHeight}
-          dockRightInset={dockRightInset}
-          overlayBottom={overlayBottom}
-          modelPopoverStyle={modelPopoverStyle}
+          modelPopoverClipStyle={modelPopoverClipStyle}
+          modelPopoverShellStyle={modelPopoverShellStyle}
           modelPopoverContentStyle={modelPopoverContentStyle}
           modelPopoverCoverStyle={modelPopoverCoverStyle}
           materialActive={modelRailOpen && modelPopoverMaterialActive}
+          nativeGlassActive={nativeGlassActive}
           borderColor={t.glass.border}
           foreground={t.foreground}
           mutedForeground={t.mutedForeground}

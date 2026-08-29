@@ -102,6 +102,42 @@ function SettingsDisclosure({
 		</View>
 	);
 }
+
+function DevelopmentDiagnosticsDisclosure({
+	isConnected,
+	expanded,
+	onPress,
+}: {
+	isConnected: boolean;
+	expanded: boolean;
+	onPress: () => void;
+}) {
+	const diagnostics = useMobileDiagnostics();
+
+	return (
+		<SettingsDisclosure
+			title="Diagnostics"
+			summary={diagnostics.mode === "stress" ? "Recording" : "Idle"}
+			expanded={expanded}
+			onPress={onPress}
+		>
+			<DiagnosticsSection
+				mode={diagnostics.mode}
+				runId={diagnostics.runId}
+				eventCount={diagnostics.eventCount}
+				nativePayloadCount={diagnostics.nativePayloadCount}
+				approximateBytes={diagnostics.approximateBytes}
+				uploadState={diagnostics.uploadState}
+				completionPending={diagnostics.completionPending}
+				isConnected={isConnected}
+				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
+				onStopAndUpload={() => void diagnostics.stopStressRun()}
+				onUpload={() => void diagnostics.flush(false)}
+			/>
+		</SettingsDisclosure>
+	);
+}
+
 export function SettingsPanel({
 	active = true,
 	onClose,
@@ -126,7 +162,6 @@ export function SettingsPanel({
 		lastRegistrationError,
 		pendingActionCount,
 	} = useNotifications();
-	const diagnostics = useMobileDiagnostics();
 
 	const [inputUrl, setInputUrl] = useState("");
 	const [inputToken, setInputToken] = useState("");
@@ -689,26 +724,13 @@ export function SettingsPanel({
 				/>
 			</SettingsDisclosure>
 
-			<SettingsDisclosure
-				title="Diagnostics"
-				summary={diagnostics.mode === "stress" ? "Recording" : "Idle"}
-				expanded={openSection === "diagnostics"}
-				onPress={() => toggleDisclosure("diagnostics")}
-			>
-				<DiagnosticsSection
-					mode={diagnostics.mode}
-					runId={diagnostics.runId}
-					eventCount={diagnostics.eventCount}
-					nativePayloadCount={diagnostics.nativePayloadCount}
-					approximateBytes={diagnostics.approximateBytes}
-					uploadState={diagnostics.uploadState}
-					completionPending={diagnostics.completionPending}
+			{__DEV__ ? (
+				<DevelopmentDiagnosticsDisclosure
 					isConnected={isConnected}
-					onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
-					onStopAndUpload={() => void diagnostics.stopStressRun()}
-					onUpload={() => void diagnostics.flush(false)}
+					expanded={openSection === "diagnostics"}
+					onPress={() => toggleDisclosure("diagnostics")}
 				/>
-			</SettingsDisclosure>
+			) : null}
 
 			<SettingsDisclosure
 				title="About"

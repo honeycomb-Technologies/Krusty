@@ -222,13 +222,19 @@ Deno.test("settings and transcript secondary surfaces stay bounded", async () =>
   const transcript = await Deno.readTextFile(
     new URL("../components/chat/ChatTranscript.tsx", import.meta.url).pathname,
   );
+  const settingsPanel = settings.indexOf("export function SettingsPanel");
+  const diagnosticsMount = settings.indexOf(
+    "<DevelopmentDiagnosticsDisclosure",
+    settingsPanel,
+  );
 
   assert(
     settings.includes("<ScrollView")
       && !settings.includes("<FlatList")
       && settings.includes("<ConnectionSection")
       && settings.includes("<DiagnosticsSection")
-      && settings.indexOf("<ConnectionSection") < settings.indexOf("<DiagnosticsSection")
+      && diagnosticsMount >= 0
+      && settings.indexOf("<ConnectionSection", settingsPanel) < diagnosticsMount
       && settings.includes("const [skillPageStart, setSkillPageStart] = useState(0)")
       && settings.includes("pageStart={skillPageStart}")
       && settings.includes("onPageStartChange={setSkillPageStart}"),

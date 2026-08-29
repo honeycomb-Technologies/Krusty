@@ -32,17 +32,23 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   assert(
     accordion.includes("AdaptiveMaterial")
       && !accordion.includes("theme.colors.thinking + '18'")
-      && (accordion.match(/backgroundColor: gooeyFill\(theme\.scheme\)/g)?.length ?? 0) === 4,
-    "every moving FAB must keep an opaque graphite cover without a selected-state fill",
+      && accordion.includes("backgroundColor: nativeGlassActive")
+      && accordion.includes("Platform.OS === 'ios' && !nativeGlassActive")
+      && accordion.includes("nativeProviderGlassActive ? null : (")
+      && !accordion.includes("selected && { backgroundColor"),
+    "native glass must replace moving graphite while the complete legacy fallback stays available",
   );
   assert(
     (composer.match(/<AdaptiveMaterial/g)?.length ?? 0) === 2
       && (composer.match(/backgroundColor: gooeyFill\(theme\.scheme\)/g)?.length ?? 0) >= 2
       && modelPopover.includes("backgroundColor: surfaceColor")
       && modelPopover.includes("<AdaptiveMaterial")
+      && composer.includes("<FabLiquidGlassHost")
+      && composer.includes("isMitsuroLiquidGlassAvailable()")
+      && modelPopover.includes("nativeGlassActive ? null : (")
       && composer.includes("liquidGlassOnly")
       && modelPopover.includes("liquidGlassOnly"),
-    "composer, FAB, and model endpoints must use iOS-only glass over identical graphite fallbacks",
+    "composer, FAB, and model endpoints must retain identical fallbacks behind the optional native host",
   );
   assert(
     material.includes('const [webBlurReady, setWebBlurReady]')
@@ -87,7 +93,9 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
   assert(
     (header.match(/position: ["']relative["']/g)?.length ?? 0) >= 3
-      && /position: ["']relative["']/.test(modelPopover),
+      && modelPopover.includes('position: "absolute"')
+      && modelPopover.includes("styles.modelClip")
+      && modelPopover.includes("modelPopoverClipStyle"),
     "every non-absolute chat-chrome material host must bound its backdrop to the component",
   );
   assert(
@@ -118,6 +126,9 @@ Deno.test("endpoint glass never sits under an animated transform or opacity", as
   const modelPopover = await Deno.readTextFile(
     new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
   );
+  const nativeHost = await Deno.readTextFile(
+    new URL("../components/chat/FabLiquidGlassHost.tsx", import.meta.url),
+  );
   const layout = await Deno.readTextFile(
     new URL("../app/_layout.tsx", import.meta.url),
   );
@@ -130,9 +141,12 @@ Deno.test("endpoint glass never sits under an animated transform or opacity", as
       && !entrance.includes("Opacity")
       && entrance.includes("runOnJS(markSettled)")
       && entrance.includes("requestAnimationFrame(() => setMaterialSafe(true))")
-      && screen.includes("entrance.settled ? null : entrance.bottomBarStyle")
+      && screen.includes("const continuousNativeGlass = isMitsuroLiquidGlassAvailable()")
+      && (screen.match(/entrance\.settled \|\| continuousNativeGlass/g)?.length ?? 0) === 3
+      && screen.includes(": entrance.bottomBarStyle")
+      && screen.includes(": entrance.contentStyle")
       && screen.includes("safe={entrance.materialSafe}"),
-    "startup must remove transforms, commit a frame, and only then enable endpoint glass",
+    "supported continuous glass must skip the composer transform while legacy endpoints retain their safe-frame gate",
   );
   assert(
     !accordion.includes("opacity: opacityProgress")
@@ -161,13 +175,17 @@ Deno.test("endpoint glass never sits under an animated transform or opacity", as
       && accordion.includes("styles.graphiteCover")
       && accordion.includes("active={isOpen && materialActive}")
       && accordion.includes("materialCommitFrame = requestAnimationFrame(beginRetraction)")
+      && accordion.includes("nativeGlassActive ? null : (")
+      && nativeHost.includes("Animated.createAnimatedComponent")
+      && nativeHost.includes("animatedProps={animatedProps}")
+      && nativeHost.includes("showComposer={false}")
       && !accordion.includes("GlassMergeCluster")
       && !accordion.includes("GlassContainer")
       && !accordion.includes("DROPLET_STRETCH")
       && !accordion.includes("DROPLET_SCALE")
       && !accordion.includes("[0.01, 1]")
       && !accordion.includes("[24 + index * 6, 0]"),
-    "FAB branches must pour as graphite while native glass stays in fixed settled siblings",
+    "one native background host must own continuous glass while the prior fixed-endpoint fallback remains intact",
   );
   assert(
     accordion.includes("const OPEN_STAGGER_MS = FAB_POUR_OPEN_STAGGER_MS")
@@ -187,8 +205,11 @@ Deno.test("endpoint glass never sits under an animated transform or opacity", as
       && !composer.includes("<GlassContainer")
       && !composer.includes("LiquidMaterialCluster")
       && composer.includes("fixedMaterial.coverStyle")
-      && composer.includes("active={fixedMaterial.materialActive}"),
-    "the Agent and composer must use fixed glass endpoints with a graphite-only crossfade",
+      && composer.includes("active={nativeGlassActive || fixedMaterial.materialActive}")
+      && composer.includes("respectMotionGate={!nativeGlassActive}")
+      && composer.includes("nativeGlassActive={nativeGlassActive}")
+      && composer.includes("nativeProviderGlassActive={nativeProviderGlassActive}"),
+    "composer must retain its fixed endpoint while Agent and branches can be delegated to native glass",
   );
   assert(
     !composer.includes("modelPopoverOpacity")
@@ -206,12 +227,15 @@ Deno.test("endpoint glass never sits under an animated transform or opacity", as
       && composer.includes("modelPopoverScale.value < 0.999")
       && !composer.includes("modelPopoverScale.value = withSpring")
       && !composer.includes("modelPopoverScale.value = withTiming")
-      && !composer.includes("height: PILL + (modelPopoverHeight - PILL) * modelPopoverScale.value")
-      && !composer.includes("borderRadius: RADIUS + (PILL / 2 - RADIUS) * (1 - modelPopoverScale.value)")
-      && composer.includes("modelPopoverTravelDistance")
-      && composer.includes("modelPopoverTravelDistance + MODEL_POPOVER_HIDE_OVERSCAN")
-      && composer.includes("progress / FAB_POUR_GLYPH_REVEAL_END")
+      && composer.includes("const modelPopoverClipStyle = useAnimatedStyle")
+      && composer.includes("const modelPopoverShellStyle = useAnimatedStyle")
+      && composer.includes("PILL + (modelPopoverWidth - PILL) * progress")
+      && composer.includes("PILL + (modelPopoverHeight - PILL) * progress")
+      && composer.includes("MODEL_CONTENT_REVEAL_START")
+      && composer.includes("MODEL_CONTENT_REVEAL_END")
       && composer.includes("FAB_POUR_GLYPH_SETTLE_Y")
+      && composer.includes("modelPopoverClipStyle={modelPopoverClipStyle}")
+      && composer.includes("modelPopoverShellStyle={modelPopoverShellStyle}")
       && composer.includes("modelPopoverContentStyle={modelPopoverContentStyle}")
       && composer.includes("providerBranchCloseDeadlineRef")
       && composer.includes("attachmentBranchCloseDeadlineRef")
@@ -284,7 +308,7 @@ Deno.test("chat chrome icons stay on the thinking violet", async () => {
   );
 });
 
-Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
+Deno.test("React Native never transforms a GlassContainer around FAB content", async () => {
   const composer = await Deno.readTextFile(
     new URL("../components/chat/ChatBar.tsx", import.meta.url),
   );
@@ -306,7 +330,7 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && accordion.includes("{agent}")
       && !accordion.includes("AgentGlassMorphColumn")
       && !accordion.includes("glassEffectId"),
-    "UIKit GlassContainer and SwiftUI Host columns are out; pour uses a Skia silhouette",
+    "React Native controls must not own or transform a UIKit GlassContainer",
   );
   const columnStart = accordion.indexOf("style={styles.mergeColumn}");
   const columnEnd = accordion.indexOf("</GestureDetector>", columnStart);

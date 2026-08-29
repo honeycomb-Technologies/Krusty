@@ -14,8 +14,6 @@ import {
   StyleSheet,
   type GestureResponderEvent,
   type LayoutChangeEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from 'react-native';
 import {
   AdaptiveMaterial,
@@ -38,13 +36,13 @@ import {
   gooeyCanvasWidth,
   gooeyFill,
   pillTravelY,
-  type GooeyProgresses,
 } from './fabGooey';
 import * as Haptics from '../../platform/haptics';
 import Animated, {
   type SharedValue,
   useSharedValue,
   useAnimatedStyle,
+  useAnimatedScrollHandler,
   useAnimatedReaction,
   withSpring,
   withTiming,
@@ -75,8 +73,14 @@ import {
   type ThinkingLevel,
 } from '@mitsuro/api';
 import type { PermissionMode } from '@mitsuro/state';
+import type { FabGlassMotion } from './fabGlassMotion';
 
 interface AccordionControlsProps {
+  glassMotion: FabGlassMotion;
+  /** True only when the linked iOS 26 global glass host owns FAB surfaces. */
+  nativeGlassActive: boolean;
+  /** Provider rail joins the native host only while its full count fits. */
+  nativeProviderGlassActive: boolean;
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
   permissionMode: PermissionMode;
@@ -181,22 +185,11 @@ function useDeferredPresence(present: boolean, unmountMs: number): boolean {
   return present || mounted;
 }
 
-function useGooeyProgresses(): GooeyProgresses {
-  return [
-    useSharedValue(0),
-    useSharedValue(0),
-    useSharedValue(0),
-    useSharedValue(0),
-    useSharedValue(0),
-    useSharedValue(0),
-  ];
-}
-
 /**
- * Staggered presence for every branch of the FAB. The moving surface is always
- * the transform-safe graphite/Skia silhouette. Native glass mounts only in a
- * fixed destination sibling after the spring settles; an opaque graphite
- * cover then yields without ever animating the GlassView itself.
+ * Staggered presence for every branch of the FAB. The optional iOS 26 global
+ * host reads these same SharedValues and moves persistent native glass shapes.
+ * Unsupported runtimes retain the reviewed graphite/Skia traveler and fixed
+ * endpoint handoff without acquiring a second animation clock.
  */
 function usePourMotion({
   isOpen,
@@ -488,6 +481,7 @@ function AccordionPill({
   accessibilityHint,
   onCloseSettled,
   progress: progressProp,
+  nativeGlassActive = false,
 }: {
   children: ReactNode;
   index: number;
@@ -503,6 +497,7 @@ function AccordionPill({
   accessibilityHint?: string;
   onCloseSettled?: () => void;
   progress?: SharedValue<number>;
+  nativeGlassActive?: boolean;
 }) {
   const { theme } = useThemeContext();
   const materialMotionSafe = useAdaptiveMaterialMotionSafe();
@@ -512,7 +507,8 @@ function AccordionPill({
     closeDelayMs: Math.max(0, maxIndex - index) * CLOSE_STAGGER_MS,
     onCloseSettled,
     progress: progressProp,
-    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
+    materialAllowed:
+      !nativeGlassActive && Platform.OS === 'ios' && materialMotionSafe,
   });
 
   const travelStyle = useAnimatedStyle(() => ({
@@ -537,14 +533,16 @@ function AccordionPill({
       ]}
     >
       {sideContent}
-      <AdaptiveMaterial
-        active={isOpen && materialActive}
-        borderRadius={18}
-        tone="regular"
-        fallbackColor={gooeyFill(theme.scheme)}
-        liquidGlassOnly
-        respectMotionGate
-      />
+      {nativeGlassActive ? null : (
+        <AdaptiveMaterial
+          active={isOpen && materialActive}
+          borderRadius={18}
+          tone="regular"
+          fallbackColor={gooeyFill(theme.scheme)}
+          liquidGlassOnly
+          respectMotionGate
+        />
+      )}
       <Animated.View pointerEvents="box-none" style={[styles.pillTraveler, travelStyle]}>
         <Pressable
           accessibilityRole="button"
@@ -559,14 +557,20 @@ function AccordionPill({
             style={[
               styles.pillFace,
               {
-                backgroundColor: Platform.OS === 'ios'
+                backgroundColor: nativeGlassActive
+                  ? 'transparent'
+                  : Platform.OS === 'ios'
                   ? 'transparent'
                   : gooeyFill(theme.scheme),
-                borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
+                borderColor: active
+                  ? theme.colors.thinking + '80'
+                  : nativeGlassActive
+                    ? 'transparent'
+                    : g.borderLight,
               },
             ]}
           >
-            {Platform.OS === 'ios' ? (
+            {Platform.OS === 'ios' && !nativeGlassActive ? (
               <Animated.View
                 pointerEvents="none"
                 style={[
@@ -595,6 +599,7 @@ function InlineActionPill({
   accessibilityLabel,
   closeStaggerMs = CLOSE_STAGGER_MS,
   progress: progressProp,
+  nativeGlassActive = false,
 }: {
   index: number;
   itemCount: number;
@@ -606,6 +611,7 @@ function InlineActionPill({
   accessibilityLabel?: string;
   closeStaggerMs?: number;
   progress?: SharedValue<number>;
+  nativeGlassActive?: boolean;
 }) {
   const { theme } = useThemeContext();
   const materialMotionSafe = useAdaptiveMaterialMotionSafe();
@@ -614,7 +620,8 @@ function InlineActionPill({
     openDelayMs: index * OPEN_STAGGER_MS,
     closeDelayMs: Math.max(0, itemCount - index - 1) * closeStaggerMs,
     progress: progressProp,
-    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
+    materialAllowed:
+      !nativeGlassActive && Platform.OS === 'ios' && materialMotionSafe,
   });
 
   const travelStyle = useAnimatedStyle(() => ({
@@ -637,14 +644,16 @@ function InlineActionPill({
         { width: size, height: size },
       ]}
     >
-      <AdaptiveMaterial
-        active={isOpen && materialActive}
-        borderRadius={size >= 56 ? 18 : 14}
-        tone="regular"
-        fallbackColor={gooeyFill(theme.scheme)}
-        liquidGlassOnly
-        respectMotionGate
-      />
+      {nativeGlassActive ? null : (
+        <AdaptiveMaterial
+          active={isOpen && materialActive}
+          borderRadius={size >= 56 ? 18 : 14}
+          tone="regular"
+          fallbackColor={gooeyFill(theme.scheme)}
+          liquidGlassOnly
+          respectMotionGate
+        />
+      )}
       <Animated.View style={travelStyle}>
         <Pressable
           accessibilityRole="button"
@@ -663,14 +672,20 @@ function InlineActionPill({
                 width: size,
                 height: size,
                 borderRadius: size >= 56 ? 18 : 14,
-                backgroundColor: Platform.OS === 'ios'
+                backgroundColor: nativeGlassActive
+                  ? 'transparent'
+                  : Platform.OS === 'ios'
                   ? 'transparent'
                   : gooeyFill(theme.scheme),
-                borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
+                borderColor: active
+                  ? theme.colors.thinking + '80'
+                  : nativeGlassActive
+                    ? 'transparent'
+                    : g.borderLight,
               },
             ]}
           >
-            {Platform.OS === 'ios' ? (
+            {Platform.OS === 'ios' && !nativeGlassActive ? (
               <Animated.View
                 pointerEvents="none"
                 style={[
@@ -714,6 +729,10 @@ function ProviderDockPill({
   onAutoScrollPointer,
   children,
   progress: progressProp,
+  reorderX: reorderXProp,
+  dragging: draggingProp,
+  editProgress: editProgressProp,
+  nativeGlassActive = false,
 }: {
   provider: ProviderFilterAction;
   index: number;
@@ -733,6 +752,10 @@ function ProviderDockPill({
   onAutoScrollPointer: (absoluteX: number) => void;
   children: ReactNode;
   progress?: SharedValue<number>;
+  reorderX?: SharedValue<number>;
+  dragging?: SharedValue<number>;
+  editProgress?: SharedValue<number>;
+  nativeGlassActive?: boolean;
 }) {
   const { theme } = useThemeContext();
   const animationIndex = Math.max(0, itemCount - index - 1);
@@ -741,21 +764,26 @@ function ProviderDockPill({
     openDelayMs: animationIndex * OPEN_STAGGER_MS,
     closeDelayMs: index * CLOSE_STAGGER_MS,
     progress: progressProp,
-    // These pills live in a horizontally scrolling/reorderable rail, so there
-    // is no truly fixed native destination. Keep them graphite at all times.
+    // The global iOS host follows this rail's shared scroll/reorder state. The
+    // legacy per-pill endpoint handoff stays disabled because there is no fixed
+    // destination inside a scrolling cell.
     materialAllowed: false,
   });
-  const editProgress = useSharedValue(0);
-  const reorderX = useSharedValue(0);
-  const dragging = useSharedValue(0);
+  const fallbackEditProgress = useSharedValue(0);
+  const fallbackReorderX = useSharedValue(0);
+  const fallbackDragging = useSharedValue(0);
+  const editProgress = editProgressProp ?? fallbackEditProgress;
+  const reorderX = reorderXProp ?? fallbackReorderX;
+  const dragging = draggingProp ?? fallbackDragging;
   const rawDragX = useSharedValue(0);
   const suppressNextPressRef = useRef(false);
   const touchStartXRef = useRef(0);
   const touchDragActiveRef = useRef(false);
 
   useEffect(() => {
+    if (editProgressProp) return;
     editProgress.value = withTiming(editMode ? 1 : 0, { duration: 150 });
-  }, [editMode]);
+  }, [editMode, editProgress, editProgressProp]);
 
   useEffect(() => {
     reorderX.value = 0;
@@ -907,7 +935,9 @@ function ProviderDockPill({
           ),
         },
         { translateY: lift + dragLift },
-        { scale: 1 + editProgress.value * 0.02 + dragging.value * 0.05 },
+        {
+          scale: 1 + editProgress.value * 0.02 + dragging.value * 0.05,
+        },
         { rotate: `${tilt}deg` },
       ],
     };
@@ -949,8 +979,14 @@ function ProviderDockPill({
             styles.providerDockPill,
             styles.fabSurface,
             {
-              backgroundColor: gooeyFill(theme.scheme),
-              borderColor: editMode || active ? theme.colors.thinking + '70' : g.borderLight,
+              backgroundColor: nativeGlassActive
+                ? 'transparent'
+                : gooeyFill(theme.scheme),
+              borderColor: editMode || active
+                ? theme.colors.thinking + '70'
+                : nativeGlassActive
+                  ? 'transparent'
+                  : g.borderLight,
             },
           ]}
         >
@@ -964,6 +1000,9 @@ function ProviderDockPill({
 }
 
 export function AccordionControls({
+  glassMotion,
+  nativeGlassActive,
+  nativeProviderGlassActive,
   thinkingLevel,
   onThinkingChange,
   permissionMode,
@@ -999,9 +1038,9 @@ export function AccordionControls({
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const materialMotionSafe = useAdaptiveMaterialMotionSafe();
-  const pillProgresses = useGooeyProgresses();
-  const providerProgresses = useGooeyProgresses();
-  const attachProgresses = useGooeyProgresses();
+  const pillProgresses = glassMotion.pillProgresses;
+  const providerProgresses = glassMotion.providerProgresses;
+  const attachProgresses = glassMotion.attachmentProgresses;
   // Desktop has room — no edge-fade “scroll chrome” or long-press reorder.
   const enableProviderReorder = !isDesktop && providerFilters.length > 1;
   const providerScrollRef = useRef<ScrollView>(null);
@@ -1019,16 +1058,25 @@ export function AccordionControls({
   const [providerDragging, setProviderDragging] = useState(false);
   const [providerPourOpen, setProviderPourOpen] = useState(false);
   const [providerPourSettled, setProviderPourSettled] = useState(false);
-  const providerDragIndex = useSharedValue(-1);
-  const providerDropIndex = useSharedValue(-1);
-  const providerDragX = useSharedValue(0);
-  const providerDragScrollDelta = useSharedValue(0);
+  const providerDragIndex = glassMotion.providerDragIndex;
+  const providerDropIndex = glassMotion.providerDropIndex;
+  const providerDragX = glassMotion.providerDragX;
+  const providerDragScrollDelta = glassMotion.providerDragScrollDelta;
+  const providerScrollX = glassMotion.providerScrollX;
+  const providerViewportClip = glassMotion.providerViewportClip;
   const hasWorkMode = sessionType === 'code';
   const modelManagedByHive = sessionType === 'hive';
   const maxPillIndex = hasWorkMode ? 5 : 4;
   const modelPillIndex = maxPillIndex;
   const attachPillIndex = hasWorkMode ? 4 : 3;
   const thinkingSupported = supportsThinking(modelInfo ?? model);
+
+  useEffect(() => {
+    glassMotion.providerEditProgress.value = withTiming(
+      providerEditMode ? 1 : 0,
+      { duration: 150 },
+    );
+  }, [glassMotion.providerEditProgress, providerEditMode]);
 
   const clearProviderEditExitTimer = useCallback(() => {
     if (!providerEditExitTimerRef.current) return;
@@ -1070,8 +1118,9 @@ export function AccordionControls({
       estimateProviderContentWidth(),
     );
     metrics.x = Math.max(0, metrics.contentWidth - metrics.width);
+    providerScrollX.value = metrics.x;
     providerScrollRef.current?.scrollToEnd({ animated: false });
-  }, [estimateProviderContentWidth]);
+  }, [estimateProviderContentWidth, providerScrollX]);
 
   const clearProviderPourSchedule = useCallback(() => {
     if (providerPourFrameRef.current !== null) {
@@ -1092,10 +1141,11 @@ export function AccordionControls({
     if (Math.abs(clampedX - metrics.x) < 0.5) return false;
 
     metrics.x = clampedX;
+    providerScrollX.value = clampedX;
     providerDragScrollDelta.value = clampedX - providerDragStartScrollXRef.current;
     providerScrollRef.current?.scrollTo({ x: clampedX, animated: false });
     return true;
-  }, [providerDragScrollDelta]);
+  }, [providerDragScrollDelta, providerScrollX]);
 
   const stepProviderAutoScroll = useCallback(() => {
     providerAutoScrollFrameRef.current = null;
@@ -1220,7 +1270,8 @@ export function AccordionControls({
     closeDelayMs: 0,
     progress: modelPopoverProgress,
     coverOpacity: modelPopoverCoverOpacity,
-    materialAllowed: Platform.OS === 'ios' && materialMotionSafe,
+    materialAllowed:
+      !nativeGlassActive && Platform.OS === 'ios' && materialMotionSafe,
     onMaterialActiveChange: onModelPopoverMaterialActiveChange,
   });
 
@@ -1237,6 +1288,7 @@ export function AccordionControls({
       // end position. Give ScrollView one frame to apply the no-animation snap
       // before the shared close progress begins.
       alignProviderDockToEnd();
+      providerViewportClip.value = 0;
       if (!providerPourOpen) return clearProviderPourSchedule;
       providerPourFrameRef.current = requestAnimationFrame(() => {
         providerPourFrameRef.current = null;
@@ -1247,14 +1299,17 @@ export function AccordionControls({
 
     providerDockOpenRef.current = true;
     if (providerPourOpen) {
+      providerViewportClip.value = 0;
       alignProviderDockToEnd();
       providerPourSettleTimerRef.current = setTimeout(() => {
         providerPourSettleTimerRef.current = null;
         setProviderPourSettled(true);
+        providerViewportClip.value = 1;
       }, pourOpenDurationMs(providerFilters.length));
       return clearProviderPourSchedule;
     }
 
+    providerViewportClip.value = 0;
     providerPourFrameRef.current = requestAnimationFrame(() => {
       alignProviderDockToEnd();
       measureProviderDock();
@@ -1264,6 +1319,7 @@ export function AccordionControls({
         providerPourSettleTimerRef.current = setTimeout(() => {
           providerPourSettleTimerRef.current = null;
           setProviderPourSettled(true);
+          providerViewportClip.value = 1;
         }, pourOpenDurationMs(providerFilters.length));
       });
     });
@@ -1276,8 +1332,13 @@ export function AccordionControls({
     providerDockOpen,
     providerFilters.length,
     providerPourOpen,
+    providerViewportClip,
     resetProviderDockDragState,
   ]);
+
+  useEffect(() => () => {
+    providerViewportClip.value = 0;
+  }, [providerViewportClip]);
 
   const handleProviderScrollLayout = useCallback((event: LayoutChangeEvent) => {
     providerScrollMetricsRef.current.width = event.nativeEvent.layout.width;
@@ -1292,21 +1353,37 @@ export function AccordionControls({
     if (providerDockOpenRef.current && !providerDraggingRef.current) {
       const metrics = providerScrollMetricsRef.current;
       metrics.x = Math.max(0, metrics.contentWidth - metrics.width);
+      providerScrollX.value = metrics.x;
       providerScrollRef.current?.scrollToEnd({ animated: false });
     }
-  }, [estimateProviderContentWidth]);
+  }, [estimateProviderContentWidth, providerScrollX]);
 
-  const handleProviderScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+  const syncProviderScrollMetrics = useCallback((
+    x: number,
+    width: number,
+    contentWidth: number,
+  ) => {
     providerScrollMetricsRef.current = {
-      x: contentOffset.x,
-      width: layoutMeasurement.width,
-      contentWidth: Math.max(contentSize.width, estimateProviderContentWidth()),
+      x,
+      width,
+      contentWidth: Math.max(contentWidth, estimateProviderContentWidth()),
     };
     if (providerDraggingRef.current) {
-      providerDragScrollDelta.value = contentOffset.x - providerDragStartScrollXRef.current;
+      providerDragScrollDelta.value = x - providerDragStartScrollXRef.current;
     }
   }, [estimateProviderContentWidth, providerDragScrollDelta]);
+
+  const handleProviderScroll = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      const x = event.contentOffset.x;
+      providerScrollX.value = x;
+      runOnJS(syncProviderScrollMetrics)(
+        x,
+        event.layoutMeasurement.width,
+        event.contentSize.width,
+      );
+    },
+  });
 
   const handleProviderDragStart = useCallback((_providerId: string, _index: number, absoluteX: number) => {
     if (!providerPourSettled) return;
@@ -1410,32 +1487,34 @@ export function AccordionControls({
             ]}
           >
             <View style={[styles.sideRow, styles.pointerBoxNone]}>
-              <View
-                pointerEvents="none"
-                style={[
-                  styles.branchGooeyViewport,
-                  {
-                    height: gooeyCanvasHeight(providerBranchCount, 'horizontal'),
-                  },
-                ]}
-              >
+              {nativeProviderGlassActive ? null : (
                 <View
+                  pointerEvents="none"
                   style={[
-                    styles.branchGooeyLayer,
+                    styles.branchGooeyViewport,
                     {
-                      width: gooeyCanvasWidth(providerBranchCount, 'horizontal'),
                       height: gooeyCanvasHeight(providerBranchCount, 'horizontal'),
                     },
                   ]}
                 >
-                  <FabGooeyLayer
-                    progresses={providerProgresses}
-                    pillCount={providerBranchCount}
-                    fill={gooeyFill(theme.scheme)}
-                    orientation="horizontal"
-                  />
+                  <View
+                    style={[
+                      styles.branchGooeyLayer,
+                      {
+                        width: gooeyCanvasWidth(providerBranchCount, 'horizontal'),
+                        height: gooeyCanvasHeight(providerBranchCount, 'horizontal'),
+                      },
+                    ]}
+                  >
+                    <FabGooeyLayer
+                      progresses={providerProgresses}
+                      pillCount={providerBranchCount}
+                      fill={gooeyFill(theme.scheme)}
+                      orientation="horizontal"
+                    />
+                  </View>
                 </View>
-              </View>
+              )}
               {isDesktop ? (
                 <View style={[styles.desktopModelRow, styles.pointerBoxNone]}>
                   {desktopFiltersMounted
@@ -1470,7 +1549,7 @@ export function AccordionControls({
                     },
                   ]}
                 >
-                  <ScrollView
+                  <Animated.ScrollView
                     ref={providerScrollRef}
                     horizontal
                     bounces={false}
@@ -1513,43 +1592,53 @@ export function AccordionControls({
                         progress={branchIndex < MAX_GOOEY_PILLS
                           ? providerProgresses[branchIndex]
                           : undefined}
+                        reorderX={branchIndex < MAX_GOOEY_PILLS
+                          ? glassMotion.providerReorderX[branchIndex]
+                          : undefined}
+                        dragging={branchIndex < MAX_GOOEY_PILLS
+                          ? glassMotion.providerDragging[branchIndex]
+                          : undefined}
+                        editProgress={glassMotion.providerEditProgress}
+                        nativeGlassActive={nativeProviderGlassActive}
                       >
                         {provider.icon}
                       </ProviderDockPill>
                         );
                       })
                       : null}
-                  </ScrollView>
+                  </Animated.ScrollView>
                 </Animated.View>
               )}
             </View>
             <View style={[styles.sideRow, styles.pointerBoxNone]}>
-              <View
-                pointerEvents="none"
-                style={[
-                  styles.branchGooeyViewport,
-                  {
-                    height: gooeyCanvasHeight(ATTACH_ACTION_COUNT, 'horizontal'),
-                  },
-                ]}
-              >
+              {nativeGlassActive ? null : (
                 <View
+                  pointerEvents="none"
                   style={[
-                    styles.branchGooeyLayer,
+                    styles.branchGooeyViewport,
                     {
-                      width: gooeyCanvasWidth(ATTACH_ACTION_COUNT, 'horizontal'),
                       height: gooeyCanvasHeight(ATTACH_ACTION_COUNT, 'horizontal'),
                     },
                   ]}
                 >
-                  <FabGooeyLayer
-                    progresses={attachProgresses}
-                    pillCount={ATTACH_ACTION_COUNT}
-                    fill={gooeyFill(theme.scheme)}
-                    orientation="horizontal"
-                  />
+                  <View
+                    style={[
+                      styles.branchGooeyLayer,
+                      {
+                        width: gooeyCanvasWidth(ATTACH_ACTION_COUNT, 'horizontal'),
+                        height: gooeyCanvasHeight(ATTACH_ACTION_COUNT, 'horizontal'),
+                      },
+                    ]}
+                  >
+                    <FabGooeyLayer
+                      progresses={attachProgresses}
+                      pillCount={ATTACH_ACTION_COUNT}
+                      fill={gooeyFill(theme.scheme)}
+                      orientation="horizontal"
+                    />
+                  </View>
                 </View>
-              </View>
+              )}
               <View
                 style={[
                   styles.attachActions,
@@ -1567,6 +1656,7 @@ export function AccordionControls({
                       onPress={onPickFile}
                       accessibilityLabel="Attach file"
                       progress={attachProgresses[2]}
+                      nativeGlassActive={nativeGlassActive}
                     >
                       <FileText size={23} color={fabAccent} strokeWidth={1.7} />
                     </InlineActionPill>
@@ -1577,6 +1667,7 @@ export function AccordionControls({
                       onPress={onPickCamera}
                       accessibilityLabel="Take photo"
                       progress={attachProgresses[1]}
+                      nativeGlassActive={nativeGlassActive}
                     >
                       <Camera size={23} color={fabAccent} strokeWidth={1.7} />
                     </InlineActionPill>
@@ -1587,6 +1678,7 @@ export function AccordionControls({
                       onPress={onPickPhoto}
                       accessibilityLabel="Choose photo"
                       progress={attachProgresses[0]}
+                      nativeGlassActive={nativeGlassActive}
                     >
                       <ImageIcon size={23} color={fabAccent} strokeWidth={1.7} />
                     </InlineActionPill>
@@ -1597,24 +1689,26 @@ export function AccordionControls({
           </View>
         ) : null}
         <View pointerEvents="box-none" style={styles.mergeColumn}>
-          <View
-            pointerEvents="none"
-            style={[
-              styles.gooeyLayer,
-              {
-                width: gooeyCanvasWidth(),
-                height: gooeyCanvasHeight(gooeyPillCount),
-                right: -GOOEY_PAD,
-                bottom: -GOOEY_PAD,
-              },
-            ]}
-          >
-            <FabGooeyLayer
-              progresses={pillProgresses}
-              pillCount={gooeyPillCount}
-              fill={gooeyFill(theme.scheme)}
-            />
-          </View>
+          {nativeGlassActive ? null : (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.gooeyLayer,
+                {
+                  width: gooeyCanvasWidth(),
+                  height: gooeyCanvasHeight(gooeyPillCount),
+                  right: -GOOEY_PAD,
+                  bottom: -GOOEY_PAD,
+                },
+              ]}
+            >
+              <FabGooeyLayer
+                progresses={pillProgresses}
+                pillCount={gooeyPillCount}
+                fill={gooeyFill(theme.scheme)}
+              />
+            </View>
+          )}
           <GestureDetector gesture={swipeDown}>
             <View style={styles.mergePills}>
               {pillsMounted ? (
@@ -1628,6 +1722,7 @@ export function AccordionControls({
             compact
             maxIndex={maxPillIndex}
             progress={pillProgresses[modelPillIndex]}
+            nativeGlassActive={nativeGlassActive}
             accessibilityLabel={modelManagedByHive
               ? "Hive-managed model"
               : "Choose model"}
@@ -1650,6 +1745,7 @@ export function AccordionControls({
             compact
             maxIndex={maxPillIndex}
             progress={pillProgresses[attachPillIndex]}
+            nativeGlassActive={nativeGlassActive}
             accessibilityLabel="Add attachment"
           >
             <Paperclip
@@ -1667,6 +1763,7 @@ export function AccordionControls({
               compact
               maxIndex={maxPillIndex}
               progress={pillProgresses[3]}
+              nativeGlassActive={nativeGlassActive}
               accessibilityLabel={mode === 'build' ? 'Build mode' : 'Plan mode'}
               accessibilityHint="Switch between Build and Plan"
             >
@@ -1685,6 +1782,7 @@ export function AccordionControls({
             compact
             maxIndex={maxPillIndex}
             progress={pillProgresses[2]}
+            nativeGlassActive={nativeGlassActive}
             accessibilityLabel={permissionMode === 'supervised' ? 'Supervised permissions' : 'Autonomous permissions'}
             accessibilityHint="Switch permission mode"
           >
@@ -1704,6 +1802,7 @@ export function AccordionControls({
             compact
             maxIndex={maxPillIndex}
             progress={pillProgresses[1]}
+            nativeGlassActive={nativeGlassActive}
             accessibilityLabel={fastModeSupported ? (fastModeEnabled ? 'Fast mode on' : 'Fast mode off') : 'Fast mode unavailable for this model'}
             accessibilityHint={fastModeSupported ? 'Toggle provider speed mode' : undefined}
           >
@@ -1722,6 +1821,7 @@ export function AccordionControls({
             compact
             maxIndex={maxPillIndex}
             progress={pillProgresses[0]}
+            nativeGlassActive={nativeGlassActive}
             onCloseSettled={handleLastPillSettled}
             accessibilityLabel={thinkingSupported ? `Thinking ${thinkingLevel}` : 'Thinking unavailable for this model'}
             accessibilityHint={thinkingSupported ? 'Cycle thinking level' : undefined}
