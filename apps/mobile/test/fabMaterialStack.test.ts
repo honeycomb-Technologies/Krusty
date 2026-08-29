@@ -27,18 +27,20 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   assert(
     !accordion.includes("style={styles.fabMaterialLayer}")
       && !composer.includes("style={styles.fabMaterialLayer}"),
-    "FABs must use the centralized AdaptiveMaterial compositor layer",
+    "FABs must not reintroduce an extra compositor layer",
   );
   assert(
-    !accordion.includes("g.backgroundElevated")
-      && accordion.match(/: 'transparent'/g)?.length === 4,
-    "every idle accordion FAB must expose the shared material instead of stacking a private tint",
+    !accordion.includes("AdaptiveMaterial")
+      && !accordion.includes("theme.colors.thinking + '18'")
+      && (accordion.match(/backgroundColor: gooeyFill\(theme\.scheme\)/g)?.length ?? 0) === 4,
+    "every FAB branch must keep one graphite surface without a selected-state fill",
   );
   assert(
-    accordion.match(/tone="regular"/g)?.length === 4
-      && (accordion.match(/interactive/g)?.length ?? 0) >= 4
-      && composer.match(/tone="regular"/g)?.length === 2,
-    "composer and FAB controls must use one floating material tone",
+    composer.match(/tone="regular"/g)?.length === 1
+      && composer.includes("backgroundColor: gooeyFill(theme.scheme)")
+      && modelPopover.includes("backgroundColor: surfaceColor")
+      && !modelPopover.includes("AdaptiveMaterial"),
+    "only the composer keeps adaptive material; FAB and model surfaces stay color-stable",
   );
   assert(
     material.includes('const [webBlurReady, setWebBlurReady]')
@@ -73,10 +75,11 @@ Deno.test("FAB material strength is stable before and after interaction", async 
     "only the blur fallback may add a translucent glass-fill overlay",
   );
   assert(
-    accordion.match(/styles\.materialHost/g)?.length === 4
+    accordion.includes("styles.branchGooeyLayer")
+      && accordion.includes("styles.branchGooeyViewport")
       && accordion.includes("position: 'relative'")
       && (composer.match(/position: 'relative'/g)?.length ?? 0) >= 2,
-    "every composer and FAB material host must anchor its background layer",
+    "horizontal branches and composer surfaces must stay locally anchored",
   );
   assert(
     (header.match(/position: ["']relative["']/g)?.length ?? 0) >= 3
@@ -85,11 +88,11 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
   assert(
     accordion.includes("styles.pillOuterCompact")
-      && accordion.includes("styles.pillSlot")
       && accordion.includes("styles.pillTraveler")
       && accordion.includes("<FabGlyph progress={progress}>")
+      && accordion.includes("orientation=\"horizontal\"")
       && !accordion.includes("styles.pointerBoxNone,\n        animatedStyle,"),
-    "accordion glass stays in its slot; icons travel on the gooey silhouette",
+    "main and secondary FAB controls must travel on the shared silhouette",
   );
   assert(
     composer.includes("if (Platform.OS === 'web') return;")
@@ -130,22 +133,24 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
       && accordion.includes("GLYPH_SETTLE_Y")
       && accordion.includes("<FabGlyph progress={revealProgress}>")
       && accordion.includes("<FabGlyph progress={progress}>"),
-    "provider dock glyphs may fade on their own layer; accordion icons appear with the glass tile",
+    "provider dock glyphs may fade on their own layer while the stable tile travels",
   );
   assert(
     accordion.includes("styles.mergeColumn")
       && accordion.includes("pillsMounted")
-      && accordion.includes("PILL_SETTLE_MS")
+      && accordion.includes("FAB_POUR_CLOSE_MS")
       && accordion.includes("<FabGooeyLayer")
+      && (accordion.match(/orientation="horizontal"/g)?.length ?? 0) === 2
       && accordion.includes("from './fabGooey'")
-      && accordion.includes("crystallizeOnSettle: true")
+      && !accordion.includes("crystallizeOnSettle")
+      && !accordion.includes("AdaptiveMaterial")
       && !accordion.includes("GlassMergeCluster")
       && !accordion.includes("GlassContainer")
       && !accordion.includes("DROPLET_STRETCH")
       && !accordion.includes("DROPLET_SCALE")
       && !accordion.includes("[0.01, 1]")
       && !accordion.includes("[24 + index * 6, 0]"),
-    "GlassView must not move; the pour is a Skia silhouette under traveling icons",
+    "all FAB branches must pour on one Skia surface without moving native glass",
   );
   assert(
     accordion.includes("const OPEN_STAGGER_MS = 58")
@@ -167,8 +172,11 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
   );
   assert(
     !composer.includes("modelPopoverOpacity")
-      && !composer.includes("opacity: modelPopoverOpacity"),
-    "the model popover must not fade its AdaptiveMaterial ancestor",
+      && !composer.includes("opacity: modelPopoverOpacity")
+      && composer.includes("surfaceColor={gooeyFill(theme.scheme)}")
+      && composer.includes("withSpring(1, FAB_POUR_OPEN_SPRING)")
+      && composer.includes("withTiming(0, { duration: FAB_POUR_CLOSE_MS })"),
+    "the model popover must use the same stable surface and exact pour timing",
   );
   assert(
     layout.includes("animation: 'none'"),
@@ -248,7 +256,7 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && docks.includes("ProviderDockPill")
       && docks.includes("InlineActionPill")
       && docks.includes("DesktopFilterPill"),
-    "provider, attach, and desktop filter glass stay outside the Agent column",
+    "provider and attachment branches stay structurally separate from the Agent column",
   );
   assert(
     material.includes('blurMethod={platform === "android" ? "none" : undefined}'),
@@ -262,9 +270,11 @@ Deno.test("chat chrome never wraps FABs in GlassContainer", async () => {
       && accordion.includes("providerDockMounted")
       && accordion.includes("attachActionsMounted")
       && accordion.includes("desktopFiltersMounted")
-      && accordion.includes("active={materialActive}")
-      && !accordion.includes("function useFabMaterialActive"),
-    "glass must exist for the whole pour and must not exist for closed provider/attach docks",
+      && accordion.includes("providerProgresses")
+      && accordion.includes("attachProgresses")
+      && !accordion.includes("materialActive")
+      && !accordion.includes("AdaptiveMaterial"),
+    "secondary branches must retain deferred presence while sharing the stable pour surface",
   );
 });
 

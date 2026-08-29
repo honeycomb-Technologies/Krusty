@@ -4,7 +4,6 @@ import Animated from "react-native-reanimated";
 import * as Haptics from "../../platform/haptics";
 import type { ModelInfo } from "@mitsuro/api";
 import { modelKeysEqual } from "@mitsuro/state";
-import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 
 const PILL = 56;
 const RADIUS = 18;
@@ -32,6 +31,7 @@ export interface ChatBarModelPopoverProps {
   thinking: string;
   backgroundElevated: string;
   backgroundPressed: string;
+  surfaceColor: string;
   filteredModels: ModelInfo[];
   selectedModel: ModelInfo | null;
   onSelectModel: (model: ModelInfo) => void;
@@ -67,6 +67,7 @@ function ChatBarModelPopoverComponent({
   thinking,
   backgroundElevated,
   backgroundPressed,
+  surfaceColor,
   filteredModels,
   selectedModel,
   onSelectModel,
@@ -100,13 +101,9 @@ function ChatBarModelPopoverComponent({
         style={[
           styles.modelPopover,
           modelPopoverStyle,
-          { borderColor },
+          { borderColor, backgroundColor: surfaceColor },
         ]}
       >
-        <AdaptiveMaterial
-          borderRadius={RADIUS}
-          tone="elevated"
-        />
         <FlatList
           data={filteredModels}
           keyExtractor={modelRowKey}

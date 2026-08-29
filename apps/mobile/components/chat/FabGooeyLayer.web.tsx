@@ -1,6 +1,10 @@
 import { WithSkiaWeb } from '@shopify/react-native-skia/lib/module/web';
 
-import { FAB_GOOEY_ENABLED, type GooeyProgresses } from './fabGooey';
+import {
+  FAB_GOOEY_ENABLED,
+  type GooeyOrientation,
+  type GooeyProgresses,
+} from './fabGooey';
 
 const loadGooeyLayer = async () => {
   const module = await import('./FabGooeyLayerCore');
@@ -11,6 +15,7 @@ export function FabGooeyLayer(props: {
   progresses: GooeyProgresses;
   pillCount: number;
   fill: string;
+  orientation?: GooeyOrientation;
 }) {
   if (!FAB_GOOEY_ENABLED) return null;
   return (

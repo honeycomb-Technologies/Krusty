@@ -9,9 +9,12 @@ import {
   GOOEY_PAD,
   GOOEY_SKSL,
   GOOEY_SMIN,
+  gooeyAnchorPoint,
+  gooeyAxis,
   gooeyCanvasHeight,
   gooeyCanvasWidth,
   parseGooeyFill,
+  type GooeyOrientation,
   type GooeyProgresses,
 } from './fabGooey';
 
@@ -29,13 +32,17 @@ export function FabGooeyLayer({
   progresses,
   pillCount,
   fill,
+  orientation = 'vertical',
 }: {
   progresses: GooeyProgresses;
   pillCount: number;
   fill: string;
+  orientation?: GooeyOrientation;
 }) {
-  const width = gooeyCanvasWidth();
-  const height = gooeyCanvasHeight(pillCount);
+  const width = gooeyCanvasWidth(pillCount, orientation);
+  const height = gooeyCanvasHeight(pillCount, orientation);
+  const [anchorX, anchorY] = gooeyAnchorPoint(pillCount, orientation);
+  const [axisX, axisY] = gooeyAxis(orientation);
   const color = useMemo(() => parseGooeyFill(fill), [fill]);
   const p0 = progresses[0];
   const p1 = progresses[1];
@@ -47,6 +54,8 @@ export function FabGooeyLayer({
     'worklet';
     return {
       u_resolution: [width, height],
+      u_anchor: [anchorX, anchorY],
+      u_axis: [axisX, axisY],
       u_pad: GOOEY_PAD,
       u_pill: FAB_PILL,
       u_radius: FAB_RADIUS,
@@ -61,7 +70,22 @@ export function FabGooeyLayer({
       u_p4: p4.value,
       u_p5: p5.value,
     };
-  }, [color, height, p0, p1, p2, p3, p4, p5, pillCount, width]);
+  }, [
+    anchorX,
+    anchorY,
+    axisX,
+    axisY,
+    color,
+    height,
+    p0,
+    p1,
+    p2,
+    p3,
+    p4,
+    p5,
+    pillCount,
+    width,
+  ]);
 
   if (!gooeyEffect || width <= 0 || height <= 0) return null;
 

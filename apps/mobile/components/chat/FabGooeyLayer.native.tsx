@@ -1,11 +1,16 @@
 import { useEffect, useState, type ComponentType } from 'react';
 
-import { FAB_GOOEY_ENABLED, type GooeyProgresses } from './fabGooey';
+import {
+  FAB_GOOEY_ENABLED,
+  type GooeyOrientation,
+  type GooeyProgresses,
+} from './fabGooey';
 
 type LayerProps = {
   progresses: GooeyProgresses;
   pillCount: number;
   fill: string;
+  orientation?: GooeyOrientation;
 };
 
 /**

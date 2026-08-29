@@ -36,10 +36,16 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
+  withTiming,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls, pourCloseDurationMs } from './AccordionControls';
+import {
+  FAB_POUR_CLOSE_MS,
+  FAB_POUR_OPEN_SPRING,
+  gooeyFill,
+} from './fabGooey';
 import { ChatBarActionButton } from './ChatBarActionButton';
 import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
@@ -154,8 +160,8 @@ const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
  * of the FlatList even though the transparent rows use `box-none`.
  */
 const MODEL_POPOVER_Z_INDEX = 45;
-/** Matches AccordionControls PROVIDER_PILL_STEP (56 + 8 gap). */
-const PROVIDER_PILL_STEP = 64;
+/** Matches the shared FAB/provider center-to-center rhythm. */
+const PROVIDER_PILL_STEP = PILL + GAP;
 /** Gap between provider dock / model list and the Agent FAB column. */
 const DOCK_TO_FAB_GAP = 10;
 const WEB_INPUT_STYLE = Platform.OS === 'web'
@@ -1035,17 +1041,17 @@ function ChatBarComponent(props: ChatBarProps) {
     modelPopoverScale.value = 0;
     setModelRailOpen(true);
     setModelPickerOpen(true);
-    modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
+    modelPopoverScale.value = withSpring(1, FAB_POUR_OPEN_SPRING);
   };
   const closeModelPicker = useCallback(() => {
     clearModelCloseTimer();
     setModelRailOpen(false);
-    modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
+    modelPopoverScale.value = withTiming(0, { duration: FAB_POUR_CLOSE_MS });
     modelCloseTimerRef.current = setTimeout(() => {
       setModelPickerOpen(false);
       setSelectedProviderFilter(null);
       modelCloseTimerRef.current = null;
-    }, 180);
+    }, FAB_POUR_CLOSE_MS);
   }, [clearModelCloseTimer, modelPopoverScale]);
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
@@ -1224,17 +1230,16 @@ function ChatBarComponent(props: ChatBarProps) {
         surfaceModelPopoverMaxHeight,
         Math.max(0, viewportHeight - overlayBottom - modelPopoverTopInset),
       );
-  // Match desktop filter row: n×56px pills with 8px gaps (no trailing gap).
+  // Match desktop filter row: n×56px pills on the shared 66px rhythm.
   const providerCount = Math.max(1, visualProviderFilters.length);
   const providerDockWidth =
-    providerCount * 56 + Math.max(0, providerCount - 1) * 8;
+    providerCount * PILL + Math.max(0, providerCount - 1) * GAP;
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
   // Accordion and model list share the pre-plan composer band: root padding
   // on the left, Agent FAB + gap on the right. That is the same right edge
   // as the input bar.
-  const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
-    ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
+    ? ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
   return (
@@ -1336,8 +1341,8 @@ function ChatBarComponent(props: ChatBarProps) {
       )}
 
       {/* L-shape: [input bar] + spacer. Agent lives in AccordionControls
-          with the compact pills. Skia paints the pour silhouette; glass
-          crystallizes in each 56pt slot. Never GlassContainer. */}
+          with the compact pills. Skia bridges one stable graphite surface
+          through the fixed 56pt destinations. */}
       <View style={styles.lRow}>
         {/* Input bar */}
         <View
@@ -1462,10 +1467,15 @@ function ChatBarComponent(props: ChatBarProps) {
                   },
                 ]}
               >
-                <AdaptiveMaterial
-                  borderRadius={RADIUS}
-                  tone="regular"
-                  interactive
+                <View
+                  pointerEvents="none"
+                  style={[
+                    StyleSheet.absoluteFill,
+                    {
+                      borderRadius: RADIUS,
+                      backgroundColor: gooeyFill(theme.scheme),
+                    },
+                  ]}
                 />
                 <View style={styles.kInner}>
                   <MitsuroMark size={26} color={kColor} strokeWidth={62} />
@@ -1526,6 +1536,7 @@ function ChatBarComponent(props: ChatBarProps) {
           thinking={t.thinking}
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
+          surfaceColor={gooeyFill(theme.scheme)}
           filteredModels={filteredModels}
           selectedModel={selectedModelInfo}
           onSelectModel={handleModelSelectFromPicker}
