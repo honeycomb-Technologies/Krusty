@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use tokio::sync::mpsc::WeakSender;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,7 +24,6 @@ use mitsuro_core::SessionManager;
 use super::stream_notify::ChatStreamRunOutcome;
 use super::{ChatSessionContext, SSE_CHANNEL_BUFFER};
 use crate::error::AppError;
-use crate::routes::sse::{SSE_KEEP_ALIVE_INTERVAL, SSE_REQUIRED_DELIVERY_TIMEOUT};
 use crate::types::{
     AgenticEvent, DelegatedAgentStateResponse, DelegatedRunStage, DelegatedToolStateResponse,
 };
@@ -81,8 +80,7 @@ pub(super) async fn start_orchestrator_sse(
     let run = start_chat_run(state, ctx, work_mode, permission_mode, generate_title)?;
     launch_chat_run_bridge(state, run, sse_tx).await;
 
-    let stream = ReceiverStream::new(sse_rx);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL)))
+    Ok(crate::routes::sse::sse_response(sse_rx))
 }
 
 /// Resume an idle Chat/Code session without an attached SSE client while
@@ -587,7 +585,6 @@ pub(super) async fn run_orchestrator_event_bridge(
             &loop_event,
         );
         let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-        let requires_delivery = loop_event_requires_delivery(&loop_event);
 
         if is_finished {
             // Serialize the final foreground boundary against delegated sends:
@@ -598,15 +595,6 @@ pub(super) async fn run_orchestrator_event_bridge(
 
         let delivered = if !sse_connected {
             true
-        } else if requires_delivery {
-            matches!(
-                tokio::time::timeout(
-                    SSE_REQUIRED_DELIVERY_TIMEOUT,
-                    forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events),
-                )
-                .await,
-                Ok(true)
-            )
         } else {
             forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await
         };

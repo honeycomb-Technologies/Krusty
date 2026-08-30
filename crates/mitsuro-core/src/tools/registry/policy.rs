@@ -673,11 +673,6 @@ pub fn tool_category(name: &str) -> ToolCategory {
     tool_policy(name).category
 }
 
-/// Resolve the canonical policy for a concrete tool call.
-///
-/// This extends the name-only policy with argument-aware intent detection for
-/// polymorphic tools. In particular, `agent(agent_type = "build")` is
-/// write-capable even though other agent subtypes are read-only delegations.
 /// Canonical direct Code tool surface for an effective work mode.
 ///
 /// Single source shared by the agent loop's mode transitions and the HTTP
@@ -703,6 +698,11 @@ pub fn filter_code_tools_for_mode(
     .filter(tools)
 }
 
+/// Resolve the canonical policy for a concrete tool call.
+///
+/// This extends the name-only policy with argument-aware intent detection for
+/// polymorphic tools. In particular, `agent(agent_type = "build")` is
+/// write-capable even though other agent subtypes are read-only delegations.
 pub fn tool_policy_for_call(name: &str, params: &Value) -> ToolPolicy {
     match name {
         "agent" => agent_tool_policy(params),

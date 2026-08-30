@@ -129,7 +129,7 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                         .with_changed(new_content != content)
                         .with_progress_change_paths(
                             std::slice::from_ref(&path),
-                            ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                            ctx.file_resolution_root(),
                         )
                 }
                 Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
@@ -190,7 +190,7 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                                 .with_changed(new_content != content)
                                 .with_progress_change_paths(
                                     std::slice::from_ref(&path),
-                                    ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                                    ctx.file_resolution_root(),
                                 )
                         }
                         Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),

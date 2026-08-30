@@ -340,7 +340,7 @@ impl AgentTool {
                         ctx.session_id.clone(),
                     )
                     .with_provider_call_trace(ctx.provider_call_trace.clone());
-                if let Some(sandbox_root) = ctx.sandbox_root.clone() {
+                if let Some(sandbox_root) = ctx.scoped_root().cloned() {
                     task = task.with_sandbox_root(sandbox_root);
                 }
                 if let Some(max_turns) = params.max_turns {
@@ -379,7 +379,7 @@ impl AgentTool {
                     ctx.session_id.clone(),
                 )
                 .with_provider_call_trace(ctx.provider_call_trace.clone());
-            if let Some(sandbox_root) = ctx.sandbox_root.clone() {
+            if let Some(sandbox_root) = ctx.scoped_root().cloned() {
                 task = task.with_sandbox_root(sandbox_root);
             }
             if let Some(max_turns) = params.max_turns {

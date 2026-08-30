@@ -375,10 +375,7 @@ impl AgentTool {
             }
         }
 
-        let inherited_sandbox = ctx
-            .sandbox_root
-            .clone()
-            .unwrap_or_else(|| working_dir.clone());
+        let inherited_sandbox = ctx.file_resolution_root().to_path_buf();
         let mut task = SubAgentTask::new("child-0", &task_prompt)
             .with_name(child_name.clone())
             .with_working_dir(working_dir)

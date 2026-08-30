@@ -8,6 +8,7 @@ use super::{
     background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path, BashTool,
 };
 use crate::process::ProcessRegistry;
+use crate::tools::registry::FilesystemAccess;
 use crate::tools::registry::Tool;
 use crate::tools::{ToolContext, ToolResult};
 use serde_json::json;
@@ -308,7 +309,7 @@ async fn foreground_bash_reports_real_file_state_deltas() {
     std::fs::create_dir(&state_dir).expect("state dir");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
-        sandbox_root: Some(working_dir.clone()),
+        filesystem_access: FilesystemAccess::scoped(working_dir.clone()),
         db_path: Some(state_dir.join("mitsuro.db")),
         ..Default::default()
     };
@@ -352,7 +353,7 @@ async fn foreground_bash_never_claims_equal_directory_or_symlink_is_unchanged() 
     symlink("target", working_dir.join("link")).expect("symlink");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
-        sandbox_root: Some(working_dir.clone()),
+        filesystem_access: FilesystemAccess::scoped(working_dir.clone()),
         db_path: Some(state_dir.join("mitsuro.db")),
         ..Default::default()
     };
@@ -377,7 +378,7 @@ async fn truncated_output_keeps_recoverable_full_log() {
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
         session_id: Some("test-session".to_string()),
-        sandbox_root: Some(working_dir.clone()),
+        filesystem_access: FilesystemAccess::scoped(working_dir.clone()),
         ..Default::default()
     };
     let command = "i=1; while [ $i -le 5000 ]; do printf 'line-%s\\n' \"$i\"; i=$((i+1)); done";

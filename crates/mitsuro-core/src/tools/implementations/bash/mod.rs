@@ -409,7 +409,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             None => tracing::info!(command = %params.command, "Executing bash command"),
         }
 
-        if let Some(ref sandbox) = ctx.sandbox_root {
+        if let Some(sandbox) = ctx.filesystem_access.scoped_root().cloned() {
             let canonical = match ctx.working_dir.canonicalize() {
                 Ok(c) => c,
                 Err(_) => {
@@ -529,7 +529,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
         let state_delta_probe = state_delta::BashStateDeltaProbe::capture(
             &params.command,
             &ctx.working_dir,
-            ctx.sandbox_root.as_deref(),
+            ctx.scoped_root().map(|root| root.as_path()),
         )
         .await;
 

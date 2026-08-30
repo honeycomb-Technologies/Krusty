@@ -152,7 +152,7 @@ Don't create documentation files unless explicitly requested."#,
                     .with_changed(changed)
                     .with_progress_change_paths(
                         std::slice::from_ref(&path),
-                        ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                        ctx.file_resolution_root(),
                     )
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),

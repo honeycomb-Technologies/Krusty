@@ -136,7 +136,6 @@ mod tests {
         assert_eq!(ctx.permission_mode, PermissionMode::Autonomous);
         assert_eq!(ctx.subagent_max_turns, Some(17));
         assert_eq!(ctx.delegation_policy, Some(policy));
-        assert_eq!(ctx.sandbox_root, None);
         assert!(matches!(
             ctx.filesystem_access,
             crate::tools::registry::FilesystemAccess::Unrestricted
@@ -158,7 +157,7 @@ mod tests {
         let ctx = build_subagent_tool_context(&task, 45);
 
         assert_eq!(ctx.working_dir, working_dir);
-        assert_eq!(ctx.sandbox_root, Some(sandbox_root));
+        assert_eq!(ctx.scoped_root(), Some(&sandbox_root));
     }
 
     #[test]
@@ -196,7 +195,6 @@ mod tests {
         let ctx = build_subagent_tool_context(&task, 30);
 
         assert_eq!(ctx.working_dir, working_dir);
-        assert_eq!(ctx.sandbox_root, None);
         assert!(matches!(
             ctx.filesystem_access,
             crate::tools::registry::FilesystemAccess::Unrestricted

@@ -791,7 +791,7 @@ async fn test_parse_params_invalid_json() {
 fn test_sandboxed_resolve_new_path_rejects_traversal() {
     let ctx = ToolContext {
         working_dir: PathBuf::from("/sandbox/project"),
-        sandbox_root: Some(PathBuf::from("/sandbox")),
+        filesystem_access: FilesystemAccess::scoped("/sandbox"),
         ..Default::default()
     };
 
@@ -808,7 +808,7 @@ fn test_sandboxed_resolve_new_path_rejects_traversal() {
 fn test_sandboxed_resolve_new_path_allows_valid_paths() {
     let ctx = ToolContext {
         working_dir: PathBuf::from("/tmp"),
-        sandbox_root: Some(PathBuf::from("/tmp")),
+        filesystem_access: FilesystemAccess::scoped("/tmp"),
         ..Default::default()
     };
 
@@ -823,7 +823,6 @@ fn test_sandboxed_resolve_new_path_allows_valid_paths() {
 fn test_sandboxed_resolve_new_path_no_sandbox() {
     let ctx = ToolContext {
         working_dir: PathBuf::from("/home/user"),
-        sandbox_root: None,
         ..Default::default()
     };
 

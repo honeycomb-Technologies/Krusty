@@ -110,11 +110,8 @@ pub struct ToolContext {
     pub workspace_mode: WorkspaceMode,
     pub session_id: Option<String>,
     pub db_path: Option<std::path::PathBuf>,
-    /// Deprecated compatibility mirror for scoped filesystem access. New code
-    /// should use `filesystem_access`; resolver helpers still consult this field
-    /// while the legacy sandbox terminology is migrated.
-    pub sandbox_root: Option<PathBuf>,
-    /// Explicit runtime filesystem access policy.
+    /// Explicit runtime filesystem access policy. Scoped access roots are
+    /// resolved through `file_resolution_root`/`filesystem_access_root`.
     pub filesystem_access: FilesystemAccess,
     /// User ID for multi-tenant operation scoping (processes, etc.)
     pub user_id: Option<String>,
@@ -177,7 +174,6 @@ impl Default for ToolContext {
             workspace_mode: WorkspaceMode::Neutral,
             session_id: None,
             db_path: None,
-            sandbox_root: None,
             filesystem_access: FilesystemAccess::Unrestricted,
             user_id: None,
             process_registry: None,
@@ -242,42 +238,43 @@ impl ToolContext {
 
     /// Set an explicit filesystem access policy.
     pub fn with_filesystem_access(mut self, access: FilesystemAccess) -> Self {
-        self.sandbox_root = access.scoped_root().cloned();
         self.filesystem_access = access;
         self
     }
 
     /// Clear any scoped filesystem boundary.
     pub fn with_unrestricted_filesystem_access(mut self) -> Self {
-        self.sandbox_root = None;
         self.filesystem_access = FilesystemAccess::Unrestricted;
         self
     }
 
     /// Set a scoped filesystem access root for host-level isolation.
     pub fn with_sandbox(mut self, sandbox_root: PathBuf) -> Self {
-        self.sandbox_root = Some(sandbox_root.clone());
         self.filesystem_access = FilesystemAccess::scoped(sandbox_root);
         self
     }
 
-    /// Effective filesystem access policy, including legacy `sandbox_root`
-    /// struct-literal compatibility while call sites migrate.
+    /// Effective filesystem access policy.
     pub fn filesystem_access(&self) -> FilesystemAccess {
-        if let Some(root) = self.sandbox_root.clone() {
-            FilesystemAccess::Scoped { root }
-        } else if let Some(root) = self.filesystem_access.scoped_root() {
-            FilesystemAccess::Scoped { root: root.clone() }
-        } else {
-            FilesystemAccess::Unrestricted
-        }
+        self.filesystem_access.clone()
+    }
+
+    /// The scoped access root when one is configured.
+    pub fn scoped_root(&self) -> Option<&PathBuf> {
+        self.filesystem_access.scoped_root()
+    }
+
+    /// Root for file-path resolution: the scoped access root when present,
+    /// otherwise the working directory.
+    pub fn file_resolution_root(&self) -> &std::path::Path {
+        self.filesystem_access
+            .scoped_root()
+            .map(|root| root.as_path())
+            .unwrap_or(self.working_dir.as_path())
     }
 
     pub fn filesystem_access_root(&self) -> Option<PathBuf> {
-        match self.filesystem_access() {
-            FilesystemAccess::Unrestricted => None,
-            FilesystemAccess::Scoped { root } => Some(root),
-        }
+        self.scoped_root().cloned()
     }
 
     /// Set user ID for multi-tenant operation scoping.

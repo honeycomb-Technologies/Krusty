@@ -171,10 +171,7 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             None,
         )
         .with_changed(true)
-        .with_progress_change_paths(
-            &progress_paths,
-            ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
-        )
+        .with_progress_change_paths(&progress_paths, ctx.file_resolution_root())
     }
 }
 

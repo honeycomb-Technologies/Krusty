@@ -16,7 +16,8 @@ use crate::skills::SkillsManager;
 use crate::storage::{Database, DelegatedRunRole, DelegatedRunStore, WorkMode, WorkspaceMode};
 use crate::tools::registry::{
     agent_call_execution_profile, agent_call_may_start_run, agent_call_starts_run,
-    FileObservationTracker, PermissionMode, ToolContext, ToolRegistry, ToolResult,
+    FileObservationTracker, FilesystemAccess, PermissionMode, ToolContext, ToolRegistry,
+    ToolResult,
 };
 
 use super::super::loop_events::LoopEvent;
@@ -97,7 +98,7 @@ pub(super) async fn execute_regular_tool(
         process_registry: Some(process_registry.clone()),
         plan_mode: work_mode == WorkMode::Plan,
         user_id: user_id.map(ToString::to_string),
-        sandbox_root: Some(working_dir.to_path_buf()),
+        filesystem_access: FilesystemAccess::scoped(working_dir.to_path_buf()),
         ..Default::default()
     }
     .with_permission_mode(permission_mode)
