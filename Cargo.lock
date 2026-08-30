@@ -5747,7 +5747,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5821,7 +5821,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-client"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5836,7 +5836,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-client-state"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "mitsuro-client",
  "serde",
@@ -5845,7 +5845,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5914,7 +5914,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-desktop-backend"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5931,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-gpui-desktop"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5953,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-hive"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5975,7 +5975,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-hive-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hmac",
  "libc",
@@ -5991,7 +5991,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-server"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "async-trait",

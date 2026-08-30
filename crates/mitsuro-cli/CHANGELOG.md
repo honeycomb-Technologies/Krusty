@@ -1,5 +1,15 @@
 # mitsuro
 
+## 0.10.1 — 2026-08-30
+
+### Fixed
+
+- [0038dd4c](https://github.com/honeycomb-Technologies/Mitsuro/commit/0038dd4cd4b2fe397999d96c2df66822f49784f2) Restores Windows release packaging by keeping Unix-only Hive socket identity discovery behind its platform boundary. — Thanks @BurgessTG!
+
+### Patch changes
+
+- Updated dependencies: mitsuro-core@0.10.1, mitsuro-server@0.10.1
+
 ## 0.10.0 — 2026-08-29
 
 ### Added
