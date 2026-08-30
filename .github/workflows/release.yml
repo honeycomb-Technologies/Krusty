@@ -68,16 +68,25 @@ jobs:
 
           tag_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/$tag" --jq .sha)
           main_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
-          comparison=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag}...main")
-          base_commit=$(jq -r .base_commit.sha <<<"$comparison")
-          head_commit=$(jq -r .head_commit.sha <<<"$comparison")
-          merge_base=$(jq -r .merge_base_commit.sha <<<"$comparison")
 
           if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ || ! "$main_commit" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Release authority returned a malformed commit identity." >&2
             exit 1
           fi
-          if [[ "$base_commit" != "$tag_commit" || "$merge_base" != "$tag_commit" || "$head_commit" != "$main_commit" ]]; then
+
+          comparison=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${main_commit}")
+          comparison_status=$(jq -er .status <<<"$comparison")
+          base_commit=$(jq -er .base_commit.sha <<<"$comparison")
+          merge_base=$(jq -er .merge_base_commit.sha <<<"$comparison")
+
+          case "$comparison_status" in
+            ahead|identical) ;;
+            *)
+              echo "Release tag $tag is not contained in protected main." >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$base_commit" != "$tag_commit" || "$merge_base" != "$tag_commit" ]]; then
             echo "Release tag $tag is not contained in protected main." >&2
             exit 1
           fi
