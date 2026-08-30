@@ -34,8 +34,7 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
-const LOOP_GUARD_LANDING_FALLBACK: &str =
-    "The delegated loop stopped after repeated work without enough new semantic progress.";
+const LOOP_GUARD_LANDING_FALLBACK: &str = crate::agent::loop_kernel::LANDING_FALLBACK_PARENT_AGENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvidenceCompletionDecision {
@@ -101,8 +100,9 @@ fn enforce_canonical_evidence(mut result: SubAgentResult) -> SubAgentResult {
 }
 
 fn loop_guard_landing_instruction(diagnostic: &str) -> String {
-    format!(
-        "[LOOP GUARD LANDING]\n{diagnostic}\n\nThis is the one bounded synthesis turn. No tools are available. Using only evidence already gathered, return a concise report to the parent with established findings, paths or changes, unresolved gaps, and the materially different direction needed to continue. Do not request or describe another tool call."
+    crate::agent::loop_kernel::loop_guard_landing_instruction(
+        diagnostic,
+        crate::agent::loop_kernel::LandingAudience::ParentAgent,
     )
 }
 
@@ -164,11 +164,7 @@ fn delegated_evidence_kind(
 }
 
 fn tool_call_requires_completion_shield(tool_name: &str, input: &serde_json::Value) -> bool {
-    let (effective_name, effective_input) = effective_tool_call(tool_name, input);
-    matches!(
-        tool_policy_for_call(effective_name, effective_input).category,
-        ToolCategory::Write
-    ) && effective_name != "bash"
+    crate::agent::loop_kernel::tool_call_requires_completion_shield(tool_name, input)
 }
 
 fn append_parent_messages(messages: &mut Vec<ModelMessage>, parent_messages: Vec<String>) {

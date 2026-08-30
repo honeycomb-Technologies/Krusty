@@ -32,7 +32,6 @@ use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ai::client::{AiClient, CallOptions};
-use crate::ai::retry::is_retryable_error_message;
 use crate::ai::transport_policy::StreamTransportPolicy;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::constants;
@@ -91,7 +90,7 @@ const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
     "Unable to safely pause for user input because the continuation policy could not be persisted.";
 const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
 const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
-const LOOP_GUARD_LANDING_FALLBACK: &str = "I stopped this run after the loop guard detected repeated work without enough new evidence. The evidence gathered so far remains available; a new instruction can steer a different approach.";
+const LOOP_GUARD_LANDING_FALLBACK: &str = super::loop_kernel::LANDING_FALLBACK_USER;
 
 #[derive(Debug, Clone)]
 struct LoopGuardLanding {
@@ -114,9 +113,9 @@ fn provider_options_for_turn(options: &CallOptions, landing: bool) -> CallOption
 }
 
 fn loop_guard_landing_instruction(landing: &LoopGuardLanding) -> String {
-    format!(
-        "[LOOP GUARD LANDING]\n{}\n\nThis is the one bounded synthesis turn. No tools are available. Give the user a concise evidence-based answer, identify any unresolved blocker, and state what new direction would be needed to continue. Do not request or describe another tool call.",
-        landing.diagnostic
+    super::loop_kernel::loop_guard_landing_instruction(
+        &landing.diagnostic,
+        super::loop_kernel::LandingAudience::User,
     )
 }
 
@@ -528,7 +527,7 @@ fn fail_required_recovery_persistence(
 
 fn should_retry_empty_stream_interruption(
     stop_reason: Option<&LoopStopReason>,
-    last_error: Option<&str>,
+    last_failure: Option<&stream::StreamFailure>,
     produced_output: bool,
     retry_attempted: bool,
 ) -> bool {
@@ -538,9 +537,126 @@ fn should_retry_empty_stream_interruption(
 
     match stop_reason {
         Some(LoopStopReason::StreamIdleTimeout) => true,
-        Some(LoopStopReason::ProviderError) => last_error.is_some_and(is_retryable_error_message),
+        Some(LoopStopReason::ProviderError) => {
+            matches!(
+                last_failure,
+                Some(stream::StreamFailure::RetryableTransport(_))
+            )
+        }
         _ => false,
     }
+}
+
+/// Terminal loop exit shared by every stop path that clears recovery state:
+/// clear, record the terminal agent state, and emit the single canonical
+/// `Finished` event.
+fn finish_run(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    terminal_state: &str,
+    stop_reason: LoopStopReason,
+) {
+    clear_recovery_state(db_path, session_id);
+    set_agent_state(db_path, session_id, terminal_state);
+    let _ = event_tx.send(LoopEvent::Finished {
+        session_id: session_id.to_string(),
+        stop_reason,
+    });
+}
+
+/// Continue the loop after accepted steering: recovery cleared, streaming
+/// state recorded, and the turn boundary emitted before the steering events.
+fn emit_steering_turn_boundary(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    iteration: usize,
+    injected_steering: Vec<InjectedSteering>,
+) {
+    clear_recovery_state(db_path, session_id);
+    set_agent_state(db_path, session_id, "streaming");
+    let _ = event_tx.send(LoopEvent::TurnComplete {
+        turn: iteration,
+        has_more: true,
+    });
+    emit_steering_events(event_tx, injected_steering);
+}
+
+/// Fresh per-turn recovery state at a steering boundary: a new user directive
+/// re-arms every one-shot retry budget and clears any pending landing turn.
+#[allow(clippy::too_many_arguments)]
+fn reset_recovery_flags(
+    loop_guard: &mut LoopGuard,
+    active_goal_at_start: bool,
+    loop_guard_landing: &mut Option<LoopGuardLanding>,
+    delegation_nudge_tracker: &mut DelegationNudgeTracker,
+    empty_stream_retry_attempted: &mut bool,
+    empty_completion_retry_attempted: &mut bool,
+    empty_completion_recovery_pending: &mut bool,
+    provider_tool_activity_seen: &mut bool,
+    overflow_compact_retry_attempted: &mut bool,
+) {
+    *loop_guard_landing = None;
+    delegation_nudge_tracker.reset_for_steering();
+    *empty_stream_retry_attempted = false;
+    *empty_completion_retry_attempted = false;
+    *empty_completion_recovery_pending = false;
+    *provider_tool_activity_seen = false;
+    *overflow_compact_retry_attempted = false;
+    if !active_goal_at_start {
+        loop_guard.reset_for_steering();
+    }
+}
+
+/// Compact once in place and adopt the result for an immediate retry.
+/// Returns the compaction error when compaction failed; the caller owns the
+/// terminal path.
+#[allow(clippy::too_many_arguments)]
+async fn compact_and_retry_once(
+    db_path: &Path,
+    session_id: &str,
+    conversation: &mut Vec<ModelMessage>,
+    context_ledger: &mut ContextLedger,
+    working_dir: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    ai_client: &AiClient,
+    compaction_manager: &CompactionManager,
+    trigger: CompactionTrigger,
+    last_usage_prompt_tokens: &mut Option<usize>,
+    messages_at_last_usage: &mut usize,
+    last_token_count: &mut usize,
+    request_budget: Option<CompactionRequestBudget>,
+    provider_call_trace: &super::ProviderCallTraceContext,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+) -> Result<(), anyhow::Error> {
+    let messages_after_usage = conversation.len().saturating_sub(*messages_at_last_usage);
+    let result = apply_in_place_compaction(
+        db_path,
+        session_id,
+        conversation,
+        context_ledger,
+        working_dir,
+        project_dir,
+        user_id,
+        ai_client,
+        compaction_manager,
+        trigger,
+        *last_usage_prompt_tokens,
+        messages_after_usage,
+        request_budget,
+        provider_call_trace,
+        event_tx,
+    )
+    .await?;
+    *last_usage_prompt_tokens = None;
+    *messages_at_last_usage = conversation.len();
+    *last_token_count = result.estimated_tokens_after;
+    update_token_count(db_path, session_id, result.estimated_tokens_after);
+    clear_recovery_state(db_path, session_id);
+    set_agent_state(db_path, session_id, "streaming");
+    Ok(())
 }
 
 /// Configuration for an orchestrator run.
@@ -884,12 +1000,13 @@ impl AgenticOrchestrator {
         loop {
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             }
             let injected_steering = inject_pending_steering(
@@ -901,16 +1018,17 @@ impl AgenticOrchestrator {
             );
             if !injected_steering.is_empty() {
                 emit_steering_events(&event_tx, injected_steering);
-                loop_guard_landing = None;
-                delegation_nudge_tracker.reset_for_steering();
-                empty_stream_retry_attempted = false;
-                empty_completion_retry_attempted = false;
-                empty_completion_recovery_pending = false;
-                provider_tool_activity_seen = false;
-                overflow_compact_retry_attempted = false;
-                if !active_goal_at_start {
-                    loop_guard.reset_for_steering();
-                }
+                reset_recovery_flags(
+                    &mut loop_guard,
+                    active_goal_at_start,
+                    &mut loop_guard_landing,
+                    &mut delegation_nudge_tracker,
+                    &mut empty_stream_retry_attempted,
+                    &mut empty_completion_retry_attempted,
+                    &mut empty_completion_recovery_pending,
+                    &mut provider_tool_activity_seen,
+                    &mut overflow_compact_retry_attempted,
+                );
             }
 
             if loop_guard_landing.is_none() && run_budget.budget.is_exhausted(iteration) {
@@ -924,12 +1042,13 @@ impl AgenticOrchestrator {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
                 pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::BudgetExhausted,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::BudgetExhausted,
+                );
                 return;
             }
             // Soft pressure for unlimited interactive runs only. Goal/project
@@ -1070,9 +1189,7 @@ impl AgenticOrchestrator {
             );
 
             if compaction_manager.should_compact(estimated_tokens_before) {
-                let messages_after_usage =
-                    conversation.len().saturating_sub(messages_at_last_usage);
-                match apply_in_place_compaction(
+                if let Err(error) = compact_and_retry_once(
                     &db_path,
                     &session_id,
                     &mut conversation,
@@ -1083,70 +1200,61 @@ impl AgenticOrchestrator {
                     ai_client.as_ref(),
                     &compaction_manager,
                     CompactionTrigger::Auto,
-                    last_usage_prompt_tokens,
-                    messages_after_usage,
+                    &mut last_usage_prompt_tokens,
+                    &mut messages_at_last_usage,
+                    &mut last_token_count,
                     Some(compaction_request_budget),
                     &provider_call_trace,
                     &event_tx,
                 )
                 .await
                 {
-                    Ok(result) => {
-                        last_usage_prompt_tokens = None;
-                        messages_at_last_usage = conversation.len();
-                        last_token_count = result.estimated_tokens_after;
-                        update_token_count(&db_path, &session_id, result.estimated_tokens_after);
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "streaming");
-                        continue;
-                    }
-                    Err(error) => {
-                        if !stale_compaction_reload_attempted
-                            && is_stale_compaction_snapshot_error(&error)
-                        {
-                            match reload_persisted_conversation(&db_path, &session_id) {
-                                Ok(reloaded) if !reloaded.is_empty() => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        message_count = reloaded.len(),
-                                        %error,
-                                        "Reloaded canonical transcript after compaction snapshot race"
-                                    );
-                                    conversation = reloaded;
-                                    context_ledger.update_from_conversation(&conversation);
-                                    persist_context_state(&db_path, &session_id, &context_ledger);
-                                    last_usage_prompt_tokens = None;
-                                    messages_at_last_usage = conversation.len();
-                                    last_microcompact_history_message_count = conversation.len();
-                                    stale_compaction_reload_attempted = true;
-                                    continue;
-                                }
-                                Ok(_) => {}
-                                Err(reload_error) => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        %reload_error,
-                                        "Failed to reload canonical transcript after compaction snapshot race"
-                                    );
-                                }
+                    if !stale_compaction_reload_attempted
+                        && is_stale_compaction_snapshot_error(&error)
+                    {
+                        match reload_persisted_conversation(&db_path, &session_id) {
+                            Ok(reloaded) if !reloaded.is_empty() => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    message_count = reloaded.len(),
+                                    %error,
+                                    "Reloaded canonical transcript after compaction snapshot race"
+                                );
+                                conversation = reloaded;
+                                context_ledger.update_from_conversation(&conversation);
+                                persist_context_state(&db_path, &session_id, &context_ledger);
+                                last_usage_prompt_tokens = None;
+                                messages_at_last_usage = conversation.len();
+                                last_microcompact_history_message_count = conversation.len();
+                                stale_compaction_reload_attempted = true;
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(reload_error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    %reload_error,
+                                    "Failed to reload canonical transcript after compaction snapshot race"
+                                );
                             }
                         }
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: format!("Automatic compaction failed: {}", error),
-                        });
-                        if last_token_count > 0 {
-                            update_token_count(&db_path, &session_id, last_token_count);
-                        }
-                        finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
-                        pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "error");
-                        let _ = event_tx.send(LoopEvent::Finished {
-                            session_id: session_id.clone(),
-                            stop_reason: LoopStopReason::PinchFailed,
-                        });
-                        return;
                     }
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!("Automatic compaction failed: {}", error),
+                    });
+                    if last_token_count > 0 {
+                        update_token_count(&db_path, &session_id, last_token_count);
+                    }
+                    finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
+                    pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
+                    finish_run(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "error",
+                        LoopStopReason::PinchFailed,
+                    );
+                    return;
                 }
             }
 
@@ -1201,12 +1309,13 @@ impl AgenticOrchestrator {
                     None,
                     provider_call_started.elapsed(),
                 ));
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             };
 
@@ -1254,9 +1363,7 @@ impl AgenticOrchestrator {
                             session_id = %session_id,
                             "Provider rejected request for context overflow; compacting and retrying once"
                         );
-                        let messages_after_usage =
-                            conversation.len().saturating_sub(messages_at_last_usage);
-                        match apply_in_place_compaction(
+                        match compact_and_retry_once(
                             &db_path,
                             &session_id,
                             &mut conversation,
@@ -1267,27 +1374,16 @@ impl AgenticOrchestrator {
                             ai_client.as_ref(),
                             &compaction_manager,
                             CompactionTrigger::Overflow,
-                            last_usage_prompt_tokens,
-                            messages_after_usage,
+                            &mut last_usage_prompt_tokens,
+                            &mut messages_at_last_usage,
+                            &mut last_token_count,
                             Some(compaction_request_budget),
                             &provider_call_trace,
                             &event_tx,
                         )
                         .await
                         {
-                            Ok(result) => {
-                                last_usage_prompt_tokens = None;
-                                messages_at_last_usage = conversation.len();
-                                last_token_count = result.estimated_tokens_after;
-                                update_token_count(
-                                    &db_path,
-                                    &session_id,
-                                    result.estimated_tokens_after,
-                                );
-                                clear_recovery_state(&db_path, &session_id);
-                                set_agent_state(&db_path, &session_id, "streaming");
-                                continue;
-                            }
+                            Ok(()) => continue,
                             Err(compaction_error) => {
                                 tracing::error!(
                                     session_id = %session_id,
@@ -1365,12 +1461,13 @@ impl AgenticOrchestrator {
                     None,
                     provider_call_started.elapsed(),
                 ));
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             };
 
@@ -1406,7 +1503,7 @@ impl AgenticOrchestrator {
                 && goal_token_stop.is_none()
                 && should_retry_empty_stream_interruption(
                     result.stop_reason.as_ref(),
-                    result.last_error.as_deref(),
+                    result.last_error.as_ref(),
                     result.produced_output,
                     empty_stream_retry_attempted,
                 )
@@ -1429,19 +1526,16 @@ impl AgenticOrchestrator {
             if let Some(stop_reason) = effective_stop_reason {
                 if !overflow_compact_retry_attempted
                     && stop_reason == LoopStopReason::ProviderError
-                    && result
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|error| is_context_overflow_error(error))
+                    && result.last_error.as_ref().is_some_and(|failure| {
+                        matches!(failure, stream::StreamFailure::ContextOverflow(_))
+                    })
                 {
                     overflow_compact_retry_attempted = true;
                     tracing::warn!(
                         session_id = %session_id,
                         "Provider stream reported context overflow; compacting and retrying once"
                     );
-                    let messages_after_usage =
-                        conversation.len().saturating_sub(messages_at_last_usage);
-                    match apply_in_place_compaction(
+                    match compact_and_retry_once(
                         &db_path,
                         &session_id,
                         &mut conversation,
@@ -1452,27 +1546,16 @@ impl AgenticOrchestrator {
                         ai_client.as_ref(),
                         &compaction_manager,
                         CompactionTrigger::Overflow,
-                        last_usage_prompt_tokens,
-                        messages_after_usage,
+                        &mut last_usage_prompt_tokens,
+                        &mut messages_at_last_usage,
+                        &mut last_token_count,
                         Some(compaction_request_budget),
                         &provider_call_trace,
                         &event_tx,
                     )
                     .await
                     {
-                        Ok(result) => {
-                            last_usage_prompt_tokens = None;
-                            messages_at_last_usage = conversation.len();
-                            last_token_count = result.estimated_tokens_after;
-                            update_token_count(
-                                &db_path,
-                                &session_id,
-                                result.estimated_tokens_after,
-                            );
-                            clear_recovery_state(&db_path, &session_id);
-                            set_agent_state(&db_path, &session_id, "streaming");
-                            continue;
-                        }
+                        Ok(()) => continue,
                         Err(compaction_error) => {
                             tracing::error!(
                                 session_id = %session_id,
@@ -1489,14 +1572,18 @@ impl AgenticOrchestrator {
                         &context_ledger,
                         RecoveryStatus::Interrupted,
                         Some(stop_reason.clone()),
-                        result.last_error.clone(),
+                        result
+                            .last_error
+                            .as_ref()
+                            .map(|failure| failure.message().to_string()),
                         build_partial_assistant_state(&result.recovery_checkpoint),
                     ),
                 );
                 persist_context_state(&db_path, &session_id, &context_ledger);
                 let terminal_error = result
                     .last_error
-                    .clone()
+                    .as_ref()
+                    .map(|failure| failure.message().to_string())
                     .unwrap_or_else(|| continuation_recovery_message(&context_ledger));
                 let _ = event_tx.send(LoopEvent::Error {
                     error: terminal_error,
@@ -1605,12 +1692,13 @@ impl AgenticOrchestrator {
 
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             }
 
@@ -1629,23 +1717,24 @@ impl AgenticOrchestrator {
                     &session_id,
                 );
                 if !injected_steering.is_empty() {
-                    loop_guard_landing = None;
-                    delegation_nudge_tracker.reset_for_steering();
-                    empty_stream_retry_attempted = false;
-                    empty_completion_retry_attempted = false;
-                    empty_completion_recovery_pending = false;
-                    provider_tool_activity_seen = false;
-                    overflow_compact_retry_attempted = false;
-                    if !active_goal_at_start {
-                        loop_guard.reset_for_steering();
-                    }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "streaming");
-                    let _ = event_tx.send(LoopEvent::TurnComplete {
-                        turn: iteration,
-                        has_more: true,
-                    });
-                    emit_steering_events(&event_tx, injected_steering);
+                    reset_recovery_flags(
+                        &mut loop_guard,
+                        active_goal_at_start,
+                        &mut loop_guard_landing,
+                        &mut delegation_nudge_tracker,
+                        &mut empty_stream_retry_attempted,
+                        &mut empty_completion_retry_attempted,
+                        &mut empty_completion_recovery_pending,
+                        &mut provider_tool_activity_seen,
+                        &mut overflow_compact_retry_attempted,
+                    );
+                    emit_steering_turn_boundary(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        iteration,
+                        injected_steering,
+                    );
                     continue;
                 }
 
@@ -1684,20 +1773,21 @@ impl AgenticOrchestrator {
                         "validation_converged_before_goal_verification"
                     },
                 );
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: if landing.block_goal {
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    if landing.block_goal {
                         LoopStopReason::LoopGuardTriggered
                     } else {
                         LoopStopReason::Completed
                     },
-                });
+                );
                 return;
             }
 
@@ -1711,23 +1801,24 @@ impl AgenticOrchestrator {
                     &session_id,
                 );
                 if no_tool_completion_should_continue(&injected_steering) {
-                    loop_guard_landing = None;
-                    delegation_nudge_tracker.reset_for_steering();
-                    empty_stream_retry_attempted = false;
-                    empty_completion_retry_attempted = false;
-                    empty_completion_recovery_pending = false;
-                    provider_tool_activity_seen = false;
-                    overflow_compact_retry_attempted = false;
-                    if !active_goal_at_start {
-                        loop_guard.reset_for_steering();
-                    }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "streaming");
-                    let _ = event_tx.send(LoopEvent::TurnComplete {
-                        turn: iteration,
-                        has_more: true,
-                    });
-                    emit_steering_events(&event_tx, injected_steering);
+                    reset_recovery_flags(
+                        &mut loop_guard,
+                        active_goal_at_start,
+                        &mut loop_guard_landing,
+                        &mut delegation_nudge_tracker,
+                        &mut empty_stream_retry_attempted,
+                        &mut empty_completion_retry_attempted,
+                        &mut empty_completion_recovery_pending,
+                        &mut provider_tool_activity_seen,
+                        &mut overflow_compact_retry_attempted,
+                    );
+                    emit_steering_turn_boundary(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        iteration,
+                        injected_steering,
+                    );
                     continue;
                 }
             }
@@ -1747,8 +1838,6 @@ impl AgenticOrchestrator {
                     &session_id,
                     "model_completion_before_goal_verification",
                 );
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 if let Some((_, reason)) = &goal_token_stop {
                     let _ = event_tx.send(LoopEvent::Error {
                         error: format!(
@@ -1759,14 +1848,17 @@ impl AgenticOrchestrator {
                         ),
                     });
                 }
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: if goal_token_stop.is_some() {
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    if goal_token_stop.is_some() {
                         LoopStopReason::BudgetExhausted
                     } else {
                         LoopStopReason::Completed
                     },
-                });
+                );
                 return;
             }
 
@@ -1869,12 +1961,13 @@ impl AgenticOrchestrator {
 
                 input_inbox.collect_ready();
                 if input_inbox.take_cancel() {
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "idle");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::UserAbort,
-                    });
+                    finish_run(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "idle",
+                        LoopStopReason::UserAbort,
+                    );
                     return;
                 }
                 let injected_steering = inject_pending_steering(
@@ -1996,12 +2089,13 @@ impl AgenticOrchestrator {
                     content: tool_results,
                 };
                 save_message(&db_path, &session_id, &tool_msg);
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             }
 
@@ -2159,15 +2253,17 @@ impl AgenticOrchestrator {
                 context_ledger.update_from_conversation(&conversation);
                 persist_context_state(&db_path, &session_id, &context_ledger);
                 save_message(&db_path, &session_id, &assistant_msg);
-                set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::Completed,
+                );
                 return;
             }
 
@@ -2184,30 +2280,34 @@ impl AgenticOrchestrator {
                     let _ = event_tx.send(LoopEvent::Error {
                         error: format!("Goal attempt stopped: {reason}"),
                     });
-                    set_agent_state(&db_path, &session_id, "idle");
                     let _ = event_tx.send(LoopEvent::TurnComplete {
                         turn: iteration,
                         has_more: false,
                     });
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: if status == GoalStatus::Blocked {
+                    finish_run(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "idle",
+                        if status == GoalStatus::Blocked {
                             LoopStopReason::LoopGuardTriggered
                         } else {
                             LoopStopReason::BudgetExhausted
                         },
-                    });
+                    );
                     return;
                 }
             }
 
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             }
             let injected_steering = inject_pending_steering(
@@ -2218,22 +2318,24 @@ impl AgenticOrchestrator {
                 &session_id,
             );
             if !injected_steering.is_empty() {
-                loop_guard_landing = None;
-                delegation_nudge_tracker.reset_for_steering();
-                empty_stream_retry_attempted = false;
-                empty_completion_retry_attempted = false;
-                empty_completion_recovery_pending = false;
-                provider_tool_activity_seen = false;
-                overflow_compact_retry_attempted = false;
-                if !active_goal_at_start {
-                    loop_guard.reset_for_steering();
-                }
-                set_agent_state(&db_path, &session_id, "streaming");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: true,
-                });
-                emit_steering_events(&event_tx, injected_steering);
+                reset_recovery_flags(
+                    &mut loop_guard,
+                    active_goal_at_start,
+                    &mut loop_guard_landing,
+                    &mut delegation_nudge_tracker,
+                    &mut empty_stream_retry_attempted,
+                    &mut empty_completion_retry_attempted,
+                    &mut empty_completion_recovery_pending,
+                    &mut provider_tool_activity_seen,
+                    &mut overflow_compact_retry_attempted,
+                );
+                emit_steering_turn_boundary(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    iteration,
+                    injected_steering,
+                );
                 continue;
             }
 
@@ -2287,16 +2389,17 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
+                finish_run(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::Completed,
+                );
                 return;
             }
 
@@ -3313,25 +3416,33 @@ mod tests {
         ));
         assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 429 Too Many Requests - capacity"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "API error: 429 Too Many Requests - capacity".to_string()
+            )),
             false,
             false
         ));
         assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("AI stream ended without a finish signal"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "AI stream ended without a finish signal".to_string()
+            )),
             false,
             false
         ));
         assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 402 Payment Required - limit reached"),
+            Some(&super::stream::StreamFailure::Terminal(
+                "API error: 402 Payment Required - limit reached".to_string()
+            )),
             false,
             false
         ));
         assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 503 Service Unavailable"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "API error: 503 Service Unavailable".to_string()
+            )),
             true,
             false
         ));

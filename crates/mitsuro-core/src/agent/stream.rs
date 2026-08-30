@@ -9,13 +9,43 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::ai::retry::is_retryable_error_message;
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiToolCall, FinishReason, Usage};
 use serde_json::Value;
 
+use super::compaction::is_context_overflow_error;
 use super::loop_events::{LoopEvent, LoopStopReason};
 
 const RECOVERY_CHECKPOINT_CHAR_INTERVAL: usize = 256;
+
+/// Typed classification of the stream failure that terminated a turn.
+///
+/// Classification happens once, at the point of receipt, so the orchestrator
+/// never re-parses provider error prose downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StreamFailure {
+    /// Provider reported the request exceeded the model context window; the
+    /// sanctioned recovery is one in-place compaction and retry.
+    ContextOverflow(String),
+    /// Transport-level failure that a fresh attempt may survive.
+    RetryableTransport(String),
+    /// Terminal failure; the same request is not retried automatically.
+    Terminal(String),
+    /// No data arrived within the configured idle timeout.
+    IdleTimeout(String),
+}
+
+impl StreamFailure {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::ContextOverflow(message)
+            | Self::RetryableTransport(message)
+            | Self::Terminal(message)
+            | Self::IdleTimeout(message) => message,
+        }
+    }
+}
 
 /// Accumulated thinking block from the AI response.
 pub(crate) struct ThinkingBlock {
@@ -43,7 +73,8 @@ pub(crate) struct StreamResult {
     pub thinking_blocks: Vec<ThinkingBlock>,
     pub tool_calls: Vec<AiToolCall>,
     pub recovery_checkpoint: StreamCheckpoint,
-    pub last_error: Option<String>,
+    /// Typed failure classification; `None` when the stream completed cleanly.
+    pub last_error: Option<StreamFailure>,
     /// Logical input plus output for durable session accounting.
     pub total_tokens: usize,
     /// Logical input including uncached, cache-write, and cache-read buckets.
@@ -100,17 +131,20 @@ pub(crate) async fn process_stream(
             Ok(Some(part)) => part,
             Ok(None) if received_finish => break,
             Ok(None) => {
-                let error = "AI stream ended without a finish signal".to_string();
-                last_error = Some(error);
+                // This exact wording is a recognized retryable transport
+                // marker; a fresh attempt may receive a well-formed stream.
+                last_error = Some(StreamFailure::RetryableTransport(
+                    "AI stream ended without a finish signal".to_string(),
+                ));
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
             Err(_) if received_finish => break,
             Err(_) => {
-                last_error = Some(format!(
+                last_error = Some(StreamFailure::IdleTimeout(format!(
                     "AI stream timeout: no data received for {} seconds",
                     idle_timeout.as_secs()
-                ));
+                )));
                 stop_reason = Some(LoopStopReason::StreamIdleTimeout);
                 break;
             }
@@ -245,32 +279,34 @@ pub(crate) async fn process_stream(
                     .count();
                 match reason {
                     FinishReason::Stop | FinishReason::ToolCalls if incomplete_tool_calls > 0 => {
-                        let error = format!(
+                        last_error = Some(StreamFailure::Terminal(format!(
                             "AI response ended with {incomplete_tool_calls} incomplete tool call(s); none were executed"
-                        );
-                        last_error = Some(error);
+                        )));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ToolCalls if tool_calls.is_empty() => {
-                        let error = "AI provider reported tool calls but supplied no complete calls; none were executed".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI provider reported tool calls but supplied no complete calls; none were executed".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Stop | FinishReason::ToolCalls => {}
                     FinishReason::Length => {
-                        let error = "AI response reached its output-token limit; incomplete tool calls were not executed".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI response reached its output-token limit; incomplete tool calls were not executed".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ContentFilter => {
-                        let error =
-                            "AI response was blocked by the provider content filter".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI response was blocked by the provider content filter".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Other(reason) => {
-                        let error = format!("AI response ended unexpectedly: {reason}");
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(format!(
+                            "AI response ended unexpectedly: {reason}"
+                        )));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                 }
@@ -361,7 +397,13 @@ pub(crate) async fn process_stream(
                 });
             }
             StreamPart::Error { error } => {
-                last_error = Some(error.clone());
+                last_error = Some(if is_context_overflow_error(error) {
+                    StreamFailure::ContextOverflow(error.clone())
+                } else if is_retryable_error_message(error) {
+                    StreamFailure::RetryableTransport(error.clone())
+                } else {
+                    StreamFailure::Terminal(error.clone())
+                });
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
@@ -434,6 +476,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::process_stream;
+    use super::StreamFailure;
     use crate::agent::loop_events::{LoopEvent, LoopStopReason};
     use crate::ai::streaming::StreamPart;
     use crate::ai::types::Usage;
@@ -763,8 +806,8 @@ mod tests {
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert!(result
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("output-token limit")));
+            .as_ref()
+            .is_some_and(|failure| failure.message().contains("output-token limit")));
     }
 
     #[tokio::test]
@@ -790,8 +833,8 @@ mod tests {
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert!(result
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("incomplete tool call")));
+            .as_ref()
+            .is_some_and(|failure| failure.message().contains("incomplete tool call")));
     }
 
     #[tokio::test]
@@ -809,7 +852,7 @@ mod tests {
         let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert_eq!(
-            result.last_error.as_deref(),
+            result.last_error.as_ref().map(StreamFailure::message),
             Some("AI stream ended without a finish signal")
         );
         assert!(result.produced_output);

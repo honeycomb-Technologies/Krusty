@@ -44,6 +44,7 @@ pub mod history_policy;
 pub mod hooks;
 pub mod learning;
 pub mod loop_events;
+pub(crate) mod loop_kernel;
 mod observability;
 mod orchestrator;
 pub mod pinch_context;
