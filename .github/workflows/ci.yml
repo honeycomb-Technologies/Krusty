@@ -89,6 +89,18 @@ jobs:
           toolchain: stable
       - run: cargo check --workspace
 
+  windows-check:
+    name: Windows Check
+    needs: canonical-identity
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - run: cargo check --locked --target x86_64-pc-windows-msvc -p mitsuro
+
   rust-test:
     name: Rust Test
     needs: canonical-identity
