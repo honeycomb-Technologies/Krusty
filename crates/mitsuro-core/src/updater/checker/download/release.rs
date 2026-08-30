@@ -237,7 +237,7 @@ fn parse_published_sha256(body: &[u8], expected_archive_name: &str) -> Result<[u
     }
 
     let mut digest = [0_u8; 32];
-    for (index, pair) in hex_digest.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in hex_digest.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = decode_hex_nibble(pair[0])
             .ok_or_else(|| anyhow!("Release checksum digest is not valid hexadecimal"))?;
         let low = decode_hex_nibble(pair[1])

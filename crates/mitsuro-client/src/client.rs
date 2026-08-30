@@ -39,7 +39,7 @@ impl MitsuroClient {
     }
 
     fn build(base_url: String, bearer_token: Option<&str>) -> Result<Self> {
-        let base_url = normalize_base_url(base_url.into());
+        let base_url = normalize_base_url(base_url);
         let mut headers = HeaderMap::new();
         if let Some(token) = bearer_token {
             let token = token.trim();

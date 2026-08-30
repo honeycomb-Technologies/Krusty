@@ -434,11 +434,7 @@ pub fn profile_initials_from_name(name: &str) -> String {
 /// Accepts labels like `appearance`, `voice`, `pets`, `keyboard`, `usage`, etc.
 fn parse_settings_section() -> Option<SettingsSection> {
     let raw = std::env::var("MITSURO_SETTINGS_SECTION").ok()?;
-    let key = raw
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-")
-        .replace(' ', "-");
+    let key = raw.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     Some(match key.as_str() {
         "general" => SettingsSection::General,
         "linux" | "linux-desktop" => SettingsSection::LinuxDesktop,
@@ -666,7 +662,6 @@ pub enum UiConnection {
     Fixture,
     Connecting,
     Ready {
-        detail: String,
         /// True when account/read reports a non-null account.
         has_auth: bool,
     },
@@ -677,14 +672,6 @@ pub enum UiConnection {
 }
 
 impl UiConnection {
-    pub fn detail(&self) -> Option<&str> {
-        match self {
-            Self::Ready { detail, .. } => Some(detail.as_str()),
-            Self::Error { message } => Some(message.as_str()),
-            Self::Demo | Self::Fixture | Self::Connecting => None,
-        }
-    }
-
     pub fn chip_label(&self) -> &'static str {
         match self {
             // Keep offline backends out of "fixture"/"demo" primary chrome.
@@ -853,7 +840,6 @@ pub struct MitsuroApp {
     turn_cancel: Option<Arc<AtomicBool>>,
     /// When true, sidebar includes archived threads; default hides them.
     show_archived: bool,
-    samples_loaded: bool,
     /// Demo/sample threads loaded into sidebar Recents.
     /// Mode switcher dropdown (Chat / Codex) open state.
     mode_menu_open: bool,
@@ -1073,7 +1059,6 @@ impl MitsuroApp {
             selected_chat_thread: None,
             selected_codex_thread: None,
             status_line: SharedString::from(""),
-            samples_loaded: true,
             mode_menu_open: false,
             thread_menu_open: false,
             dismiss_voice_promo: false,
@@ -1408,19 +1393,9 @@ impl MitsuroApp {
     /// Composer placeholder: Chat home uses "Message…"; Codex home "Do anything".
     fn update_composer_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match self.active_mode {
-            ProductMode::Chat => {
-                if self.is_calm_stage() || self.is_empty_conversation() {
-                    "Message…"
-                } else {
-                    "Message…"
-                }
-            }
-            ProductMode::Codex => {
-                if self.is_calm_stage() || self.is_empty_conversation() {
-                    "Do anything"
-                } else {
-                    "Ask Mitsuro…"
-                }
+            ProductMode::Chat => "Message…",
+            ProductMode::Codex if self.is_calm_stage() || self.is_empty_conversation() => {
+                "Do anything"
             }
             _ => "Ask Mitsuro…",
         };
@@ -2078,12 +2053,12 @@ impl MitsuroApp {
                     // Soft-fallback to fixture mock so the panel stays usable offline-ish.
                     if let Some(fixture) = self.fixture.clone() {
                         let fix_for_connect = Arc::clone(&fixture);
-                        let _ = cx.background_executor().block(async move {
+                        cx.background_executor().block(async move {
                             if !fix_for_connect.status().is_usable() {
                                 let _ = fix_for_connect.connect().await;
                             }
                         });
-                        let fix_params = params.clone();
+                        let fix_params = params;
                         let fix_for_spawn = Arc::clone(&fixture);
                         let result = cx
                             .background_executor()
@@ -2129,7 +2104,7 @@ impl MitsuroApp {
 
         if let Some(fixture) = self.fixture.clone() {
             // Ensure fixture is connected.
-            let _ = cx.background_executor().block(async {
+            cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
                     let _ = fixture.connect().await;
                 }
@@ -2184,7 +2159,7 @@ impl MitsuroApp {
             return;
         }
         let payload = if text.ends_with('\n') {
-            text.clone()
+            text
         } else {
             format!("{text}\n")
         };
@@ -2365,16 +2340,6 @@ impl MitsuroApp {
         self.pr_list_dense
     }
 
-    pub fn set_pr_list_dense(&mut self, dense: bool, cx: &mut Context<Self>) {
-        self.pr_list_dense = dense;
-        self.status_line = if dense {
-            "Pull requests · full list".into()
-        } else {
-            "Pull requests · sparse".into()
-        };
-        cx.notify();
-    }
-
     pub fn sites_show_fixtures(&self) -> bool {
         self.sites_show_fixtures
     }
@@ -2508,18 +2473,9 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Catalog models currently shown in Settings / composer chip.
-    pub fn models(&self) -> &[ModelInfo] {
-        &self.models
-    }
-
     pub fn selected_model(&self) -> Option<&ModelInfo> {
         let id = self.selected_model_id.as_deref()?;
         self.models.iter().find(|m| m.id == id)
-    }
-
-    pub fn selected_model_id(&self) -> Option<&str> {
-        self.selected_model_id.as_deref()
     }
 
     /// Model slug for `TurnStartParams.model` (prefer `ModelInfo.model`, else id).
@@ -2541,10 +2497,6 @@ impl MitsuroApp {
     /// Skills loaded via `skills/list` (or fixture demo).
     pub fn skills(&self) -> &[SkillMetadata] {
         &self.skills
-    }
-
-    pub fn skills_enabled_count(&self) -> usize {
-        self.skills.iter().filter(|s| s.enabled).count()
     }
 
     /// Apply a `model/list` result and pick default when selection is missing.
@@ -3116,7 +3068,7 @@ impl MitsuroApp {
         self.browser.profile_label = label.clone().into();
         // Keep host status; discovery does not copy files.
         self.sync_browser_session();
-        self.browser.profile_label = label.clone().into();
+        self.browser.profile_label = label.into();
         self.status_line =
             format!("Import profile · found {n} · no files copied (paths only)").into();
         cx.notify();
@@ -3193,11 +3145,6 @@ impl MitsuroApp {
             } => "Signed out · no account (account/read)".into(),
             UiConnection::Error { message } => format!("Error · {message}").into(),
         }
-    }
-
-    /// Human-readable auth line for Settings (account/read when Ready).
-    pub fn auth_status_label(&self) -> SharedString {
-        self.account_status_label()
     }
 
     /// Apply account snapshot from protocol responses.
@@ -3549,20 +3496,6 @@ impl MitsuroApp {
         .detach();
     }
 
-    /// Connection detail line for Settings.
-    pub fn connection_status_label(&self) -> SharedString {
-        match &self.connection {
-            UiConnection::Demo => "Demo chrome".into(),
-            UiConnection::Fixture => "Fixture backend · sample-turn.jsonl · no paid API".into(),
-            UiConnection::Connecting => "Connecting to codex app-server…".into(),
-            UiConnection::Ready { detail, has_auth } => {
-                let auth = if *has_auth { "auth ok" } else { "no auth" };
-                format!("Ready · {detail} · {auth}").into()
-            }
-            UiConnection::Error { message } => format!("Error · {message}").into(),
-        }
-    }
-
     pub fn pending_approval(&self) -> Option<&PendingApproval> {
         self.pending_approval.as_ref()
     }
@@ -3597,7 +3530,7 @@ impl MitsuroApp {
 
         // Fallback live path (no bridge waiter): write JSON-RPC result directly.
         if let Some(backend) = self.backend.clone() {
-            let pending_live = pending.clone();
+            let pending_live = pending;
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -3690,38 +3623,6 @@ impl MitsuroApp {
         self.update_composer_placeholder(window, cx);
     }
 
-    /// Load offline sample threads into the sidebar (dev/review). Off by default for BAR first paint.
-    pub fn toggle_samples(&mut self, cx: &mut Context<Self>) {
-        if self.samples_loaded {
-            // Keep user-created threads; drop demo ids.
-            let demo_ids: std::collections::HashSet<_> = demo::demo_threads()
-                .into_iter()
-                .map(|t| t.summary.id)
-                .collect();
-            self.threads.retain(|t| !demo_ids.contains(&t.summary.id));
-            self.samples_loaded = false;
-            if self
-                .selected_thread
-                .as_ref()
-                .is_some_and(|id| demo_ids.contains(id))
-            {
-                self.selected_thread = None;
-            }
-        } else {
-            for t in demo::demo_threads() {
-                if !self.threads.iter().any(|x| x.summary.id == t.summary.id) {
-                    self.threads.push(t);
-                }
-            }
-            self.samples_loaded = true;
-        }
-        cx.notify();
-    }
-
-    pub fn samples_loaded(&self) -> bool {
-        self.samples_loaded
-    }
-
     pub fn mode_menu_open(&self) -> bool {
         self.mode_menu_open
     }
@@ -3753,13 +3654,6 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    pub fn close_thread_menu(&mut self, cx: &mut Context<Self>) {
-        if self.thread_menu_open {
-            self.thread_menu_open = false;
-            cx.notify();
-        }
-    }
-
     /// Switch Chat ↔ Codex from the sidebar mode pill (clears selection → home hero).
     pub fn switch_thread_surface(
         &mut self,
@@ -3786,11 +3680,6 @@ impl MitsuroApp {
 
     pub fn dismiss_voice_promo(&mut self, cx: &mut Context<Self>) {
         self.dismiss_voice_promo = true;
-        cx.notify();
-    }
-
-    pub fn dismiss_usage_card(&mut self, cx: &mut Context<Self>) {
-        self.dismiss_usage_card = true;
         cx.notify();
     }
 
@@ -3837,11 +3726,6 @@ impl MitsuroApp {
             .plan_label
             .as_ref()
             .map(|p| SharedString::from(p.clone()))
-    }
-
-    /// Initials for solid avatar chip (e.g. "JB" from Jacob Burgess).
-    pub fn profile_initials(&self) -> SharedString {
-        SharedString::from(profile_initials_from_name(&self.profile_display_name()))
     }
 
     /// Return to home (Codex/Chat) with no thread selected.
@@ -3982,22 +3866,6 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Whether the sidebar shows archived threads.
-    pub fn show_archived(&self) -> bool {
-        self.show_archived
-    }
-
-    /// Toggle show/hide archived threads in the sidebar.
-    pub fn toggle_show_archived(&mut self, cx: &mut Context<Self>) {
-        self.show_archived = !self.show_archived;
-        self.status_line = if self.show_archived {
-            "Showing archived threads.".into()
-        } else {
-            "Hiding archived threads.".into()
-        };
-        cx.notify();
-    }
-
     /// Whether a turn is currently streaming (Send blocked / Stop visible).
     pub fn turn_in_progress(&self) -> bool {
         self.turn_in_progress
@@ -4058,20 +3926,18 @@ impl MitsuroApp {
         }
         self.status_line = "thread/archive…".into();
         // Deselect if not showing archived
-        if !self.show_archived {
-            if self.selected_thread.as_deref() == Some(id.as_str()) {
-                self.selected_thread = self
-                    .threads
-                    .iter()
-                    .find(|t| !t.summary.archived.unwrap_or(false))
-                    .map(|t| t.summary.id.clone());
-            }
+        if !self.show_archived && self.selected_thread.as_deref() == Some(id.as_str()) {
+            self.selected_thread = self
+                .threads
+                .iter()
+                .find(|t| !t.summary.archived.unwrap_or(false))
+                .map(|t| t.summary.id.clone());
         }
 
         // Live app-server when Ready + real server id (mirror thread_name_set).
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
+                let tid = id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4131,7 +3997,7 @@ impl MitsuroApp {
 
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
+                let tid = id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4289,8 +4155,8 @@ impl MitsuroApp {
         // Live thread/fork when Ready + real source id.
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
-                let local_id = fork_id.clone();
+                let tid = id;
+                let local_id = fork_id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4316,7 +4182,7 @@ impl MitsuroApp {
                                     t.summary = summary.clone();
                                 }
                                 let forked_id = summary.id.clone();
-                                app.selected_thread = Some(summary.id.clone());
+                                app.selected_thread = Some(summary.id);
                                 app.status_line = "thread/fork · done".into();
                                 // Pull turns for the new server thread if still empty.
                                 if let Some(backend) = app.live_backend() {
@@ -4366,7 +4232,7 @@ impl MitsuroApp {
                             t.summary = summary.clone();
                             t.messages = messages;
                         }
-                        app.selected_thread = Some(summary.id.clone());
+                        app.selected_thread = Some(summary.id);
                         app.status_line = "thread/fork · fixture".into();
                     } else {
                         app.status_line = format!("thread/fork · local {local_id}").into();
@@ -4458,16 +4324,6 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Select a model by id (Settings list / chip).
-    pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.models.iter().any(|m| m.id == id) {
-            self.selected_model_id = Some(id);
-            let label = self.model_label();
-            self.status_line = format!("Model: {label}").into();
-            cx.notify();
-        }
-    }
-
     /// Cycle through catalog models (kept for keyboard / alternate pickers).
     #[allow(dead_code)]
     pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
@@ -4493,22 +4349,6 @@ impl MitsuroApp {
         self.open_settings(window, cx);
         let label = self.model_label();
         self.status_line = format!("Model picker · selected: {label}").into();
-        cx.notify();
-    }
-
-    /// Fill the composer with a suggestion chip prompt (empty-state affordance).
-    pub fn fill_composer(
-        &mut self,
-        input: &Entity<InputState>,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let owned = text.to_string();
-        input.update(cx, |state, cx| {
-            state.set_value(owned, window, cx);
-        });
-        self.status_line = "Prompt loaded into composer.".into();
         cx.notify();
     }
 
@@ -4837,7 +4677,7 @@ impl MitsuroApp {
         cx.spawn(async move |this, cx| {
             /// Messages from the progressive live-turn producer thread.
             enum LiveMsg {
-                Event(TurnStreamEvent),
+                Event(Box<TurnStreamEvent>),
                 Finished(Result<mitsuro_desktop_backend::LiveTurnOutcome, String>),
             }
 
@@ -4859,7 +4699,7 @@ impl MitsuroApp {
                     let forward_tx = msg_tx.clone();
                     let forwarder = std::thread::spawn(move || {
                         while let Ok(ev) = event_rx.recv() {
-                            if forward_tx.send(LiveMsg::Event(ev)).is_err() {
+                            if forward_tx.send(LiveMsg::Event(Box::new(ev))).is_err() {
                                 break;
                             }
                         }
@@ -4897,6 +4737,7 @@ impl MitsuroApp {
 
                 match next {
                     Ok(LiveMsg::Event(ev)) => {
+                        let ev = *ev;
                         let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
                         let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
                         let _ = this.update(cx, |app, cx| {
@@ -5544,10 +5385,7 @@ impl MitsuroApp {
                             has_auth,
                             models.len()
                         );
-                        app.connection = UiConnection::Ready {
-                            detail: format!("{} · {}", init.platform_os, init.user_agent),
-                            has_auth,
-                        };
+                        app.connection = UiConnection::Ready { has_auth };
                         if !remote.is_empty() {
                             app.threads = remote
                                 .into_iter()
@@ -5825,8 +5663,7 @@ impl MitsuroApp {
                             eprintln!(
                                 "[mitsuro] thread/read MISSING sidebar thread id={tid} n={n_in}"
                             );
-                            app.status_line =
-                                format!("thread/read · thread missing in sidebar").into();
+                            app.status_line = "thread/read · thread missing in sidebar".into();
                         }
                     }
                     Err(e) => {

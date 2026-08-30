@@ -367,7 +367,7 @@ fn plugins_body(
             mcp_marketplace(mcp).into_any_element()
         } else if filter == PluginsFilter::Personal {
             // Personal: brand installed only (no fixture chrome).
-            let personal: Vec<PluginSummary> = strip.iter().cloned().collect();
+            let personal: Vec<PluginSummary> = strip.to_vec();
             personal_catalog(&personal, cx).into_any_element()
         } else {
             // Public marketplace: Featured + categories
@@ -1909,7 +1909,7 @@ fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
                             div()
                                 .text_xs()
                                 .text_color(colors.text_tertiary)
-                                .child(format!("{scope}")),
+                                .child(scope),
                         ),
                 ),
         )

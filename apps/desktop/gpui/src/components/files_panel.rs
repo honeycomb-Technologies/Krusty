@@ -252,7 +252,7 @@ fn files_breadcrumb(cwd: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                 ),
         )
         .children(parts.into_iter().enumerate().map(|(i, part)| {
-            let label = part.clone();
+            let label = part;
             div()
                 .id(("files-crumb", i as u64))
                 .flex()
@@ -431,7 +431,7 @@ fn fuzzy_list(
                     let is_dir = matches!(r.match_type, FuzzyFileSearchMatchType::Directory);
                     let sel = selected == Some(path.as_str());
                     let subtitle = r.path.clone();
-                    let path_for_click = path.clone();
+                    let path_for_click = path;
                     entry_row_with_sub(
                         ("files-fuzzy", i),
                         name.as_str(),

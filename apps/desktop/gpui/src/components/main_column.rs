@@ -1254,15 +1254,13 @@ fn display_body_light(body: &str, streaming: bool) -> String {
         return "…".into();
     }
     let mut out = String::with_capacity(body.len().min(DISPLAY_BODY_CAP + 4));
-    let mut n = 0usize;
-    for c in body.chars() {
+    for (n, c) in body.chars().enumerate() {
         if n >= DISPLAY_BODY_CAP {
             out.push('…');
             break;
         }
         // Collapse line breaks → spaces so text layout stays flat (fewer line boxes).
         out.push(if c == '\n' || c == '\r' { ' ' } else { c });
-        n += 1;
     }
     if streaming {
         out.push('▍');

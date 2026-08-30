@@ -880,9 +880,7 @@ pub fn meta_line(summary: &ThreadSummary) -> String {
         parts.push(shorten_path(cwd));
     }
     if let Some(preview) = &summary.preview {
-        if summary.cwd.is_none() {
-            parts.push(preview.clone());
-        } else if !preview.is_empty() {
+        if summary.cwd.is_none() || !preview.is_empty() {
             parts.push(preview.clone());
         }
     }
