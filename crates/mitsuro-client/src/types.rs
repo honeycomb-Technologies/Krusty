@@ -868,23 +868,6 @@ pub enum ChatStreamEvent {
         reason: String,
         stage: u8,
     },
-    TeammateSpawned {
-        name: String,
-        role: String,
-    },
-    TeammateTaskCompleted {
-        name: String,
-        task_id: String,
-        result: String,
-    },
-    TeammateTaskFailed {
-        name: String,
-        task_id: String,
-        error: String,
-    },
-    TeammateCancelled {
-        name: String,
-    },
     Other {
         event_type: String,
         payload: Value,
@@ -1063,23 +1046,6 @@ impl ChatStreamEvent {
                 decision: string_field(&value, "decision"),
                 reason: string_field(&value, "reason"),
                 stage: usize_field(&value, "stage") as u8,
-            },
-            "teammate_spawned" => Self::TeammateSpawned {
-                name: string_field(&value, "name"),
-                role: string_field(&value, "role"),
-            },
-            "teammate_task_completed" => Self::TeammateTaskCompleted {
-                name: string_field(&value, "name"),
-                task_id: string_field(&value, "task_id"),
-                result: string_field(&value, "result"),
-            },
-            "teammate_task_failed" => Self::TeammateTaskFailed {
-                name: string_field(&value, "name"),
-                task_id: string_field(&value, "task_id"),
-                error: string_field(&value, "error"),
-            },
-            "teammate_cancelled" => Self::TeammateCancelled {
-                name: string_field(&value, "name"),
             },
             _ => Self::Other {
                 event_type,

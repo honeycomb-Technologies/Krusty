@@ -56,7 +56,6 @@ pub use types::{
 };
 
 // Re-export single agent entry points
-pub(crate) use execution::{execute_single_agent, AgentConfig};
 pub use execution::{execute_single_child, execute_single_explorer};
 
 // Internal execution functions

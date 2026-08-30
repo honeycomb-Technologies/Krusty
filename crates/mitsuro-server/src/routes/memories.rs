@@ -188,6 +188,7 @@ async fn get_memory_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use crate::routes::test_support::current_user;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -207,7 +208,6 @@ mod tests {
     use mitsuro_core::tools::registry::ToolRegistry;
 
     use super::{get_memory_snapshot, list_memories, GetMemorySnapshotQuery, ListMemoriesQuery};
-    use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::AppState;
 
@@ -252,13 +252,6 @@ mod tests {
             },
             temp_dir,
         )
-    }
-
-    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-        CurrentUser(AuthenticatedUser {
-            user_id: Some(user_id.to_string()),
-            home_dir: Some(home_dir.to_path_buf()),
-        })
     }
 
     fn seed_memory(

@@ -17,7 +17,7 @@ use crate::ai::client::AiClient;
 use crate::tools::registry::{DelegationPolicy, ToolRegistry};
 
 use self::config::BuilderConfig;
-pub(crate) use self::config::{AgentConfig, SingleChildConfig};
+pub(crate) use self::config::SingleChildConfig;
 pub(crate) use self::runtime::execute_agent_loop;
 
 use super::build_context::SharedBuildContext;
@@ -60,21 +60,6 @@ pub async fn execute_single_explorer(
         progress_tx,
     )
     .await
-}
-
-/// Execute any agent type via the standard agent loop.
-///
-/// This is the generic version. Specific helpers like `execute_single_explorer`
-/// construct their config internally and call this.
-pub(crate) async fn execute_single_agent<C: AgentConfig>(
-    client: &AiClient,
-    task: SubAgentTask,
-    config: C,
-    model: &str,
-    cancellation: CancellationToken,
-    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
-) -> SubAgentResult {
-    execute_agent_loop(client, &task, model, cancellation, &config, progress_tx).await
 }
 
 /// Execute a builder agent with progress reporting.

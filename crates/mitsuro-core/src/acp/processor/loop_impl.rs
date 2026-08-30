@@ -320,11 +320,7 @@ impl PromptProcessor {
                 | LoopEvent::WebFetchResult { .. }
                 | LoopEvent::AgentBackgroundStarted { .. }
                 | LoopEvent::AgentBackgroundCompleted { .. }
-                | LoopEvent::ClassifierDecision { .. }
-                | LoopEvent::TeammateSpawned { .. }
-                | LoopEvent::TeammateTaskCompleted { .. }
-                | LoopEvent::TeammateTaskFailed { .. }
-                | LoopEvent::TeammateCancelled { .. } => {}
+                | LoopEvent::ClassifierDecision { .. } => {}
             }
         }
 

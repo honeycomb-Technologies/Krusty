@@ -108,11 +108,6 @@ impl AiClient {
         })
     }
 
-    /// Alias for new() - backwards compatible
-    pub fn with_api_key(config: AiClientConfig, api_key: String) -> Self {
-        Self::new(config, api_key)
-    }
-
     /// Get the API key
     pub fn api_key(&self) -> &str {
         &self.api_key

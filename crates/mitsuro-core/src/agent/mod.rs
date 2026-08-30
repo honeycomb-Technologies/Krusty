@@ -6,8 +6,7 @@
 //! - `OrchestratorConfig` / `OrchestratorServices` - Configuration and dependencies
 //!
 //! ## Core Components
-//! - `AgentEventBus` - Central event dispatcher
-//! - `AgentState` - Turn tracking and execution state
+//! - `LoopEvent` / `LoopInput` - The single canonical event protocol
 //! - `AgentCancellation` - Proper task cancellation
 //!
 //! ## Hooks
@@ -33,15 +32,12 @@
 //! - `subagent::build_context` - Shared coordination for builder agents
 //! - Type registry, file locks, conventions
 
-pub mod agent_types;
 pub mod autonomy;
 pub mod cancellation;
 pub mod compaction;
 pub mod constants;
 pub mod context;
 pub mod context_ledger;
-pub mod event_bus;
-pub mod events;
 pub mod executor;
 pub mod failure;
 pub mod history_policy;
@@ -77,8 +73,6 @@ pub use compaction::{
 pub use context::{
     build_plan_context, build_project_context, build_skills_context, inject_context,
 };
-pub use event_bus::AgentEventBus;
-pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
 pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapshot};
 pub use observability::ProviderCallTraceContext;
@@ -89,7 +83,7 @@ pub use pinch_session::{
 };
 pub use progress::{ActionClass, ProgressGuardAction, ProgressGuardTelemetry, ProgressLedger};
 pub use run_spec::{RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError};
-pub use state::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
+pub use state::{AgentConfig, RunBudget, RunBudgetResolution, RunBudgetSource};
 pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};

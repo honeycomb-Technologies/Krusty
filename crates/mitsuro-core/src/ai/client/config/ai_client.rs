@@ -84,22 +84,6 @@ impl AiClientConfig {
         !self.uses_openai_format() && !self.uses_google_format()
     }
 
-    /// Create config for OpenAI with automatic auth type detection
-    ///
-    /// Detects whether OAuth token or API key is being used and routes to
-    /// the correct endpoint:
-    /// - OAuth (ChatGPT): chatgpt.com/backend-api/codex/v1/responses (Responses API)
-    /// - API Key: api.openai.com/v1/chat/completions (Chat Completions API)
-    pub fn for_openai_with_auth_detection(
-        model: &str,
-        credentials: &crate::storage::CredentialStore,
-    ) -> Self {
-        use crate::auth::resolve_openai_auth;
-
-        let auth_resolution = resolve_openai_auth(credentials, model);
-        Self::for_openai_with_auth_resolution(model, auth_resolution)
-    }
-
     /// Create an OpenAI config from a model-catalog-selected auth surface.
     ///
     /// Live API-key and ChatGPT catalogs can advertise the same slug with

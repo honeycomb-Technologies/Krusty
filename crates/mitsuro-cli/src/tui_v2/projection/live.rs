@@ -21,10 +21,7 @@ use crate::tui_v2::model::{
 };
 
 use super::{
-    tool_output::{
-        append_tool_delta, bound_text, finalize_tool_output, parse_tool_arguments,
-        parse_tool_output,
-    },
+    tool_output::{append_tool_delta, bound_text, finalize_tool_output, parse_tool_arguments},
     ConversationProjection,
 };
 
@@ -464,49 +461,6 @@ impl ConversationProjection {
                     },
                     expandable: None,
                 }));
-            }
-            LoopEvent::TeammateSpawned { name, role } => {
-                self.upsert_tool(
-                    &format!("teammate:{name}"),
-                    "agent",
-                    ToolStatus::Running,
-                    false,
-                )
-                .artifact = parse_tool_output("agent", &format!("{name} — {role}"), false);
-            }
-            LoopEvent::TeammateTaskCompleted {
-                name,
-                task_id,
-                result,
-            } => {
-                self.upsert_tool(
-                    &format!("teammate:{name}"),
-                    "agent",
-                    ToolStatus::Succeeded,
-                    false,
-                )
-                .artifact = parse_tool_output("agent", &format!("{task_id}: {result}"), false);
-            }
-            LoopEvent::TeammateTaskFailed {
-                name,
-                task_id,
-                error,
-            } => {
-                self.upsert_tool(
-                    &format!("teammate:{name}"),
-                    "agent",
-                    ToolStatus::Failed,
-                    false,
-                )
-                .artifact = parse_tool_output("agent", &format!("{task_id}: {error}"), false);
-            }
-            LoopEvent::TeammateCancelled { name } => {
-                self.upsert_tool(
-                    &format!("teammate:{name}"),
-                    "agent",
-                    ToolStatus::Interrupted,
-                    false,
-                );
             }
         }
     }
