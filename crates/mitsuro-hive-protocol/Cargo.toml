@@ -1,6 +1,6 @@
 [package]
 name = "mitsuro-hive-protocol"
-version = "0.2.0"
+version = "0.2.1"
 publish = false
 edition = "2021"
 description = "Private Unix IPC protocol shared by the Mitsuro server and Hive service"

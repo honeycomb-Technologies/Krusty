@@ -1,6 +1,6 @@
 [package]
 name = "mitsuro-desktop-backend"
-version = "0.10.0"
+version = "0.10.1"
 publish = false
 edition = "2021"
 license = "MIT"

@@ -1,5 +1,11 @@
 # mitsuro-hive
 
+## 0.2.1 — 2026-08-30
+
+### Patch changes
+
+- Updated dependencies: mitsuro-core@0.10.1, mitsuro-hive-protocol@0.2.1, mitsuro-server@0.10.1
+
 ## 0.2.0 — 2026-08-29
 
 ### Added
