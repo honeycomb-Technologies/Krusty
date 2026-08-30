@@ -1,4 +1,10 @@
 //! WebSocket terminal handler with PTY support.
+//!
+//! A terminal session necessarily runs with the server's OS privileges; that
+//! is the single-host self-host trust model (one server user, one credential
+//! store). Tenancy scoping therefore applies to registry accounting: the PTY
+//! is registered under the authenticated principal's process bucket so
+//! tenant-scoped process listing and termination cover it.
 
 use std::{
     sync::{
@@ -20,6 +26,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use crate::auth::CurrentUser;
 use crate::AppState;
 
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -37,8 +44,13 @@ enum ClientMessage {
     Ping,
 }
 
-pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+pub async fn handler(
+    ws: WebSocketUpgrade,
+    user: Option<CurrentUser>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let user_id = user.and_then(|current_user| current_user.0.user_id);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
 }
 
 async fn send_ws_error(sink: &mut futures::stream::SplitSink<WebSocket, Message>, msg: &str) {
@@ -55,7 +67,7 @@ fn clamp_terminal_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, user_id: Option<String>) {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let pty_system = native_pty_system();
 
@@ -82,17 +94,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let process_id = uuid::Uuid::new_v4().to_string();
-    if let Err(error) = state
-        .process_registry
-        .register_external(
-            process_id.clone(),
-            shell,
-            Some("Terminal session".to_string()),
-            child.process_id(),
-            (*state.working_dir).clone(),
-        )
-        .await
-    {
+    let registered = if let Some(user_id) = user_id.as_deref() {
+        state
+            .process_registry
+            .register_external_for_user(
+                user_id,
+                process_id.clone(),
+                shell,
+                Some("Terminal session".to_string()),
+                child.process_id(),
+                (*state.working_dir).clone(),
+            )
+            .await
+    } else {
+        state
+            .process_registry
+            .register_external(
+                process_id.clone(),
+                shell,
+                Some("Terminal session".to_string()),
+                child.process_id(),
+                (*state.working_dir).clone(),
+            )
+            .await
+    };
+    if let Err(error) = registered {
         tracing::warn!(%error, "Terminal process rejected by registry");
         send_ws_error(&mut ws_sink, &format!("Terminal unavailable: {error}")).await;
         return;

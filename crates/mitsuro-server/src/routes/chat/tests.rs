@@ -967,7 +967,7 @@ fn build_user_content_rejects_unsupported_image_media_type() {
 }
 
 #[tokio::test]
-async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
+async fn select_model_for_chat_request_rejects_non_vision_session_model() {
     let (state, _temp_dir) = create_test_state();
     {
         let mut credentials = state.credential_store.write().await;
@@ -1008,9 +1008,14 @@ async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
     )
     .await;
 
+    // Silent model substitution is a product rule violation: the request must
+    // fail explicitly instead of switching to another vision model.
     match selected {
-        Ok(selected) => assert_eq!(selected.as_deref(), Some("gpt-4.1")),
-        Err(_) => panic!("vision fallback should resolve"),
+        Ok(_) => panic!("non-vision session model must not be silently substituted"),
+        Err(AppError::BadRequest(detail)) => {
+            assert!(detail.contains("does not support image input"));
+        }
+        Err(other) => panic!("unexpected error: {other:?}"),
     }
 }
 

@@ -260,6 +260,13 @@ impl AppState {
     }
 
     /// Resolve a fresh AI client from an exact provider-aware model identity.
+    ///
+    /// `user_id` is accepted for signature parity with the legacy-slug path
+    /// but is intentionally unused here: an exact `ModelKey` needs no
+    /// per-user selection, and provider credentials are server-owned by
+    /// design (one self-hosted trust domain, one credential store). True
+    /// per-user credential partitioning is a product architecture decision,
+    /// not a route-level change.
     pub async fn resolve_ai_client_for_key_for_user(
         &self,
         key: &mitsuro_core::ai::models::ModelKey,

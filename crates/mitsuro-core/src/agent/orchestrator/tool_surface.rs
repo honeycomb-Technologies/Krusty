@@ -3,9 +3,7 @@ use std::collections::HashSet;
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::types::AiTool;
 use crate::storage::WorkMode;
-use crate::tools::registry::{
-    MutationToolSurface, PermissionMode, ToolRegistry, ToolRequestPolicy,
-};
+use crate::tools::registry::{PermissionMode, ToolRegistry};
 
 use super::super::run_spec::apply_execution_tool_allowlist;
 
@@ -54,18 +52,15 @@ impl ModeAwareToolSurface {
             return;
         };
 
-        let tools = ToolRequestPolicy::code(
+        let tools = crate::tools::registry::filter_code_tools_for_mode(
+            catalog.clone(),
             permission_mode,
-            work_mode == WorkMode::Plan,
+            work_mode,
             has_active_plan,
-            true,
             disabled_tools,
-        )
-        .with_mutation_surface(MutationToolSurface::for_model(
             ai_client.provider_id(),
             &ai_client.config().model,
-        ))
-        .filter(catalog.clone());
+        );
         options.tools = (!tools.is_empty()).then_some(tools);
         options.codex_parallel_tool_calls =
             self.parallel_tool_calls && options.tools.as_ref().is_some_and(|tools| tools.len() > 1);

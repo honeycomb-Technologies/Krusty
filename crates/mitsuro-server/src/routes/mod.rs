@@ -27,6 +27,7 @@ mod server;
 mod session_access;
 mod sessions;
 mod skills;
+mod sse;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod tools;

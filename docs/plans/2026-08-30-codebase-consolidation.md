@@ -108,8 +108,14 @@ API surface beyond the shared helpers.
    delivery timeout policy) and use it at all five bridge sites
    (`chat/stream.rs:658,577`, `chat/interactions.rs:631`, `hive/sessions.rs:512`,
    plus any remaining) — behavior-preserving on the live four.
-3. Kill the 92 per-request `Database::new` + migration sweeps: pooled/shared
-   `Arc<Database>` in `AppState`, or at minimum `OnceLock`-gate `run_migrations`.
+3. ~~Kill the 92 per-request `Database::new` + migration sweeps~~ — RESOLVED AS
+   NO-CHANGE: `run_migrations` already fast-paths to one versioned SELECT, and
+   the short-lived-connection model is deliberate (WAL arbitration sequences
+   concurrent access instead of a process-global mutex). A migration
+   verification gate was implemented and reverted: migration tests encode the
+   contract that a replaced database file at the same path must re-migrate,
+   and a global `Arc<Mutex<Database>>` would serialize parallel route
+   handlers. Migration safety first (AGENTS.md).
 4. Move duplicated derivations into core: `filter_code_tools_for_mode`
    (server `chat/tools.rs:188` → core wrapper next to `tool_surface.rs`),
    thinking-level normalization (`session.rs:894-951`), the model-override
