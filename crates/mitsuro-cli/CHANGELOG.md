@@ -1,5 +1,20 @@
 # mitsuro
 
+## 0.10.0 — 2026-08-29
+
+### Added
+
+- [bb513109](https://github.com/honeycomb-Technologies/Mitsuro/commit/bb51310970cdd409e4ec6c789dfeea3834ddeabd) Adds governed Hive Worker Introductions and Workflow Goals, and strengthens DM, Workbench, and Roundtable collaboration through Honey's versioned Hive daemon protocol and mobile controls. — Thanks @BurgessTG!
+- [bb513109](https://github.com/honeycomb-Technologies/Mitsuro/commit/bb51310970cdd409e4ec6c789dfeea3834ddeabd) Adds continuously moving native Liquid Glass Agent controls on iOS, aligns the gooey FAB, attachment, provider, and model-selection motion across mobile and web, hides developer diagnostics controls from production mobile settings, and frames user message bubbles. — Thanks @BurgessTG!
+
+### Fixed
+
+- [bb513109](https://github.com/honeycomb-Technologies/Mitsuro/commit/bb51310970cdd409e4ec6c789dfeea3834ddeabd) Honey finds the Atlas `agent-browser` sidecar shipped in the linux archive after install, safely adopts exact predecessor user-systemd units into managed release links, verifies downloaded repair archives before activation, and rejects malformed release tags before constructing download or dispatch targets. — Thanks @BurgessTG!
+
+### Patch changes
+
+- Updated dependencies: mitsuro-core@0.10.0, mitsuro-server@0.10.0
+
 ## 0.9.23 — 2026-08-17
 
 ### Added
