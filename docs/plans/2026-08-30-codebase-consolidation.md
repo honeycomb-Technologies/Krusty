@@ -39,13 +39,13 @@ Every item must be verified dead by ref-counting before deletion.
    Only exhaustive-match arms and serde mappings exist; no constructors.
 3. **Uncompiled `agent/autonomy/team/` directory** (~858 LOC) — outside the
    module tree; delete.
-4. **Legacy plan/verify delegation resume path**:
+4. ✅ **[DECISION TAKEN 2026-08-30: delete]** Legacy plan/verify delegation resume path:
    `tools/implementations/agent/single.rs:622-1267` (`execute_plan`,
    `execute_verify`, both `#[allow(dead_code)]`) and the entire
    `agent/agent_types.rs` (280 LOC, `PlanConfig`/`VerifyConfig`).
    **[DECISION]** Confirm no production DBs must resume planner/verifier-role
    runs before deleting; else time-box with an expiry note.
-5. **Dead pub APIs** (each verified zero-caller):
+5. ✅ **[DONE]** Dead pub APIs (each verified zero-caller):
    - `ai/models/registry.rs`: `has_models`, `try_get_model`, `mark_recent`,
      `try_get_organized_models`, `try_has_models`
    - `ai/models/metadata.rs`: `with_catalog_provenance`, `pricing_tier`,
@@ -54,8 +54,8 @@ Every item must be verified dead by ref-counting before deletion.
      `add_tool_result`, `add_system_context`
    - `skills/manager.rs`: `ensure_global_dir`, `unregister_origin`,
      `load_skill_content_for_user`, `get_skills_metadata`, `create_skill`,
-     `delete_skill`, `reload_skill` — **[DECISION]** if skill authoring via
-     UI is a planned feature, keep and wire instead
+     `delete_skill`, `reload_skill` — ✅ deleted (no UI authoring feature in
+     flight; re-add deliberately if that feature is approved)
    - `mcp/manager/runtime.rs`: `register_package_config_path`,
      `set_package_config_paths`, `cancel_oauth`, `get_client`;
      `mcp/client.rs` `is_alive`
@@ -121,12 +121,12 @@ API surface beyond the shared helpers.
    thinking-level normalization (`session.rs:894-951`), the model-override
    persistence block (4 copies).
 5. Split the 197-line `chat` handler into prepare/authorize/dispatch helpers.
-6. **[DECISION]** Multi-tenant hardening: thread `user_id` through
+6. ✅ **[DECISION TAKEN: harden all three]** Multi-tenant hardening: thread `user_id` through
    `resolve_ai_client_for_key_for_user` (`lib.rs:263-267`); resolve
    `/tools/execute` `PermissionMode::Autonomous` hardcode (`routes/tools.rs:71`)
    to the shared delegated-contract resolver; scope `/ws/terminal` PTY or
    document it as single-user self-host behavior explicitly.
-7. **[DECISION]** Silent vision-model substitution (`session.rs:578-592`):
+7. ✅ **[DECISION TAKEN: explicit error]** Silent vision-model substitution (`session.rs:578-592`):
    surface an explicit error/notice instead of proceeding on a model the user
    did not select.
 
@@ -135,7 +135,7 @@ pass unmodified or updated only where the shared bridge replaces copies.
 
 ## Phase 4 — Finish-or-revert migrations and compat expiry
 
-1. **[DECISION]** `ToolContext.sandbox_root` deprecated mirror
+1. ✅ **[DECISION TAKEN: finish migration]** `ToolContext.sandbox_root` deprecated mirror
    (`tools/registry/context.rs:113-118`, ~10 consumers with
    `unwrap_or(working_dir)`): finish the migration onto `filesystem_access`
    and delete the mirror, or revert. Choose one; no third state.
@@ -164,10 +164,15 @@ pass unmodified or updated only where the shared bridge replaces copies.
 
 ## Completion audit checklist
 
-- [ ] Phase 1 committed, gates green, zero references to deleted items
-- [ ] Phase 2 committed, gates green, loop tests pass unmodified
-- [ ] Phase 3 committed, gates green, route/SSE tests pass
-- [ ] Phase 4 decisions taken and implemented, gates green
-- [ ] All **[DECISION]** items resolved with explicit user sign-off recorded here
-- [ ] Final `cargo clippy --workspace -- -D warnings` + `cargo test --workspace`
-      green on the final commit
+- [x] Phase 1 committed, gates green, zero references to deleted items
+      (feae0a8c; verified by workspace-wide identifier grep 2026-08-30)
+- [x] Phase 2 committed, gates green, loop tests pass
+      (89883421; 568 agent tests + full suite green; only mechanical
+      field-accessor updates in stream/orchestrator tests, semantics kept)
+- [x] Phase 3 committed, gates green, route/SSE tests pass (72b076ef;
+      342 server tests)
+- [x] Phase 4 decisions taken and implemented, gates green (4815276c)
+- [x] All **[DECISION]** items resolved with explicit user sign-off recorded
+      in this file (2026-08-30)
+- [x] Final `cargo clippy --workspace -- -D warnings` + `cargo test --workspace`
+      green on the final commit (2,474 passed / 0 failed)
