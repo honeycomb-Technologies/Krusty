@@ -50,6 +50,7 @@ impl HiveAcceptanceServerConfig {
             &self.working_dir,
             &mitsuro_core::paths::config_dir().join("mitsuro.db"),
         )?;
+        #[cfg(unix)]
         reject_installed_hive_authority(
             &self.hive_socket_path,
             &production_hive_socket_path(),
@@ -256,6 +257,7 @@ fn production_hive_key_path() -> PathBuf {
         })
 }
 
+#[cfg(unix)]
 fn production_hive_socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("MITSURO_HIVE_SOCKET")
         .filter(|value| !value.is_empty())
