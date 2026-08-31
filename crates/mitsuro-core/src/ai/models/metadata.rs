@@ -275,6 +275,15 @@ impl ModelMetadata {
         self.api_format = api_format;
         self
     }
+    pub fn with_catalog_provenance(
+        mut self,
+        source: ModelCatalogSource,
+        revision: Option<String>,
+    ) -> Self {
+        self.catalog_source = source;
+        self.catalog_revision = revision;
+        self
+    }
 
     /// Freeze this mutable catalog row into a run-scoped capability snapshot.
     pub fn resolve_runtime(&self) -> ResolvedModelRuntime {

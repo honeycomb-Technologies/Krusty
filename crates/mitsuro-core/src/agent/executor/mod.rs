@@ -29,8 +29,8 @@ use crate::storage::{
     WorkspaceMode,
 };
 use crate::tools::registry::{
-    effective_tool_call, tool_policy_for_call, FileObservationTracker, PermissionMode,
-    ToolCategory, ToolContext, ToolRegistry, ToolResult,
+    tool_policy_for_call, FileObservationTracker, PermissionMode, ToolCategory, ToolContext,
+    ToolRegistry, ToolResult,
 };
 
 #[cfg(test)]
@@ -483,7 +483,7 @@ pub(crate) async fn execute_tools(
                     result = &mut execution => break Some(result),
                     cancelled = input_inbox.recv_cancel(), if !input_closed => {
                         match cancelled {
-                            Some(()) if tool_call_requires_completion_shield(call) => {
+                            Some(()) if crate::agent::loop_kernel::tool_call_requires_completion_shield(&call.name, &call.arguments) => {
                                 cancellation_requested = true;
                                 execution_cancellation.cancel();
                                 break Some(execution.as_mut().await);
@@ -542,20 +542,6 @@ pub(crate) async fn execute_tools(
         cancelled: false,
         yield_after_background_agent,
     }
-}
-
-/// Once a mutating operation has been dispatched, dropping its future is not
-/// proof that its side effects stopped. Signal the exact call's cancellation
-/// token and retain ownership until the registry's governed timeout or its
-/// producer-owned terminal result. Read-only calls remain immediately
-/// cancellable.
-fn tool_call_requires_completion_shield(call: &AiToolCall) -> bool {
-    let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
-    tool_policy_for_call(&call.name, &call.arguments).category == ToolCategory::Write
-        // Bash owns a process-group drop guard and kill-on-drop child, so
-        // dropping it is its bounded quiescence mechanism. Waiting here would
-        // regress an interrupt into the command's (potentially long) timeout.
-        && effective_name != "bash"
 }
 
 fn emit_workflow_update(
@@ -1964,12 +1950,42 @@ export default (mitsuro) => {
             arguments: json!({"agent_type": "verify", "prompt": "validate"}),
         };
 
-        assert!(tool_call_requires_completion_shield(&write));
-        assert!(tool_call_requires_completion_shield(&deferred_write));
-        assert!(tool_call_requires_completion_shield(&execute_agent));
-        assert!(tool_call_requires_completion_shield(&legacy_verify_agent));
-        assert!(!tool_call_requires_completion_shield(&read));
-        assert!(!tool_call_requires_completion_shield(&bash));
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &write.name,
+                &write.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &deferred_write.name,
+                &deferred_write.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &execute_agent.name,
+                &execute_agent.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &legacy_verify_agent.name,
+                &legacy_verify_agent.arguments
+            )
+        );
+        assert!(
+            !crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &read.name,
+                &read.arguments
+            )
+        );
+        assert!(
+            !crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &bash.name,
+                &bash.arguments
+            )
+        );
     }
 
     fn create_session_db() -> (TempDir, std::path::PathBuf, String) {
