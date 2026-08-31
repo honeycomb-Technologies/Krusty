@@ -685,10 +685,6 @@ impl ChatStore {
             | ChatStreamEvent::AgentBackgroundStarted { .. }
             | ChatStreamEvent::AgentBackgroundCompleted { .. }
             | ChatStreamEvent::ClassifierDecision { .. }
-            | ChatStreamEvent::TeammateSpawned { .. }
-            | ChatStreamEvent::TeammateTaskCompleted { .. }
-            | ChatStreamEvent::TeammateTaskFailed { .. }
-            | ChatStreamEvent::TeammateCancelled { .. }
             | ChatStreamEvent::Other { .. } => {}
         }
     }

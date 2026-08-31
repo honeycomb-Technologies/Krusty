@@ -11,9 +11,7 @@ pub mod registry;
 pub mod truncation;
 
 pub use git_identity::{GitIdentity, GitIdentityMode};
-pub use image::{
-    is_image_extension, is_supported_file, load_from_clipboard_rgba, load_from_path, load_from_url,
-};
+pub use image::{is_supported_file, load_from_clipboard_rgba, load_from_path, load_from_url};
 pub use implementations::{
     register_acp_tools, register_agent_tool, register_all_tools, register_hive_tools,
     AddSubtaskTool, AgentTool, ApplyPatchTool, AskUserQuestionTool, AutonomousTaskTool, BashTool,

@@ -38,8 +38,8 @@ use super::{
     prepare_chat_contract_for_test, run_delegated_progress_bridge, run_orchestrator_event_bridge,
     select_model_for_chat_request, setup_chat_session, steer, tool_approval, RequestedModel,
 };
-use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
+use crate::routes::test_support::current_user;
 use crate::types::{ChatRequest, ContentBlock, SteerRequest, ToolApprovalRequest};
 use crate::AppState;
 
@@ -94,13 +94,6 @@ fn create_test_user(state: &AppState, user_id: &str) {
             (user_id, format!("{user_id}@example.com"), "free"),
         )
         .expect("user should insert");
-}
-
-fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-    CurrentUser(AuthenticatedUser {
-        user_id: Some(user_id.to_string()),
-        home_dir: Some(home_dir.to_path_buf()),
-    })
 }
 
 fn test_delegated_progress(

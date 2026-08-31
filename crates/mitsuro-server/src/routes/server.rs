@@ -170,6 +170,7 @@ fn tailscale_status(port: u16) -> TailscaleAccessResponse {
 
 #[cfg(test)]
 mod tests {
+    use crate::routes::test_support::current_user;
     use std::collections::HashMap;
     use std::sync::{atomic::AtomicUsize, Arc};
 
@@ -189,7 +190,6 @@ mod tests {
     use mitsuro_core::SessionManager;
 
     use super::{get_server_access, get_server_status, update_server_access};
-    use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::presence::{PresenceCapability, SessionPresenceRecord};
     use crate::types::UpdateServerAccessRequest;
     use crate::AppState;
@@ -233,13 +233,6 @@ mod tests {
             },
             temp_dir,
         )
-    }
-
-    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-        CurrentUser(AuthenticatedUser {
-            user_id: Some(user_id.to_string()),
-            home_dir: Some(home_dir.to_path_buf()),
-        })
     }
 
     fn create_test_user(state: &AppState, user_id: &str) {

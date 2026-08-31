@@ -108,17 +108,6 @@ pub fn credentials_for_dynamic_models(
     credentials_for_dynamic_models_with_env(provider, credentials, env_credential)
 }
 
-/// Backwards-compatible single catalog identity for callers that only need to
-/// decide whether a refresh is possible.
-pub fn credential_for_dynamic_models(
-    provider: ProviderId,
-    credentials: &CredentialStore,
-) -> Option<CatalogCredential> {
-    credentials_for_dynamic_models(provider, credentials)
-        .into_iter()
-        .next()
-}
-
 fn credentials_for_dynamic_models_with_env(
     provider: ProviderId,
     credentials: &CredentialStore,

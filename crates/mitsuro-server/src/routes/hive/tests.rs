@@ -63,8 +63,8 @@ use super::workers::{
     skip_worker_introduction, update_worker, ConfirmWorkerIntroductionRequest, CreateWorkerRequest,
     HiveWorkerSessionBindingResponse, KeepTalkingWorkerIntroductionRequest, UpdateWorkerRequest,
 };
-use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
+use crate::routes::test_support::current_user;
 use crate::AppState;
 
 fn create_test_state() -> (AppState, PathBuf) {
@@ -127,13 +127,6 @@ fn create_test_user(state: &AppState, user_id: &str) {
     )
     .set_current_model("gpt-5.5")
     .expect("test model preference should persist");
-}
-
-fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-    CurrentUser(AuthenticatedUser {
-        user_id: Some(user_id.to_string()),
-        home_dir: Some(home_dir.to_path_buf()),
-    })
 }
 
 fn app_error_description(error: AppError) -> String {

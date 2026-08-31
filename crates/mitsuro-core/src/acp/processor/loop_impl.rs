@@ -442,11 +442,7 @@ impl PromptProcessor {
                 | LoopEvent::TitleGenerated { .. }
                 | LoopEvent::WebSearchResults { .. }
                 | LoopEvent::WebFetchResult { .. }
-                | LoopEvent::ClassifierDecision { .. }
-                | LoopEvent::TeammateSpawned { .. }
-                | LoopEvent::TeammateTaskCompleted { .. }
-                | LoopEvent::TeammateTaskFailed { .. }
-                | LoopEvent::TeammateCancelled { .. } => {}
+                | LoopEvent::ClassifierDecision { .. } => {}
             }
         }
 

@@ -38,7 +38,7 @@ use mitsuro_core::workflow::{
 use super::crud::{GetSessionQuery, ListSessionsQuery};
 use super::workflow::{execute_workflow_command, get_workflow, WorkflowCommand};
 use super::*;
-use crate::auth::{AuthenticatedUser, CurrentUser};
+use crate::routes::test_support::current_user;
 use crate::types::{
     CreateSessionRequest, PinchRequest, SessionPresenceHeartbeatRequest, UpdateSessionRequest,
 };
@@ -95,13 +95,6 @@ fn create_test_user(state: &AppState, user_id: &str) {
             (user_id, format!("{user_id}@example.com"), "free"),
         )
         .expect("user should insert");
-}
-
-fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-    CurrentUser(AuthenticatedUser {
-        user_id: Some(user_id.to_string()),
-        home_dir: Some(home_dir.to_path_buf()),
-    })
 }
 
 #[tokio::test]

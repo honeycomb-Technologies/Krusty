@@ -276,16 +276,6 @@ impl ModelMetadata {
         self
     }
 
-    pub fn with_catalog_provenance(
-        mut self,
-        source: ModelCatalogSource,
-        revision: Option<String>,
-    ) -> Self {
-        self.catalog_source = source;
-        self.catalog_revision = revision;
-        self
-    }
-
     /// Freeze this mutable catalog row into a run-scoped capability snapshot.
     pub fn resolve_runtime(&self) -> ResolvedModelRuntime {
         ResolvedModelRuntime {
@@ -353,28 +343,6 @@ impl ModelMetadata {
     pub fn with_fast_mode(mut self, fast_mode: FastMode) -> Self {
         self.fast_mode = Some(fast_mode);
         self
-    }
-
-    /// Get pricing tier indicator for UI
-    pub fn pricing_tier(&self) -> &'static str {
-        match self.input_price {
-            Some(p) if p < 0.5 => "¢",
-            Some(p) if p < 3.0 => "$",
-            Some(p) if p < 10.0 => "$$",
-            Some(_) => "$$$",
-            None => "",
-        }
-    }
-
-    /// Format context window for display (e.g., "200K", "1M")
-    pub fn context_display(&self) -> String {
-        if self.context_window >= 1_000_000 {
-            format!("{}M", self.context_window / 1_000_000)
-        } else if self.context_window >= 1_000 {
-            format!("{}K", self.context_window / 1_000)
-        } else {
-            format!("{}", self.context_window)
-        }
     }
 }
 

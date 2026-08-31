@@ -352,26 +352,6 @@ pub enum LoopEvent {
         reason: String,
         stage: u8,
     },
-
-    /// A teammate was spawned.
-    TeammateSpawned { name: String, role: String },
-
-    /// A teammate completed a task.
-    TeammateTaskCompleted {
-        name: String,
-        task_id: String,
-        result: String,
-    },
-
-    /// A teammate failed a task.
-    TeammateTaskFailed {
-        name: String,
-        task_id: String,
-        error: String,
-    },
-
-    /// A teammate was cancelled.
-    TeammateCancelled { name: String },
 }
 
 /// Simple plan task info for event transport.
