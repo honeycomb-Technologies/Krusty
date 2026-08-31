@@ -6,7 +6,6 @@ use tokio::sync::OwnedMutexGuard;
 use mitsuro_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use mitsuro_core::ai::client::{AiClient, CallOptions};
 use mitsuro_core::ai::models::{ModelKey, ModelLookupError, ModelMetadata, ProjectModelRef};
-use mitsuro_core::ai::providers::ProviderId;
 use mitsuro_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
 use mitsuro_core::plan::{has_active_workflow_or_plan, PlanManager};
 use mitsuro_core::storage::{
@@ -495,35 +494,6 @@ async fn optional_model_selection(
     }
 }
 
-async fn resolve_default_vision_model(state: &AppState) -> Option<ChatModelSelection> {
-    let providers_with_auth = {
-        let store = state.credential_store.read().await;
-        store.providers_with_auth()
-    };
-
-    let (recent_models, models_by_provider) = state
-        .model_registry
-        .get_organized_models(&providers_with_auth)
-        .await;
-
-    if let Some(model) = recent_models.iter().find(|model| model.supports_vision) {
-        return Some(ChatModelSelection::exact(model.clone()));
-    }
-
-    for provider in ProviderId::all() {
-        if !providers_with_auth.contains(provider) {
-            continue;
-        }
-        if let Some(models) = models_by_provider.get(provider) {
-            if let Some(model) = models.iter().find(|model| model.supports_vision) {
-                return Some(ChatModelSelection::exact(model.clone()));
-            }
-        }
-    }
-
-    None
-}
-
 async fn select_model_selection_for_chat_request(
     state: &AppState,
     requested_model: RequestedModel<'_>,
@@ -582,14 +552,18 @@ async fn select_model_selection_for_chat_request(
         return Ok(effective);
     }
 
-    resolve_default_vision_model(state)
-        .await
-        .map(Some)
-        .ok_or_else(|| {
-            AppError::BadRequest(
-                "No vision-capable model is configured. Configure OpenAI, Anthropic, or another vision model before sending images.".to_string(),
-            )
-        })
+    // Never silently substitute a different model to make the request
+    // succeed. Name the resolved model so the user can change it.
+    let detail = match effective.as_ref() {
+        Some(selection) => format!(
+            "The resolved model '{}' does not support image input. Select a vision-capable model before sending images.",
+            selection.model_id
+        ),
+        None => {
+            "No model is configured for this session. Select a vision-capable model before sending images.".to_string()
+        }
+    };
+    Err(AppError::BadRequest(detail))
 }
 
 #[cfg(test)]

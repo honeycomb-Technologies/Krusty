@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::HeaderMap,
-    response::sse::{Event, KeepAlive, Sse},
+    response::sse::{Event, Sse},
     Json,
 };
 use serde_json::json;
@@ -632,40 +632,11 @@ pub(super) fn resolve_pending_hive_run(
 }
 
 pub(super) fn hive_response_sse(
-    mut receiver: tokio::sync::broadcast::Receiver<AgenticEvent>,
+    receiver: tokio::sync::broadcast::Receiver<AgenticEvent>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel(32);
-    tokio::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let terminal = matches!(
-                        event,
-                        AgenticEvent::Finish { .. } | AgenticEvent::Error { .. }
-                    );
-                    let Ok(event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(event)).await.is_err() || terminal {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    let event = AgenticEvent::Lagged {
-                        skipped: usize::try_from(skipped).unwrap_or(usize::MAX),
-                    };
-                    let Ok(event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(event)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    crate::routes::sse::spawn_broadcast_sse_pump(receiver, tx, Vec::new(), true);
+    crate::routes::sse::sse_response(rx)
 }
 
 pub(super) fn hive_control_error(error: anyhow::Error) -> AppError {

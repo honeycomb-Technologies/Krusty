@@ -24,15 +24,13 @@ use mitsuro_core::SessionManager;
 use super::stream_notify::ChatStreamRunOutcome;
 use super::{ChatSessionContext, SSE_CHANNEL_BUFFER};
 use crate::error::AppError;
+use crate::routes::sse::{event_to_sse, SSE_KEEP_ALIVE_INTERVAL, SSE_REQUIRED_DELIVERY_TIMEOUT};
 use crate::types::{
     AgenticEvent, DelegatedAgentStateResponse, DelegatedRunStage, DelegatedToolStateResponse,
 };
 use crate::AppState;
 
-const SSE_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
-const SSE_REQUIRED_DELIVERY_TIMEOUT: Duration = Duration::from_millis(250);
 const DELEGATION_EVENT_LIVE_PAGE_LIMIT: usize = 128;
-
 // ── Orchestrator → SSE bridge ────────────────────────────────────────
 
 fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
@@ -55,10 +53,6 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
     )
 }
 
-fn event_to_sse(event: &AgenticEvent) -> Option<Event> {
-    Event::default().json_data(event).ok()
-}
-
 pub(super) async fn forward_loop_event(
     sse_tx: &mpsc::Sender<Result<Event, Infallible>>,
     session_id: &str,
@@ -66,60 +60,15 @@ pub(super) async fn forward_loop_event(
     skipped_events: &mut usize,
 ) -> bool {
     let requires_delivery = loop_event_requires_delivery(&loop_event);
-
-    if *skipped_events > 0 {
-        let lagged_event = AgenticEvent::Lagged {
-            skipped: *skipped_events,
-        };
-
-        if let Some(sse_event) = event_to_sse(&lagged_event) {
-            if requires_delivery {
-                if sse_tx.send(Ok(sse_event)).await.is_err() {
-                    return false;
-                }
-                *skipped_events = 0;
-            } else {
-                match sse_tx.try_send(Ok(sse_event)) {
-                    Ok(()) => *skipped_events = 0,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        *skipped_events = skipped_events.saturating_add(1);
-                        tracing::warn!(
-                            session_id,
-                            skipped = *skipped_events,
-                            "Dropping SSE event because client queue is full"
-                        );
-                        return true;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                }
-            }
-        } else {
-            *skipped_events = 0;
-        }
-    }
-
-    let agentic_event: AgenticEvent = loop_event.into();
-    let Some(sse_event) = event_to_sse(&agentic_event) else {
-        return true;
-    };
-
-    if requires_delivery {
-        sse_tx.send(Ok(sse_event)).await.is_ok()
-    } else {
-        match sse_tx.try_send(Ok(sse_event)) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                *skipped_events = skipped_events.saturating_add(1);
-                tracing::warn!(
-                    session_id,
-                    skipped = *skipped_events,
-                    "Dropping SSE event because client queue is full"
-                );
-                true
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
-        }
-    }
+    crate::routes::sse::forward_sse_event(
+        sse_tx,
+        session_id,
+        loop_event.into(),
+        requires_delivery,
+        skipped_events,
+        "Dropping SSE event because client queue is full",
+    )
+    .await
 }
 
 pub(super) async fn start_orchestrator_sse(
@@ -608,6 +557,8 @@ async fn forward_delegated_progress(
     event: DelegatedProgressEvent,
     skipped_events: &mut usize,
 ) -> bool {
+    // The gate is held across forwarding: delegated progress that acquires it
+    // first is delivered before a concurrent Finish closes the boundary.
     let sse_open = sse_open.lock().await;
     if !*sse_open {
         return false;
@@ -616,59 +567,16 @@ async fn forward_delegated_progress(
         return false;
     };
     let requires_delivery = delegated_stage_is_terminal(event.stage);
-
-    if *skipped_events > 0 {
-        let lagged_event = AgenticEvent::Lagged {
-            skipped: *skipped_events,
-        };
-        if let Some(sse_event) = event_to_sse(&lagged_event) {
-            if requires_delivery {
-                if !send_required_sse_event(&sse_tx, sse_event).await {
-                    return false;
-                }
-                *skipped_events = 0;
-            } else {
-                match sse_tx.try_send(Ok(sse_event)) {
-                    Ok(()) => *skipped_events = 0,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        *skipped_events = skipped_events.saturating_add(1);
-                        return true;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                }
-            }
-        }
-    }
-
-    let Some(sse_event) = event_to_sse(&AgenticEvent::delegated_progress(event)) else {
-        return true;
-    };
-    if requires_delivery {
-        return send_required_sse_event(&sse_tx, sse_event).await;
-    }
-    match sse_tx.try_send(Ok(sse_event)) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            *skipped_events = skipped_events.saturating_add(1);
-            tracing::warn!(
-                session_id,
-                skipped = *skipped_events,
-                "Dropping delegated SSE progress because client queue is full"
-            );
-            true
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
-    }
-}
-
-async fn send_required_sse_event(
-    sse_tx: &mpsc::Sender<Result<Event, Infallible>>,
-    event: Event,
-) -> bool {
-    matches!(
-        tokio::time::timeout(SSE_REQUIRED_DELIVERY_TIMEOUT, sse_tx.send(Ok(event))).await,
-        Ok(Ok(()))
+    let agentic_event = AgenticEvent::delegated_progress(event);
+    crate::routes::sse::forward_sse_event(
+        &sse_tx,
+        session_id,
+        agentic_event,
+        requires_delivery,
+        skipped_events,
+        "Dropping delegated SSE progress because client queue is full",
     )
+    .await
 }
 
 /// Forward a bounded page from the canonical append-only event stream.

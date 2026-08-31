@@ -11,7 +11,6 @@ use axum::{
 use serde::Serialize;
 
 use super::session_access::{request_workspace_scope, RequestWorkspaceScope};
-use mitsuro_core::agent::AgentConfig as RuntimeAgentConfig;
 use mitsuro_core::tools::registry::{FilesystemAccess, PermissionMode, ToolContext};
 
 use crate::auth::CurrentUser;
@@ -61,7 +60,14 @@ async fn execute_tool(
         .as_ref()
         .and_then(|current_user| current_user.0.user_id.as_deref());
 
-    // Create tool context
+    // Direct execution is an explicit operator surface: there is no session
+    // to inherit a permission mode from, so the endpoint's contract is
+    // autonomous execution inside the authenticated workspace scope (the
+    // classifier hook and registry policy still apply). Delegated turn
+    // budgets come from the shared project-settings contract, exactly as the
+    // orchestrated path resolves them.
+    let project_settings =
+        mitsuro_core::storage::ProjectSettings::load(workspace_scope.allowed_root.as_path());
     let ctx = ToolContext {
         working_dir,
         process_registry: Some(state.process_registry.clone()),
@@ -72,7 +78,7 @@ async fn execute_tool(
     .with_filesystem_access(FilesystemAccess::scoped(
         workspace_scope.allowed_root.clone(),
     ))
-    .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
+    .with_subagent_max_turns(project_settings.subagent_max_turns)
     .with_mcp_manager(state.mcp_manager.clone())
     .with_skills_manager(state.skills_manager.clone())
     .with_tool_registry(Arc::clone(&state.tool_registry));
