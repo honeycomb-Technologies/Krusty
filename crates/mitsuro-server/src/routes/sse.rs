@@ -30,7 +30,7 @@ pub(crate) type SseStream = Sse<ReceiverStream<SseItem>>;
 
 /// Wrap a receiver half into the standard SSE response with keep-alive.
 pub(crate) fn sse_response(rx: mpsc::Receiver<SseItem>) -> SseStream {
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL))
 }
 
 /// Serialize one event; serialization failures are dropped (malformed payloads
@@ -121,7 +121,7 @@ pub(crate) fn spawn_broadcast_sse_pump(
 ) {
     tokio::spawn(async move {
         for event in replay {
-            let Ok(sse_event) = Event::default().json_data(event) else {
+            let Some(sse_event) = event_to_sse(&event) else {
                 continue;
             };
             if tx.send(Ok(sse_event)).await.is_err() {
@@ -137,7 +137,7 @@ pub(crate) fn spawn_broadcast_sse_pump(
                             event,
                             AgenticEvent::Finish { .. } | AgenticEvent::Error { .. }
                         );
-                    let Ok(sse_event) = Event::default().json_data(event) else {
+                    let Some(sse_event) = event_to_sse(&event) else {
                         continue;
                     };
                     if tx.send(Ok(sse_event)).await.is_err() || terminal {
@@ -148,7 +148,7 @@ pub(crate) fn spawn_broadcast_sse_pump(
                     let event = AgenticEvent::Lagged {
                         skipped: usize::try_from(skipped).unwrap_or(usize::MAX),
                     };
-                    let Ok(sse_event) = Event::default().json_data(event) else {
+                    let Some(sse_event) = event_to_sse(&event) else {
                         continue;
                     };
                     if tx.send(Ok(sse_event)).await.is_err() {

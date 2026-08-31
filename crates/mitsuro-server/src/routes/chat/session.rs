@@ -114,6 +114,7 @@ impl<'a> RequestedModel<'a> {
 
 pub(super) struct PreparedChatRouteSession {
     pub(super) session_id: String,
+    pub(super) session_type: SessionType,
     pub(super) is_first_message: bool,
     pub(super) pending_model_update: Option<Option<String>>,
 }
@@ -165,6 +166,7 @@ pub(super) async fn prepare_chat_route_session(
             let messages = sm.load_session_messages(id)?;
             Ok(PreparedChatRouteSession {
                 session_id: id.to_string(),
+                session_type: session.session_type,
                 is_first_message: messages.is_empty(),
                 pending_model_update: (session.session_type != SessionType::Hive)
                     .then(|| {
@@ -290,6 +292,7 @@ pub(super) async fn prepare_chat_route_session(
 
             Ok(PreparedChatRouteSession {
                 session_id,
+                session_type: requested_session_type,
                 is_first_message: true,
                 pending_model_update: None,
             })

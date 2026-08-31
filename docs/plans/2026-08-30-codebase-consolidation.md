@@ -139,9 +139,19 @@ pass unmodified or updated only where the shared bridge replaces copies.
    (`tools/registry/context.rs:113-118`, ~10 consumers with
    `unwrap_or(working_dir)`): finish the migration onto `filesystem_access`
    and delete the mirror, or revert. Choose one; no third state.
-2. **[DECISION]** Legacy fallbacks to expire on a schedule:
-   `server/child_wake.rs:202` pre-migration pending-row reader;
-   `chat/interactions.rs:294` "High as legacy fallback" recovery shim.
+2. **[DECISION]** Legacy fallbacks to expire on a schedule (recorded 2026-08-30;
+   deletion requires confirming no live databases can still hold the legacy
+   shapes):
+   - `server/child_wake.rs` pre-migration pending-row reader
+     (`role LIKE 'pending_user:child-wake-%'`): expires once every deployed
+     server has run one migration cycle past schema 55 AND no upgrade path
+     from a pre-55 database is supported. Check at the next coordinated
+     release; cutover criteria = zero rows matched by the reader on any
+     observed production database for one release window.
+   - `chat/interactions.rs` "High as legacy fallback" thinking-level recovery
+     shim: expires when stored sessions created before persisted
+     thinking-preferences can no longer be resumed (same mixed-version
+     criteria). Both deletions are one-line removals plus test updates.
 3. Apply the simplify skill (code reuse / quality / efficiency review) to every
    phase diff before commit.
 

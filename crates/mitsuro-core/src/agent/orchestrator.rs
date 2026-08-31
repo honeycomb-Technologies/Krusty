@@ -914,7 +914,8 @@ fn should_retry_empty_stream_interruption(
 
 /// Terminal loop exit shared by every stop path that clears recovery state:
 /// clear, record the terminal agent state, and emit the single canonical
-/// `Finished` event.
+/// `Finished` event. Sites whose recovery state is already clear (for example
+/// after tool-result persistence) treat the clear as a no-op normalization.
 fn finish_run(
     db_path: &Path,
     session_id: &str,
@@ -3139,12 +3140,13 @@ impl AgenticOrchestrator {
                     .await;
                     all_results.extend(other_batch.results);
                     if other_batch.cancelled {
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "idle");
-                        let _ = event_tx.send(LoopEvent::Finished {
-                            session_id: session_id.clone(),
-                            stop_reason: LoopStopReason::UserAbort,
-                        });
+                        finish_run(
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "idle",
+                            LoopStopReason::UserAbort,
+                        );
                         return;
                     }
                 }

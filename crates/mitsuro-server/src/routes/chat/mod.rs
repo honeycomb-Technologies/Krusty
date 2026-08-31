@@ -145,12 +145,11 @@ async fn chat(
     )
     .await?;
     let session_id = prepared.session_id;
+    let session_type = prepared.session_type;
     let is_first_message = prepared.is_first_message;
     let pending_model_update = prepared.pending_model_update;
 
-    let session_manager = SessionManager::new(Database::new(&state.db_path)?);
-    let session = load_owned_session(&session_manager, &session_id, user.as_ref())?;
-    if session.session_type == SessionType::Hive {
+    if session_type == SessionType::Hive {
         return dispatch_hive_session_message(
             &state,
             state.db_path.as_ref().clone(),
